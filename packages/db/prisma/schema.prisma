@@ -1,0 +1,343 @@
+// Prisma schema mirrors docs/04-data-model.md
+// 数据库：Supabase (PostgreSQL 15+)
+// - DATABASE_URL  : 连接池地址（pgbouncer，runtime 用）
+// - DIRECT_URL    : 直连地址（迁移 / introspect 用）
+//
+// 1688 货源大表（source_products）若量级达到亿级，可后续按 category_l1 分区或迁到独立 Citus / 自建 PG 集群。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ----- 用户与店铺 -----
+
+enum UserPlan {
+  free
+  basic
+  pro
+  flagship
+  enterprise
+}
+
+enum UserStatus {
+  active
+  disabled
+}
+
+model User {
+  id            BigInt        @id @default(autoincrement())
+  phone         String?       @unique @db.VarChar(20)
+  wechatUnionid String?       @unique @map("wechat_unionid") @db.VarChar(64)
+  nickname      String?       @db.VarChar(64)
+  avatarUrl     String?       @map("avatar_url") @db.VarChar(512)
+  plan          UserPlan      @default(free)
+  status        UserStatus    @default(active)
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  shops         Shop[]
+  publishTasks  PublishTask[]
+  favorites     UserFavorite[]
+  aiUsageLogs   AiUsageLog[]
+  subscriptions Subscription[]
+
+  @@index([plan])
+  @@map("users")
+}
+
+enum Platform {
+  alibaba_1688
+  taobao
+  tmall
+  douyin
+  pdd
+  kuaishou
+  wechat_shop
+}
+
+enum ShopRole {
+  seller
+  buyer
+}
+
+enum ShopStatus {
+  active
+  expired
+  revoked
+}
+
+model Shop {
+  id              BigInt     @id @default(autoincrement())
+  userId          BigInt     @map("user_id")
+  platform        Platform
+  platformShopId  String     @map("platform_shop_id") @db.VarChar(64)
+  shopName        String?    @map("shop_name") @db.VarChar(128)
+  role            ShopRole   @default(seller)
+  accessTokenEnc  String?    @map("access_token_enc") @db.VarChar(1024)
+  refreshTokenEnc String?    @map("refresh_token_enc") @db.VarChar(1024)
+  tokenExpireAt   DateTime?  @map("token_expire_at")
+  status          ShopStatus @default(active)
+  createdAt       DateTime   @default(now()) @map("created_at")
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  publishedProducts PublishedProduct[]
+  orders            Order[]
+
+  @@unique([userId, platform, platformShopId], name: "uk_user_platform_shop")
+  @@index([userId])
+  @@map("shops")
+}
+
+// ----- 货源与选品 -----
+
+model SourceProduct {
+  id              BigInt   @id @default(autoincrement())
+  productId1688   String   @unique @map("product_id_1688") @db.VarChar(32)
+  supplierId      String?  @map("supplier_id") @db.VarChar(32)
+  title           String   @db.VarChar(255)
+  price           Decimal  @db.Decimal(10, 2)
+  priceMin        Decimal? @map("price_min") @db.Decimal(10, 2)
+  priceMax        Decimal? @map("price_max") @db.Decimal(10, 2)
+  mainImage       String?  @map("main_image") @db.VarChar(512)
+  detailImages    Json?    @map("detail_images") @db.JsonB
+  categoryPath    String?  @map("category_path") @db.VarChar(255)
+  categoryL1      String?  @map("category_l1") @db.VarChar(64)
+  categoryL2      String?  @map("category_l2") @db.VarChar(64)
+  skuList         Json?    @map("sku_list") @db.JsonB
+  attributes      Json?    @db.JsonB
+  monthlySold     Int      @default(0) @map("monthly_sold")
+  isCrossBorder   Boolean  @default(false) @map("is_cross_border")
+  isOnePieceDrop  Boolean  @default(false) @map("is_one_piece_drop")
+  syncedAt        DateTime @default(now()) @map("synced_at")
+
+  score            ProductScore?
+  publishTasks     PublishTask[]
+  publishedProducts PublishedProduct[]
+  favorites        UserFavorite[]
+
+  @@index([categoryL1])
+  @@index([syncedAt])
+  @@map("source_products")
+}
+
+model ProductScore {
+  productId         BigInt   @id @map("product_id")
+  demandScore       Float    @map("demand_score")
+  competitionScore  Float    @map("competition_score")
+  profitScore       Float    @map("profit_score")
+  complianceScore   Float    @map("compliance_score")
+  trendScore        Float    @map("trend_score")
+  overallScore      Float    @map("overall_score")
+  reason            Json     @db.JsonB
+  features          Json     @db.JsonB
+  scoredAt          DateTime @default(now()) @map("scored_at")
+
+  product           SourceProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([overallScore(sort: Desc)])
+  @@map("product_scores")
+}
+
+model UserFavorite {
+  id              BigInt   @id @default(autoincrement())
+  userId          BigInt   @map("user_id")
+  sourceProductId BigInt   @map("source_product_id")
+  folderName      String   @default("default") @map("folder_name") @db.VarChar(64)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct   SourceProduct  @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sourceProductId])
+  @@map("user_favorites")
+}
+
+// ----- 铺货 -----
+
+enum PublishTaskStatus {
+  pending
+  optimizing
+  publishing
+  partial
+  success
+  failed
+}
+
+model PublishTask {
+  id              BigInt            @id @default(autoincrement())
+  userId          BigInt            @map("user_id")
+  sourceProductId BigInt            @map("source_product_id")
+  targetShopIds   Json              @map("target_shop_ids") @db.JsonB
+  status          PublishTaskStatus @default(pending)
+  aiOptimized     Json?             @map("ai_optimized") @db.JsonB
+  pricingStrategy Json?             @map("pricing_strategy") @db.JsonB
+  errorMsg        String?           @map("error_msg") @db.Text
+  createdAt       DateTime          @default(now()) @map("created_at")
+  finishedAt      DateTime?         @map("finished_at")
+
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct    SourceProduct    @relation(fields: [sourceProductId], references: [id])
+  publishedProducts PublishedProduct[]
+
+  @@index([userId, status])
+  @@map("publish_tasks")
+}
+
+enum PublishedProductStatus {
+  online
+  offline
+  draft
+  rejected
+}
+
+model PublishedProduct {
+  id                BigInt                 @id @default(autoincrement())
+  taskId            BigInt                 @map("task_id")
+  shopId            BigInt                 @map("shop_id")
+  sourceProductId   BigInt                 @map("source_product_id")
+  platformProductId String?                @map("platform_product_id") @db.VarChar(64)
+  title             String                 @db.VarChar(255)
+  salePrice         Decimal                @map("sale_price") @db.Decimal(10, 2)
+  costPrice         Decimal?               @map("cost_price") @db.Decimal(10, 2)
+  status            PublishedProductStatus @default(online)
+  categoryId        String?                @map("category_id") @db.VarChar(64)
+  mainImage         String?                @map("main_image") @db.VarChar(512)
+  publishedAt       DateTime               @default(now()) @map("published_at")
+
+  task          PublishTask    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  shop          Shop           @relation(fields: [shopId], references: [id])
+  sourceProduct SourceProduct  @relation(fields: [sourceProductId], references: [id])
+  orders        Order[]
+
+  @@index([shopId])
+  @@index([platformProductId])
+  @@map("published_products")
+}
+
+// ----- 订单 -----
+
+enum OrderStatus {
+  paid
+  purchasing
+  shipped
+  received
+  refunded
+  closed
+}
+
+model Order {
+  id                  BigInt      @id @default(autoincrement())
+  shopId              BigInt      @map("shop_id")
+  publishedProductId  BigInt?     @map("published_product_id")
+  platformOrderId     String      @map("platform_order_id") @db.VarChar(64)
+  buyerNick           String?     @map("buyer_nick") @db.VarChar(64)
+  receiverName        String?     @map("receiver_name") @db.VarChar(64)
+  receiverPhoneEnc    String?     @map("receiver_phone_enc") @db.VarChar(256)
+  receiverAddressEnc  String?     @map("receiver_address_enc") @db.Text
+  skuInfo             Json        @map("sku_info") @db.JsonB
+  amount              Decimal     @db.Decimal(10, 2)
+  status              OrderStatus
+  paidAt              DateTime?   @map("paid_at")
+
+  shop             Shop              @relation(fields: [shopId], references: [id])
+  publishedProduct PublishedProduct? @relation(fields: [publishedProductId], references: [id])
+  purchaseOrder    PurchaseOrder?
+
+  @@unique([shopId, platformOrderId])
+  @@index([status])
+  @@map("orders")
+}
+
+enum PurchaseOrderStatus {
+  pending
+  placed
+  shipped
+  received
+  failed
+}
+
+model PurchaseOrder {
+  id             BigInt              @id @default(autoincrement())
+  orderId        BigInt              @unique @map("order_id")
+  orderId1688    String?             @map("order_id_1688") @db.VarChar(64)
+  status         PurchaseOrderStatus @default(pending)
+  trackingNo     String?             @map("tracking_no") @db.VarChar(64)
+  carrier        String?             @db.VarChar(32)
+  failureReason  String?             @map("failure_reason") @db.Text
+  retryCount     Int                 @default(0) @map("retry_count")
+  createdAt      DateTime            @default(now()) @map("created_at")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("purchase_orders")
+}
+
+// ----- AI 使用与计费 -----
+
+enum AiModule {
+  title
+  detail
+  image_remove_watermark
+  image_relight
+  image_compose
+  category_mapping
+  compliance_check
+  customer_service
+  recommendation_reason
+}
+
+model AiUsageLog {
+  id            BigInt   @id @default(autoincrement())
+  userId        BigInt   @map("user_id")
+  module        AiModule
+  model         String   @db.VarChar(64)
+  inputTokens   Int      @default(0) @map("input_tokens")
+  outputTokens  Int      @default(0) @map("output_tokens")
+  imageCount    Int      @default(0) @map("image_count")
+  costCny       Decimal  @map("cost_cny") @db.Decimal(10, 4)
+  traceId       String?  @map("trace_id") @db.VarChar(64)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([module])
+  @@map("ai_usage_logs")
+}
+
+enum SubscriptionPlan {
+  basic
+  pro
+  flagship
+  enterprise
+}
+
+enum SubscriptionStatus {
+  active
+  expired
+  cancelled
+}
+
+model Subscription {
+  id          BigInt             @id @default(autoincrement())
+  userId      BigInt             @map("user_id")
+  plan        SubscriptionPlan
+  startDate   DateTime           @map("start_date") @db.Date
+  endDate     DateTime           @map("end_date") @db.Date
+  amountCny   Decimal            @map("amount_cny") @db.Decimal(10, 2)
+  status      SubscriptionStatus @default(active)
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([endDate])
+  @@map("subscriptions")
+}

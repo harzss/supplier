@@ -1,0 +1,37 @@
+# @supplier/db
+
+Prisma schema + 数据访问层。**数据库：Supabase / PostgreSQL**。
+
+## 准备
+
+复制并填写 `.env`：
+
+```bash
+cp packages/db/.env.example packages/db/.env
+# 编辑后填入 Supabase 的两个连接串：
+# DATABASE_URL  → Connection pooler (6543)，运行时用
+# DIRECT_URL    → Direct connection (5432)，迁移用
+```
+
+或本地 docker：
+
+```bash
+make infra-up   # 起 postgres:15
+# 在 .env 里把 DATABASE_URL 改为 postgresql://postgres:postgres@localhost:5432/supplier
+```
+
+## 常用命令
+
+```bash
+make db-migrate name=init   # 第一次创建迁移并应用
+make db-migrate             # 后续应用未执行的迁移
+make db-seed                # 写入 10 个货源演示数据
+make db-studio              # 打开 Prisma Studio
+```
+
+## 注意
+
+- 敏感字段（手机号、地址、Token）以加密形式存储，由业务层透明加解密
+- BigInt 主键 — 客户端 JSON 序列化需 `.toString()`
+- Json 字段统一用 `@db.JsonB`（PG 性能更好）
+- 货源大表 `source_products` 量级达到亿级再考虑 Citus 分区

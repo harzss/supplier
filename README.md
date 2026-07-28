@@ -5,21 +5,25 @@
 
 ## 文档索引
 
-| 文档 | 说明 |
-|---|---|
-| [docs/00-roadmap.md](docs/00-roadmap.md) | 项目路线图与 TODO |
-| [docs/01-market-research.md](docs/01-market-research.md) | 市场调研与竞品分析 |
-| [docs/02-prd-mvp.md](docs/02-prd-mvp.md) | MVP 产品需求文档 |
-| [docs/03-architecture.md](docs/03-architecture.md) | 技术架构与选型 |
-| [docs/04-data-model.md](docs/04-data-model.md) | 核心数据模型 |
-| [docs/05-ai-pipeline.md](docs/05-ai-pipeline.md) | AI 中台设计 |
-| [docs/06-openapi-integration.md](docs/06-openapi-integration.md) | 平台 OpenAPI 接入方案 |
-| [docs/07-compliance.md](docs/07-compliance.md) | 合规与风控 |
-| [docs/08-go-to-market.md](docs/08-go-to-market.md) | 商业化与冷启动 |
+| 文档                                                               | 说明                         |
+| ------------------------------------------------------------------ | ---------------------------- |
+| [docs/00-roadmap.md](docs/00-roadmap.md)                           | 项目路线图与 TODO            |
+| [docs/01-market-research.md](docs/01-market-research.md)           | 市场调研与竞品分析           |
+| [docs/02-prd-mvp.md](docs/02-prd-mvp.md)                           | MVP 产品需求文档             |
+| [docs/03-architecture.md](docs/03-architecture.md)                 | 技术架构与选型               |
+| [docs/04-data-model.md](docs/04-data-model.md)                     | 核心数据模型                 |
+| [docs/05-ai-pipeline.md](docs/05-ai-pipeline.md)                   | AI 中台设计                  |
+| [docs/06-openapi-integration.md](docs/06-openapi-integration.md)   | 平台 OpenAPI 接入方案        |
+| [docs/07-compliance.md](docs/07-compliance.md)                     | 合规与风控                   |
+| [docs/08-go-to-market.md](docs/08-go-to-market.md)                 | 商业化与冷启动               |
+| [docs/09-main-flow.md](docs/09-main-flow.md)                       | 已实现主流程与里程碑进度     |
+| [docs/10-production-readiness.md](docs/10-production-readiness.md) | 生产准备度、硬门禁与上线顺序 |
+| [docs/11-deployment-runbook.md](docs/11-deployment-runbook.md)     | 部署、迁移、回滚与恢复手册   |
+| [docs/12-internal-staging.md](docs/12-internal-staging.md)         | 免费内部测试环境部署手册     |
 
 ## 当前阶段
 
-`Phase 0 — 规划与方案设计`
+核心 Mock 闭环与真实 Supabase 数据链路已完成，当前优先补齐**系统功能闭环与真实平台应用侧能力**；镜像、云部署和切流演练留到上线阶段集中处理。已实现范围与真实验收证据以 `docs/09-main-flow.md` 为准；尚未满足的上线硬门禁以 `docs/10-production-readiness.md` 为准。
 
 ## 工程结构（规划中）
 

@@ -36,7 +36,9 @@ export interface PricingStrategy {
   markupRatio?: number;
   targetMargin?: number;
   competitorPriceRange?: [number, number];
-  finalPrice: number;
+  estimatedShipping?: number;
+  platformFeeRate?: number;
+  finalPrice?: number;
 }
 
 export interface PublishedProduct {

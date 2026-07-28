@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTitleMessages, parseAndFilterTitles } from './title.prompt';
+import { buildTitleMessages, parseAndFilterTitles, validateTitleForPlatform } from './title.prompt';
 
 describe('buildTitleMessages', () => {
   it('builds system + user prompt for douyin', () => {
@@ -53,5 +53,11 @@ describe('parseAndFilterTitles', () => {
     const r = parseAndFilterTitles('not json', 'douyin');
     expect(r.titles).toEqual([]);
     expect(r.rejected).toHaveLength(1);
+  });
+
+  it('reuses platform rules for a user-selected publish title', () => {
+    expect(validateTitleForPlatform('舒适纯棉T恤', 'douyin')).toBeNull();
+    expect(validateTitleForPlatform('全网最便宜纯棉T恤', 'douyin')).toContain('禁用词');
+    expect(validateTitleForPlatform('A'.repeat(31), 'douyin')).toContain('30 字');
   });
 });

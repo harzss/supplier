@@ -1,23 +1,46 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { PrismaModule } from './common/prisma.module';
 import { RedisModule } from './common/redis.module';
-import { HealthController } from './modules/health/health.controller';
+import { CryptoModule } from './common/crypto.module';
+import { HealthModule } from './modules/health/health.module';
 import { ProductModule } from './modules/product/product.module';
 import { PublishModule } from './modules/publish/publish.module';
 import { AiModule } from './modules/ai/ai.module';
+import { EntitlementModule } from './modules/entitlement/entitlement.module';
+import { SettingsModule } from './modules/settings/settings.module';
+import { ShopModule } from './modules/shop/shop.module';
+import { OrderModule } from './modules/order/order.module';
+import { CategoryModule } from './modules/category/category.module';
+import { SkuModule } from './modules/sku/sku.module';
+import { AnalyticsModule } from './modules/analytics/analytics.module';
+import { FavoriteModule } from './modules/favorite/favorite.module';
+import { validateEnvironment } from './config/environment';
+import { ObservabilityModule } from './modules/observability/observability.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnvironment }),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     PrismaModule,
     RedisModule,
+    CryptoModule,
+    ObservabilityModule,
+    HealthModule,
+    EntitlementModule,
+    SettingsModule,
+    ShopModule,
     ProductModule,
     PublishModule,
+    OrderModule,
+    CategoryModule,
+    SkuModule,
+    AnalyticsModule,
+    FavoriteModule,
     AiModule,
   ],
-  controllers: [HealthController],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

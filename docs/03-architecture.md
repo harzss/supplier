@@ -1,5 +1,7 @@
 # 技术架构与选型
 
+> 本文同时记录当前 MVP 与目标架构。当前可部署形态是 Next.js Web + NestJS BFF 模块化单体、Supabase/PostgreSQL、Redis 和 PostgreSQL 持久队列；Go 微服务、Kafka、Temporal、Milvus、ClickHouse 与 K8s 属于后续演进，不能当作当前已上线能力。
+
 ## 1. 整体架构
 
 ```mermaid
@@ -32,12 +34,11 @@ flowchart TB
     end
 
     subgraph Data["数据层"]
-        MySQL[(MySQL 8)]
-        TiDB[(TiDB<br/>货源大表)]
-        ES[(Elasticsearch)]
+        PostgreSQL[(Supabase / PostgreSQL 15)]
         Redis[(Redis Cluster)]
         OSS[(对象存储)]
-        Kafka[/Kafka/]
+        FutureData["后续：Citus / ES / Milvus"]
+        Kafka[/Kafka（后续）/]
     end
 
     subgraph External["外部平台"]
@@ -65,75 +66,75 @@ flowchart TB
 
 ### 2.1 前端
 
-| 模块 | 选型 | 理由 |
-|---|---|---|
-| 框架 | Next.js 15 (App Router) | SSR + RSC，AI 流式输出友好 |
-| 语言 | TypeScript 5.x | 类型安全 |
-| UI 库 | shadcn/ui + Radix | 可定制、无锁定 |
-| 样式 | Tailwind CSS 4 | 工程化、AI 生成友好 |
-| 状态 | Zustand + TanStack Query | 轻量 + 服务端状态分离 |
-| 表单 | React Hook Form + Zod | 类型化 schema |
-| 图表 | ECharts / Recharts | ECharts 数据看板；Recharts 简单图 |
-| 国际化 | next-intl | 后续出海预留 |
+| 模块   | 选型                     | 理由                              |
+| ------ | ------------------------ | --------------------------------- |
+| 框架   | Next.js 15 (App Router)  | SSR + RSC，AI 流式输出友好        |
+| 语言   | TypeScript 5.x           | 类型安全                          |
+| UI 库  | shadcn/ui + Radix        | 可定制、无锁定                    |
+| 样式   | Tailwind CSS 4           | 工程化、AI 生成友好               |
+| 状态   | Zustand + TanStack Query | 轻量 + 服务端状态分离             |
+| 表单   | React Hook Form + Zod    | 类型化 schema                     |
+| 图表   | ECharts / Recharts       | ECharts 数据看板；Recharts 简单图 |
+| 国际化 | next-intl                | 后续出海预留                      |
 
 ### 2.2 浏览器插件
 
-| 模块 | 选型 |
-|---|---|
-| 平台 | Chrome MV3 |
-| 构建 | Vite + CRXJS |
-| UI | React + Tailwind（共享 ui 包） |
+| 模块 | 选型                           |
+| ---- | ------------------------------ |
+| 平台 | Chrome MV3                     |
+| 构建 | Vite + CRXJS                   |
+| UI   | React + Tailwind（共享 ui 包） |
 
 ### 2.3 后端
 
-| 模块 | 选型 | 理由 |
-|---|---|---|
-| BFF / 业务主语言 | NestJS (TypeScript) | 与前端共享类型；生态成熟 |
-| 高并发 IO | Go (gin/fiber) | 采集、订单代发场景 |
-| AI 视觉服务 | Python + FastAPI | PyTorch / SAM / Diffusers 生态 |
-| ORM | Prisma（NestJS）/ GORM（Go） | 类型安全 |
-| RPC | gRPC + Protobuf | 内部服务通信 |
-| 队列 | Kafka（事件流）+ BullMQ（异步任务） | Kafka 业务事件、BullMQ 简单任务 |
-| 调度 | Temporal | 复杂工作流（铺货、订单） |
+| 模块             | 选型                                                      | 理由                                 |
+| ---------------- | --------------------------------------------------------- | ------------------------------------ |
+| BFF / 业务主语言 | NestJS (TypeScript)                                       | 与前端共享类型；生态成熟             |
+| 高并发 IO        | Go (gin/fiber)                                            | 采集、订单代发场景                   |
+| AI 视觉服务      | Python + FastAPI                                          | PyTorch / SAM / Diffusers 生态       |
+| ORM              | Prisma（NestJS）/ GORM（Go）                              | 类型安全                             |
+| RPC              | gRPC + Protobuf                                           | 内部服务通信                         |
+| 队列             | PostgreSQL `publish_jobs`（当前）/ Kafka + BullMQ（后续） | 当前保证持久化认领、退避、死信与恢复 |
+| 调度             | Nest worker（当前）/ Temporal（后续）                     | 业务跨服务、跨小时后再引入 Temporal  |
 
 ### 2.4 AI 中台
 
-| 模块 | 选型 |
-|---|---|
-| 编排 | LangGraph |
-| LLM 路由 | 自研 + Portkey/LiteLLM |
-| 文本模型 | GPT-4o / Claude Sonnet / DeepSeek-V3 / Qwen-Max |
-| 嵌入模型 | bge-m3 / text-embedding-3-small |
-| 向量库 | Milvus 2.4 |
-| 视觉抠图 | SAM2 |
-| 视觉重绘 | Flux.1 / SDXL（自部署）/ 即梦/可灵 API |
-| 水印检测 | YOLO v10 自训练 |
-| 多模态 VLM | Qwen-VL / GPT-4o-vision（合规审核） |
+| 模块       | 选型                                            |
+| ---------- | ----------------------------------------------- |
+| 编排       | LangGraph                                       |
+| LLM 路由   | 自研 + Portkey/LiteLLM                          |
+| 文本模型   | GPT-4o / Claude Sonnet / DeepSeek-V3 / Qwen-Max |
+| 嵌入模型   | bge-m3 / text-embedding-3-small                 |
+| 向量库     | Milvus 2.4                                      |
+| 视觉抠图   | SAM2                                            |
+| 视觉重绘   | Flux.1 / SDXL（自部署）/ 即梦/可灵 API          |
+| 水印检测   | YOLO v10 自训练                                 |
+| 多模态 VLM | Qwen-VL / GPT-4o-vision（合规审核）             |
 
 ### 2.5 数据层
 
-| 模块 | 选型 | 用途 |
-|---|---|---|
-| 关系型 | Supabase / PostgreSQL 15 | 业务主库 + Auth + Storage + Realtime |
-| 大表扩容 | Citus 分区 / 独立 PG 集群 | 货源亿级 SKU 时再切（MVP 不做） |
-| 搜索 | Postgres `pg_trgm` + GIN（早期）→ Elasticsearch 8（后期） | 商品全文检索 |
-| 向量 | Supabase `pgvector`（早期）→ Milvus 2.4（亿级） | 选品语义、类目映射 |
-| 缓存 | Redis Cluster | 热点 SKU、会话、限流 |
-| 对象存储 | 阿里云 OSS / 七牛 | 图片、视频 |
-| 消息 | Kafka 3.x | 事件流 |
-| 数仓 | ClickHouse | 经营分析、看板 |
+| 模块     | 选型                                                      | 用途                                 |
+| -------- | --------------------------------------------------------- | ------------------------------------ |
+| 关系型   | Supabase / PostgreSQL 15                                  | 业务主库 + Auth + Storage + Realtime |
+| 大表扩容 | Citus 分区 / 独立 PG 集群                                 | 货源亿级 SKU 时再切（MVP 不做）      |
+| 搜索     | Postgres `pg_trgm` + GIN（早期）→ Elasticsearch 8（后期） | 商品全文检索                         |
+| 向量     | Supabase `pgvector`（早期）→ Milvus 2.4（亿级）           | 选品语义、类目映射                   |
+| 缓存     | Redis（当前）→ Redis Cluster（扩容后）                    | OAuth state、锁、限流与运行依赖      |
+| 对象存储 | Supabase Storage（当前）→ OSS / 七牛（按部署选择）        | 图片、视频                           |
+| 消息     | PostgreSQL 队列（当前）→ Kafka 3.x（跨服务后）            | 铺货任务与后续事件流                 |
+| 数仓     | PostgreSQL 聚合（当前）→ ClickHouse（数据量增长后）       | 经营分析、看板                       |
 
 ### 2.6 基础设施
 
-| 模块 | 选型 |
-|---|---|
-| 容器 | Docker + K8s（阿里云 ACK） |
-| CD | Argo CD + Helm |
-| CI | GitHub Actions |
-| IaC | Terraform |
-| 监控 | OpenTelemetry + Grafana + Loki + Tempo |
-| APM | Sentry |
-| 日志 | SLS / Loki |
+| 模块 | 当前仓库已落地                                             | 目标形态                               |
+| ---- | ---------------------------------------------------------- | -------------------------------------- |
+| 容器 | Docker 多阶段不可变 BFF/Web/migrate 镜像                   | K8s（阿里云 ACK）                      |
+| CD   | migration-once、readiness 切流与回滚手册；尚未接目标云平台 | Argo CD + Helm                         |
+| CI   | GitHub Actions 全量代码、镜像、migration、smoke 与退出门禁 | 保持                                   |
+| IaC  | 尚未落地                                                   | Terraform                              |
+| 监控 | health/operations 端点、Prometheus 文本、签名告警 Webhook  | OpenTelemetry + Grafana + Loki + Tempo |
+| APM  | 尚未接入集中 APM                                           | Sentry / Tempo                         |
+| 日志 | 进程结构化日志；尚未接入集中存储                           | SLS / Loki                             |
 
 ## 3. 部署拓扑
 
@@ -143,15 +144,17 @@ flowchart LR
     CDN --> SLB[SLB]
     SLB --> WebPod[Next.js Pod]
     SLB --> BFFPod[BFF Pod]
-    BFFPod --> SvcPod[业务服务 Pods]
-    SvcPod --> AIGateway[AI Gateway]
+    WebPod --> BFFPod
+    BFFPod --> AIGateway[AI Gateway]
     AIGateway --> LLM[外部 LLM]
     AIGateway --> VisionPod[Vision GPU Pod]
-    SvcPod --> RDS[(RDS MySQL)]
-    SvcPod --> TiDB[(TiDB Cluster)]
-    SvcPod --> Redis[(Redis 集群)]
-    SvcPod --> Kafka[/Kafka 集群/]
-    VisionPod --> OSS[(OSS)]
+    BFFPod --> PG[(Supabase / PostgreSQL)]
+    BFFPod --> Redis[(生产 Redis)]
+    BFFPod --> Storage[(Supabase Storage / OSS)]
+    BFFPod --> Platform[抖店 / 1688 OpenAPI]
+    Prometheus[Prometheus] -->|独立运维 token 抓取| BFFPod
+    BFFPod -->|HMAC 签名 Webhook| AlertReceiver[告警接收端]
+    VisionPod --> Storage
 ```
 
 ## 4. 关键技术决策
@@ -174,23 +177,23 @@ flowchart LR
 - 自部署 Flux：高 QPS 场景成本可控（8 卡 A10 月成本约 3 万，单图 0.03 元）
 - **路由策略**：用户付费等级 + 实时 QPS 决定走哪一路
 
-### 4.4 为什么 Temporal 而不是 BullMQ？
+### 4.4 为什么当前使用 PostgreSQL 持久队列，何时引入 Temporal？
 
-- 铺货任务 = 长时编排（采集→AI 处理→多平台铺货→失败重试），可能跨小时
-- Temporal 提供持久化、可观测、版本化的工作流，BullMQ 只能做简单队列
-- 简单异步任务仍用 BullMQ
+- 当前铺货在单体内执行，`publish_jobs` 已提供原子认领、指数退避、死信、stale lock 恢复和人工重试，减少 MVP 运维面
+- 当流程真正跨服务、跨小时并需要补偿事务与工作流版本化时再引入 Temporal
+- 引入新调度系统前必须证明现有数据库队列成为容量或可靠性瓶颈，并完成迁移与双跑方案
 
 ## 5. 服务边界
 
-| 服务 | 职责 | 不做 |
-|---|---|---|
-| account | 用户、店铺授权、Token 管理 | 业务逻辑 |
-| product | 1688 货源、选品打分、向量检索 | 铺货执行 |
-| publish | 铺货编排、平台 API 适配 | 选品 |
-| order | 订单同步、代发、物流 | 商品 |
-| ai-gateway | LLM 路由、Prompt 模板、缓存 | 业务逻辑 |
-| vision | 图像抠图/重绘/检测 | 文本 |
-| analytics | 看板、报表、AI 周报 | 实时业务 |
+| 服务       | 职责                          | 不做     |
+| ---------- | ----------------------------- | -------- |
+| account    | 用户、店铺授权、Token 管理    | 业务逻辑 |
+| product    | 1688 货源、选品打分、向量检索 | 铺货执行 |
+| publish    | 铺货编排、平台 API 适配       | 选品     |
+| order      | 订单同步、代发、物流          | 商品     |
+| ai-gateway | LLM 路由、Prompt 模板、缓存   | 业务逻辑 |
+| vision     | 图像抠图/重绘/检测            | 文本     |
+| analytics  | 看板、报表、AI 周报           | 实时业务 |
 
 ## 6. 演进路径
 

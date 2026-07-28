@@ -6,7 +6,8 @@
 // 1688 货源大表（source_products）若量级达到亿级，可后续按 category_l1 分区或迁到独立 Citus / 自建 PG 集群。
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
@@ -31,21 +32,30 @@ enum UserStatus {
 }
 
 model User {
-  id            BigInt        @id @default(autoincrement())
-  phone         String?       @unique @db.VarChar(20)
-  wechatUnionid String?       @unique @map("wechat_unionid") @db.VarChar(64)
-  nickname      String?       @db.VarChar(64)
-  avatarUrl     String?       @map("avatar_url") @db.VarChar(512)
-  plan          UserPlan      @default(free)
-  status        UserStatus    @default(active)
-  createdAt     DateTime      @default(now()) @map("created_at")
-  updatedAt     DateTime      @updatedAt @map("updated_at")
+  id            BigInt     @id @default(autoincrement())
+  authSubject   String?    @unique @map("auth_subject") @db.Uuid
+  phone         String?    @unique @db.VarChar(20)
+  wechatUnionid String?    @unique @map("wechat_unionid") @db.VarChar(64)
+  nickname      String?    @db.VarChar(64)
+  avatarUrl     String?    @map("avatar_url") @db.VarChar(512)
+  plan          UserPlan   @default(free)
+  status        UserStatus @default(active)
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
 
-  shops         Shop[]
-  publishTasks  PublishTask[]
-  favorites     UserFavorite[]
-  aiUsageLogs   AiUsageLog[]
-  subscriptions Subscription[]
+  shops                         Shop[]
+  publishTasks                  PublishTask[]
+  favorites                     UserFavorite[]
+  aiUsageLogs                   AiUsageLog[]
+  subscriptions                 Subscription[]
+  llmCredential                 LlmCredential?
+  categoryMappings              ProductCategoryMapping[]
+  categoryPropertyMappings      ProductCategoryPropertyMapping[]
+  categoryQualificationMappings ProductCategoryQualificationMapping[]
+  skuMappings                   ProductSkuMapping[]
+  auditLogs                     AuditLog[]
+  purchaseRecoveries            PurchaseOrderRecovery[]
+  orderLogisticsRepairs         OrderLogisticsRepair[]
 
   @@index([plan])
   @@map("users")
@@ -73,72 +83,124 @@ enum ShopStatus {
 }
 
 model Shop {
-  id              BigInt     @id @default(autoincrement())
-  userId          BigInt     @map("user_id")
-  platform        Platform
-  platformShopId  String     @map("platform_shop_id") @db.VarChar(64)
-  shopName        String?    @map("shop_name") @db.VarChar(128)
-  role            ShopRole   @default(seller)
-  accessTokenEnc  String?    @map("access_token_enc") @db.VarChar(1024)
-  refreshTokenEnc String?    @map("refresh_token_enc") @db.VarChar(1024)
-  tokenExpireAt   DateTime?  @map("token_expire_at")
-  status          ShopStatus @default(active)
-  createdAt       DateTime   @default(now()) @map("created_at")
+  id                 BigInt     @id @default(autoincrement())
+  userId             BigInt     @map("user_id")
+  platform           Platform
+  platformShopId     String     @map("platform_shop_id") @db.VarChar(64)
+  shopName           String?    @map("shop_name") @db.VarChar(128)
+  role               ShopRole   @default(seller)
+  accessTokenEnc     String?    @map("access_token_enc") @db.VarChar(1024)
+  refreshTokenEnc    String?    @map("refresh_token_enc") @db.VarChar(1024)
+  tokenExpireAt      DateTime?  @map("token_expire_at")
+  status             ShopStatus @default(active)
+  lastOrderSyncAt    DateTime?  @map("last_order_sync_at")
+  orderSyncAttemptAt DateTime?  @map("order_sync_attempt_at")
+  orderSyncError     String?    @map("order_sync_error") @db.VarChar(500)
+  createdAt          DateTime   @default(now()) @map("created_at")
 
-  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  publishedProducts PublishedProduct[]
-  orders            Order[]
+  user                          User                                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  publishedProducts             PublishedProduct[]
+  orders                        Order[]
+  buyerPurchaseOrders           PurchaseOrder[]                       @relation("PurchaseBuyerShop")
+  categoryCatalog               ShopCategory[]
+  categoryPropertyMappings      ProductCategoryPropertyMapping[]
+  categoryQualificationMappings ProductCategoryQualificationMapping[]
 
   @@unique([userId, platform, platformShopId], name: "uk_user_platform_shop")
   @@index([userId])
   @@map("shops")
 }
 
+// 授权店铺当前可用的官方商品类目目录；每次完整同步在事务内整体替换。
+model ShopCategory {
+  id                        BigInt    @id @default(autoincrement())
+  shopId                    BigInt    @map("shop_id")
+  channel                   Int       @default(0)
+  categoryId                String    @map("category_id") @db.VarChar(64)
+  name                      String    @db.VarChar(128)
+  parentId                  String?   @map("parent_id") @db.VarChar(64)
+  path                      String    @db.VarChar(512)
+  level                     Int
+  isLeaf                    Boolean   @map("is_leaf")
+  enabled                   Boolean   @default(true)
+  attributes                Json?     @db.JsonB
+  attributesFingerprint     String?   @map("attributes_fingerprint") @db.VarChar(64)
+  attributesSyncedAt        DateTime? @map("attributes_synced_at")
+  qualifications            Json?     @db.JsonB
+  qualificationsFingerprint String?   @map("qualifications_fingerprint") @db.VarChar(64)
+  qualificationsSyncedAt    DateTime? @map("qualifications_synced_at")
+  syncedAt                  DateTime  @default(now()) @map("synced_at")
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, channel, categoryId], name: "uk_shop_channel_category", map: "uk_shop_channel_category")
+  @@index([shopId, channel, isLeaf, enabled])
+  @@index([shopId, channel, parentId])
+  @@map("shop_categories")
+}
+
 // ----- 货源与选品 -----
 
-model SourceProduct {
-  id              BigInt   @id @default(autoincrement())
-  productId1688   String   @unique @map("product_id_1688") @db.VarChar(32)
-  supplierId      String?  @map("supplier_id") @db.VarChar(32)
-  title           String   @db.VarChar(255)
-  price           Decimal  @db.Decimal(10, 2)
-  priceMin        Decimal? @map("price_min") @db.Decimal(10, 2)
-  priceMax        Decimal? @map("price_max") @db.Decimal(10, 2)
-  mainImage       String?  @map("main_image") @db.VarChar(512)
-  detailImages    Json?    @map("detail_images") @db.JsonB
-  categoryPath    String?  @map("category_path") @db.VarChar(255)
-  categoryL1      String?  @map("category_l1") @db.VarChar(64)
-  categoryL2      String?  @map("category_l2") @db.VarChar(64)
-  skuList         Json?    @map("sku_list") @db.JsonB
-  attributes      Json?    @db.JsonB
-  monthlySold     Int      @default(0) @map("monthly_sold")
-  isCrossBorder   Boolean  @default(false) @map("is_cross_border")
-  isOnePieceDrop  Boolean  @default(false) @map("is_one_piece_drop")
-  syncedAt        DateTime @default(now()) @map("synced_at")
+enum SourceProductAvailability {
+  available
+  out_of_stock
+  offline
+  unknown
+}
 
-  score            ProductScore?
-  publishTasks     PublishTask[]
-  publishedProducts PublishedProduct[]
-  favorites        UserFavorite[]
+model SourceProduct {
+  id                    BigInt                    @id @default(autoincrement())
+  productId1688         String                    @unique @map("product_id_1688") @db.VarChar(32)
+  supplierId            String?                   @map("supplier_id") @db.VarChar(32)
+  title                 String                    @db.VarChar(255)
+  price                 Decimal                   @db.Decimal(10, 2)
+  priceMin              Decimal?                  @map("price_min") @db.Decimal(10, 2)
+  priceMax              Decimal?                  @map("price_max") @db.Decimal(10, 2)
+  mainImage             String?                   @map("main_image") @db.VarChar(512)
+  detailImages          Json?                     @map("detail_images") @db.JsonB
+  categoryPath          String?                   @map("category_path") @db.VarChar(255)
+  categoryL1            String?                   @map("category_l1") @db.VarChar(64)
+  categoryL2            String?                   @map("category_l2") @db.VarChar(64)
+  skuList               Json?                     @map("sku_list") @db.JsonB
+  attributes            Json?                     @db.JsonB
+  monthlySold           Int                       @default(0) @map("monthly_sold")
+  isCrossBorder         Boolean                   @default(false) @map("is_cross_border")
+  isOnePieceDrop        Boolean                   @default(false) @map("is_one_piece_drop")
+  availability          SourceProductAvailability @default(unknown)
+  totalStock            Int                       @default(0) @map("total_stock")
+  inventoryFingerprint  String                    @default("legacy") @map("inventory_fingerprint") @db.VarChar(64)
+  inventoryVersion      Int                       @default(0) @map("inventory_version")
+  availabilityChangedAt DateTime                  @default(now()) @map("availability_changed_at")
+  syncedAt              DateTime                  @default(now()) @map("synced_at")
+
+  score                         ProductScore?
+  publishTasks                  PublishTask[]
+  publishedProducts             PublishedProduct[]
+  favorites                     UserFavorite[]
+  categoryMappings              ProductCategoryMapping[]
+  categoryPropertyMappings      ProductCategoryPropertyMapping[]
+  categoryQualificationMappings ProductCategoryQualificationMapping[]
+  skuMappings                   ProductSkuMapping[]
 
   @@index([categoryL1])
+  @@index([availability])
   @@index([syncedAt])
   @@map("source_products")
 }
 
 model ProductScore {
-  productId         BigInt   @id @map("product_id")
-  demandScore       Float    @map("demand_score")
-  competitionScore  Float    @map("competition_score")
-  profitScore       Float    @map("profit_score")
-  complianceScore   Float    @map("compliance_score")
-  trendScore        Float    @map("trend_score")
-  overallScore      Float    @map("overall_score")
-  reason            Json     @db.JsonB
-  features          Json     @db.JsonB
-  scoredAt          DateTime @default(now()) @map("scored_at")
+  productId        BigInt   @id @map("product_id")
+  demandScore      Float    @map("demand_score")
+  competitionScore Float    @map("competition_score")
+  profitScore      Float    @map("profit_score")
+  complianceScore  Float    @map("compliance_score")
+  trendScore       Float    @map("trend_score")
+  overallScore     Float    @map("overall_score")
+  reason           Json     @db.JsonB
+  features         Json     @db.JsonB
+  scoredAt         DateTime @default(now()) @map("scored_at")
 
-  product           SourceProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product SourceProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([overallScore(sort: Desc)])
   @@map("product_scores")
@@ -151,11 +213,101 @@ model UserFavorite {
   folderName      String   @default("default") @map("folder_name") @db.VarChar(64)
   createdAt       DateTime @default(now()) @map("created_at")
 
-  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sourceProduct   SourceProduct  @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
 
   @@unique([userId, sourceProductId])
   @@map("user_favorites")
+}
+
+// 用户确认的平台叶子类目映射；避免把单个用户的选择写回全局货源 attributes。
+model ProductCategoryMapping {
+  id              BigInt   @id @default(autoincrement())
+  userId          BigInt   @map("user_id")
+  sourceProductId BigInt   @map("source_product_id")
+  platform        Platform
+  categoryId      String   @map("category_id") @db.VarChar(64)
+  categoryName    String?  @map("category_name") @db.VarChar(128)
+  confirmedAt     DateTime @default(now()) @map("confirmed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sourceProductId, platform], name: "uk_user_product_platform_category", map: "uk_user_product_platform_category")
+  @@index([userId, platform])
+  @@index([sourceProductId])
+  @@map("product_category_mappings")
+}
+
+// 用户按目标店铺确认的类目属性；schema 指纹变化后旧确认自动失效。
+model ProductCategoryPropertyMapping {
+  id                BigInt   @id @default(autoincrement())
+  userId            BigInt   @map("user_id")
+  sourceProductId   BigInt   @map("source_product_id")
+  shopId            BigInt   @map("shop_id")
+  categoryId        String   @map("category_id") @db.VarChar(64)
+  schemaFingerprint String   @map("schema_fingerprint") @db.VarChar(64)
+  values            Json     @db.JsonB
+  confirmedAt       DateTime @default(now()) @map("confirmed_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+  shop          Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sourceProductId, shopId], name: "uk_user_product_shop_category_properties", map: "uk_user_product_shop_category_properties")
+  @@index([shopId, categoryId])
+  @@index([sourceProductId])
+  @@map("product_category_property_mappings")
+}
+
+// 用户按目标店铺确认的类目资质；官方 schema 或动态属性要求变化后旧确认自动失效。
+model ProductCategoryQualificationMapping {
+  id                     BigInt   @id @default(autoincrement())
+  userId                 BigInt   @map("user_id")
+  sourceProductId        BigInt   @map("source_product_id")
+  shopId                 BigInt   @map("shop_id")
+  categoryId             String   @map("category_id") @db.VarChar(64)
+  schemaFingerprint      String   @map("schema_fingerprint") @db.VarChar(64)
+  requirementFingerprint String   @map("requirement_fingerprint") @db.VarChar(64)
+  values                 Json     @db.JsonB
+  confirmedAt            DateTime @default(now()) @map("confirmed_at")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+  shop          Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sourceProductId, shopId], name: "uk_user_product_shop_category_qualifications", map: "uk_user_product_shop_category_qualifications")
+  @@index([shopId, categoryId])
+  @@index([sourceProductId])
+  @@map("product_category_qualification_mappings")
+}
+
+// 用户确认的平台 SKU 规格映射；源 SKU 变化后通过 fingerprint 使旧确认自动失效。
+model ProductSkuMapping {
+  id                BigInt   @id @default(autoincrement())
+  userId            BigInt   @map("user_id")
+  sourceProductId   BigInt   @map("source_product_id")
+  platform          Platform
+  dimensions        Json     @db.JsonB
+  skus              Json     @db.JsonB
+  sourceFingerprint String   @map("source_fingerprint") @db.VarChar(64)
+  confirmedAt       DateTime @default(now()) @map("confirmed_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sourceProductId, platform], name: "uk_user_product_platform_sku")
+  @@index([userId, platform])
+  @@index([sourceProductId])
+  @@map("product_sku_mappings")
 }
 
 // ----- 铺货 -----
@@ -169,24 +321,58 @@ enum PublishTaskStatus {
   failed
 }
 
-model PublishTask {
-  id              BigInt            @id @default(autoincrement())
-  userId          BigInt            @map("user_id")
-  sourceProductId BigInt            @map("source_product_id")
-  targetShopIds   Json              @map("target_shop_ids") @db.JsonB
-  status          PublishTaskStatus @default(pending)
-  aiOptimized     Json?             @map("ai_optimized") @db.JsonB
-  pricingStrategy Json?             @map("pricing_strategy") @db.JsonB
-  errorMsg        String?           @map("error_msg") @db.Text
-  createdAt       DateTime          @default(now()) @map("created_at")
-  finishedAt      DateTime?         @map("finished_at")
+enum PublishJobStatus {
+  queued
+  running
+  retry_wait
+  completed
+  dead
+}
 
-  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sourceProduct    SourceProduct    @relation(fields: [sourceProductId], references: [id])
+model PublishTask {
+  id                            BigInt            @id @default(autoincrement())
+  userId                        BigInt            @map("user_id")
+  sourceProductId               BigInt            @map("source_product_id")
+  targetShopIds                 Json              @map("target_shop_ids") @db.JsonB
+  status                        PublishTaskStatus @default(pending)
+  aiOptimized                   Json?             @map("ai_optimized") @db.JsonB
+  aiOptions                     Json?             @map("ai_options") @db.JsonB
+  pricingStrategy               Json?             @map("pricing_strategy") @db.JsonB
+  skuSnapshot                   Json?             @map("sku_snapshot") @db.JsonB
+  categoryPropertySnapshot      Json?             @map("category_property_snapshot") @db.JsonB
+  categoryQualificationSnapshot Json?             @map("category_qualification_snapshot") @db.JsonB
+  publishExternalIds            Json?             @map("publish_external_ids") @db.JsonB
+  errorMsg                      String?           @map("error_msg") @db.Text
+  createdAt                     DateTime          @default(now()) @map("created_at")
+  finishedAt                    DateTime?         @map("finished_at")
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct     SourceProduct      @relation(fields: [sourceProductId], references: [id])
   publishedProducts PublishedProduct[]
+  job               PublishJob?
 
   @@index([userId, status])
   @@map("publish_tasks")
+}
+
+model PublishJob {
+  id          BigInt           @id @default(autoincrement())
+  taskId      BigInt           @unique @map("task_id")
+  status      PublishJobStatus @default(queued)
+  attempts    Int              @default(0)
+  maxAttempts Int              @default(3) @map("max_attempts")
+  nextRunAt   DateTime         @default(now()) @map("next_run_at")
+  lockedAt    DateTime?        @map("locked_at")
+  lockedBy    String?          @map("locked_by") @db.VarChar(128)
+  lastError   String?          @map("last_error") @db.Text
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  task PublishTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRunAt])
+  @@index([lockedAt])
+  @@map("publish_jobs")
 }
 
 enum PublishedProductStatus {
@@ -196,27 +382,59 @@ enum PublishedProductStatus {
   rejected
 }
 
+enum InventorySyncStatus {
+  pending
+  syncing
+  retry_wait
+  synced
+  dead
+}
+
 model PublishedProduct {
-  id                BigInt                 @id @default(autoincrement())
-  taskId            BigInt                 @map("task_id")
-  shopId            BigInt                 @map("shop_id")
-  sourceProductId   BigInt                 @map("source_product_id")
-  platformProductId String?                @map("platform_product_id") @db.VarChar(64)
-  title             String                 @db.VarChar(255)
-  salePrice         Decimal                @map("sale_price") @db.Decimal(10, 2)
-  costPrice         Decimal?               @map("cost_price") @db.Decimal(10, 2)
-  status            PublishedProductStatus @default(online)
-  categoryId        String?                @map("category_id") @db.VarChar(64)
-  mainImage         String?                @map("main_image") @db.VarChar(512)
-  publishedAt       DateTime               @default(now()) @map("published_at")
+  id                         BigInt                 @id @default(autoincrement())
+  taskId                     BigInt                 @map("task_id")
+  shopId                     BigInt                 @map("shop_id")
+  sourceProductId            BigInt                 @map("source_product_id")
+  platformProductId          String?                @map("platform_product_id") @db.VarChar(64)
+  title                      String                 @db.VarChar(255)
+  salePrice                  Decimal                @map("sale_price") @db.Decimal(10, 2)
+  costPrice                  Decimal?               @map("cost_price") @db.Decimal(10, 2)
+  status                     PublishedProductStatus @default(online)
+  categoryId                 String?                @map("category_id") @db.VarChar(64)
+  mainImage                  String?                @map("main_image") @db.VarChar(512)
+  inventorySyncStatus        InventorySyncStatus    @default(synced) @map("inventory_sync_status")
+  inventoryFingerprint       String?                @map("inventory_fingerprint") @db.VarChar(64)
+  inventoryTargetFingerprint String?                @map("inventory_target_fingerprint") @db.VarChar(64)
+  inventoryVersion           Int                    @default(0) @map("inventory_version")
+  inventoryTargetVersion     Int                    @default(0) @map("inventory_target_version")
+  inventorySyncAttempts      Int                    @default(0) @map("inventory_sync_attempts")
+  inventoryNextRunAt         DateTime?              @map("inventory_next_run_at")
+  inventoryLockedAt          DateTime?              @map("inventory_locked_at")
+  inventoryLockedBy          String?                @map("inventory_locked_by") @db.VarChar(128)
+  inventoryLastSyncedAt      DateTime?              @map("inventory_last_synced_at")
+  inventorySyncReason        String?                @map("inventory_sync_reason") @db.VarChar(64)
+  inventorySyncError         String?                @map("inventory_sync_error") @db.Text
+  editAttempts               Int                    @default(0) @map("edit_attempts")
+  lastEditAttemptAt          DateTime?              @map("last_edit_attempt_at")
+  lastEditedAt               DateTime?              @map("last_edited_at")
+  lastEditError              String?                @map("last_edit_error") @db.Text
+  platformStatusRaw          Int?                   @map("platform_status_raw")
+  platformCheckStatusRaw     Int?                   @map("platform_check_status_raw")
+  platformStatusSyncedAt     DateTime?              @map("platform_status_synced_at")
+  platformStatusError        String?                @map("platform_status_error") @db.Text
+  publishedAt                DateTime               @default(now()) @map("published_at")
 
-  task          PublishTask    @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  shop          Shop           @relation(fields: [shopId], references: [id])
-  sourceProduct SourceProduct  @relation(fields: [sourceProductId], references: [id])
+  task          PublishTask   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  shop          Shop          @relation(fields: [shopId], references: [id])
+  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id])
   orders        Order[]
+  orderItems    OrderItem[]
 
+  @@unique([taskId, shopId], name: "uk_publish_task_shop", map: "published_products_task_id_shop_id_key")
   @@index([shopId])
   @@index([platformProductId])
+  @@index([inventorySyncStatus, inventoryNextRunAt], map: "published_products_inventory_sync_status_inventory_next_run_at_")
+  @@index([inventoryLockedAt])
   @@map("published_products")
 }
 
@@ -231,52 +449,351 @@ enum OrderStatus {
   closed
 }
 
-model Order {
-  id                  BigInt      @id @default(autoincrement())
-  shopId              BigInt      @map("shop_id")
-  publishedProductId  BigInt?     @map("published_product_id")
-  platformOrderId     String      @map("platform_order_id") @db.VarChar(64)
-  buyerNick           String?     @map("buyer_nick") @db.VarChar(64)
-  receiverName        String?     @map("receiver_name") @db.VarChar(64)
-  receiverPhoneEnc    String?     @map("receiver_phone_enc") @db.VarChar(256)
-  receiverAddressEnc  String?     @map("receiver_address_enc") @db.Text
-  skuInfo             Json        @map("sku_info") @db.JsonB
-  amount              Decimal     @db.Decimal(10, 2)
-  status              OrderStatus
-  paidAt              DateTime?   @map("paid_at")
+enum OrderAfterSaleStatus {
+  none
+  pending
+  partial_refund
+  refunded
+  failed
+}
 
-  shop             Shop              @relation(fields: [shopId], references: [id])
-  publishedProduct PublishedProduct? @relation(fields: [publishedProductId], references: [id])
-  purchaseOrder    PurchaseOrder?
+enum OrderPartialRefundDisposition {
+  none
+  continue_remaining
+  stop_all
+}
+
+model Order {
+  id                           BigInt                        @id @default(autoincrement())
+  shopId                       BigInt                        @map("shop_id")
+  publishedProductId           BigInt?                       @map("published_product_id")
+  platformOrderId              String                        @map("platform_order_id") @db.VarChar(64)
+  buyerNick                    String?                       @map("buyer_nick") @db.VarChar(64)
+  receiverName                 String?                       @map("receiver_name") @db.VarChar(64)
+  receiverNameEnc              String?                       @map("receiver_name_enc") @db.VarChar(256)
+  receiverPhoneEnc             String?                       @map("receiver_phone_enc") @db.VarChar(256)
+  receiverAddressEnc           String?                       @map("receiver_address_enc") @db.Text
+  receiverAddressDetailEnc     String?                       @map("receiver_address_detail_enc") @db.Text
+  skuInfo                      Json                          @map("sku_info") @db.JsonB
+  amount                       Decimal                       @db.Decimal(10, 2)
+  status                       OrderStatus
+  afterSaleStatus              OrderAfterSaleStatus          @default(none) @map("after_sale_status")
+  afterSaleSyncedAt            DateTime?                     @map("after_sale_synced_at")
+  partialRefundDisposition     OrderPartialRefundDisposition @default(none) @map("partial_refund_disposition")
+  partialRefundFingerprint     String?                       @map("partial_refund_fingerprint") @db.VarChar(64)
+  partialRefundDispositionAt   DateTime?                     @map("partial_refund_disposition_at")
+  partialRefundDispositionNote String?                       @map("partial_refund_disposition_note") @db.Text
+  refundAmount                 Decimal?                      @map("refund_amount") @db.Decimal(10, 2)
+  refundAmountFingerprint      String?                       @map("refund_amount_fingerprint") @db.VarChar(64)
+  refundAmountConfirmedAt      DateTime?                     @map("refund_amount_confirmed_at")
+  refundAmountNote             String?                       @map("refund_amount_note") @db.Text
+  paidAt                       DateTime?                     @map("paid_at")
+
+  shop             Shop                   @relation(fields: [shopId], references: [id])
+  publishedProduct PublishedProduct?      @relation(fields: [publishedProductId], references: [id])
+  purchaseOrders   PurchaseOrder[]
+  items            OrderItem[]
+  logisticsRepairs OrderLogisticsRepair[]
 
   @@unique([shopId, platformOrderId])
   @@index([status])
+  @@index([afterSaleStatus])
   @@map("orders")
+}
+
+model OrderItem {
+  id                  BigInt   @id @default(autoincrement())
+  orderId             BigInt   @map("order_id")
+  publishedProductId  BigInt?  @map("published_product_id")
+  platformOrderItemId String   @map("platform_order_item_id") @db.VarChar(64)
+  platformProductId   String?  @map("platform_product_id") @db.VarChar(64)
+  platformSkuId       String   @map("platform_sku_id") @db.VarChar(64)
+  sourceOfferId       String?  @map("source_offer_id") @db.VarChar(32)
+  sourceSupplierId    String?  @map("source_supplier_id") @db.VarChar(32)
+  sourceSpecId        String?  @map("source_spec_id") @db.VarChar(128)
+  sourceSpecRequired  Boolean  @default(false) @map("source_spec_required")
+  afterSaleStatusRaw  Int?     @map("after_sale_status_raw")
+  afterSaleTypeRaw    Int?     @map("after_sale_type_raw")
+  refundStatusRaw     Int?     @map("refund_status_raw")
+  title               String   @db.VarChar(255)
+  quantity            Int
+  unitPrice           Decimal  @map("unit_price") @db.Decimal(10, 2)
+  specs               Json?    @db.JsonB
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  order             Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  publishedProduct  PublishedProduct?      @relation(fields: [publishedProductId], references: [id], onDelete: SetNull)
+  purchaseOrderItem PurchaseOrderItem?
+  shipmentItems     PurchaseShipmentItem[]
+
+  @@unique([orderId, platformOrderItemId], name: "uk_order_platform_item")
+  @@index([sourceOfferId, sourceSpecId])
+  @@index([sourceSupplierId])
+  @@index([publishedProductId])
+  @@map("order_items")
 }
 
 enum PurchaseOrderStatus {
   pending
   placed
+  awaiting_payment
+  paid
   shipped
   received
   failed
 }
 
+enum PurchaseExceptionStatus {
+  none
+  stopped
+  action_required
+  resolved
+}
+
+enum OrderLogisticsRepairStatus {
+  pending
+  running
+  completed
+}
+
 model PurchaseOrder {
-  id             BigInt              @id @default(autoincrement())
-  orderId        BigInt              @unique @map("order_id")
-  orderId1688    String?             @map("order_id_1688") @db.VarChar(64)
-  status         PurchaseOrderStatus @default(pending)
-  trackingNo     String?             @map("tracking_no") @db.VarChar(64)
-  carrier        String?             @db.VarChar(32)
-  failureReason  String?             @map("failure_reason") @db.Text
-  retryCount     Int                 @default(0) @map("retry_count")
-  createdAt      DateTime            @default(now()) @map("created_at")
+  id                      BigInt                  @id @default(autoincrement())
+  orderId                 BigInt                  @map("order_id")
+  buyerShopId             BigInt?                 @map("buyer_shop_id")
+  supplierKey             String                  @map("supplier_key") @db.VarChar(64)
+  outOrderId              String                  @unique @map("out_order_id") @db.VarChar(128)
+  orderId1688             String?                 @unique @map("order_id_1688") @db.VarChar(64)
+  paymentMode             String                  @default("manual") @map("payment_mode") @db.VarChar(16)
+  purchaseCost            Decimal?                @map("purchase_cost") @db.Decimal(10, 2)
+  reconciledCost          Decimal?                @map("reconciled_cost") @db.Decimal(10, 2)
+  status                  PurchaseOrderStatus     @default(pending)
+  trackingNo              String?                 @map("tracking_no") @db.VarChar(64)
+  carrier                 String?                 @db.VarChar(64)
+  failureReason           String?                 @map("failure_reason") @db.Text
+  retryCount              Int                     @default(0) @map("retry_count")
+  attemptNo               Int                     @default(1) @map("attempt_no")
+  attemptStartedAt        DateTime                @default(now()) @map("attempt_started_at")
+  priorIncurredCost       Decimal                 @default(0) @map("prior_incurred_cost") @db.Decimal(10, 2)
+  retryEligible           Boolean                 @default(false) @map("retry_eligible")
+  everShipped             Boolean                 @default(false) @map("ever_shipped")
+  syncRevision            Int                     @default(0) @map("sync_revision")
+  settledAuditNextAt      DateTime?               @map("settled_audit_next_at")
+  exceptionStatus         PurchaseExceptionStatus @default(none) @map("exception_status")
+  exceptionRevision       Int                     @default(0) @map("exception_revision")
+  exceptionReason         String?                 @map("exception_reason") @db.Text
+  exceptionDetectedAt     DateTime?               @map("exception_detected_at")
+  exceptionResolvedAt     DateTime?               @map("exception_resolved_at")
+  exceptionResolutionNote String?                 @map("exception_resolution_note") @db.Text
+  createdAt               DateTime                @default(now()) @map("created_at")
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order            Order                   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  buyerShop        Shop?                   @relation("PurchaseBuyerShop", fields: [buyerShopId], references: [id], onDelete: SetNull)
+  items            PurchaseOrderItem[]
+  shipments        PurchaseShipment[]
+  attempts         PurchaseOrderAttempt[]
+  recoveries       PurchaseOrderRecovery[]
+  logisticsRepairs OrderLogisticsRepair[]
 
+  @@unique([orderId, supplierKey], name: "uk_order_supplier_purchase")
+  @@index([orderId])
+  @@index([buyerShopId])
   @@index([status])
+  @@index([exceptionStatus])
+  @@index([settledAuditNextAt])
   @@map("purchase_orders")
+}
+
+model PurchaseOrderAttempt {
+  id              BigInt              @id @default(autoincrement())
+  purchaseOrderId BigInt              @map("purchase_order_id")
+  attemptNo       Int                 @map("attempt_no")
+  outOrderId      String              @unique @map("out_order_id") @db.VarChar(128)
+  orderId1688     String              @map("order_id_1688") @db.VarChar(64)
+  status          PurchaseOrderStatus
+  purchaseCost    Decimal?            @map("purchase_cost") @db.Decimal(10, 2)
+  actualCost      Decimal             @map("actual_cost") @db.Decimal(10, 2)
+  failureReason   String?             @map("failure_reason") @db.Text
+  resolutionNote  String              @map("resolution_note") @db.Text
+  startedAt       DateTime            @map("started_at")
+  resolvedAt      DateTime            @map("resolved_at")
+  createdAt       DateTime            @default(now()) @map("created_at")
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  @@unique([purchaseOrderId, attemptNo], name: "uk_purchase_attempt_no", map: "uk_purchase_attempt_no")
+  @@index([purchaseOrderId])
+  @@index([orderId1688])
+  @@map("purchase_order_attempts")
+}
+
+model PurchaseOrderRecovery {
+  id                BigInt              @id @default(autoincrement())
+  purchaseOrderId   BigInt              @map("purchase_order_id")
+  operatorUserId    BigInt              @map("operator_user_id")
+  exceptionRevision Int                 @map("exception_revision")
+  outOrderId        String              @map("out_order_id") @db.VarChar(128)
+  orderId1688       String              @map("order_id_1688") @db.VarChar(64)
+  previousStatus    PurchaseOrderStatus @map("previous_status")
+  previousShipments Json                @map("previous_shipments")
+  note              String              @db.Text
+  createdAt         DateTime            @default(now()) @map("created_at")
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  operator      User          @relation(fields: [operatorUserId], references: [id], onDelete: Restrict)
+
+  @@index([purchaseOrderId])
+  @@index([operatorUserId])
+  @@map("purchase_order_recoveries")
+}
+
+model OrderLogisticsRepair {
+  id                       BigInt                     @id @default(autoincrement())
+  repairKey                String                     @unique @map("repair_key") @db.VarChar(64)
+  orderId                  BigInt                     @map("order_id")
+  purchaseOrderId          BigInt                     @map("purchase_order_id")
+  operatorUserId           BigInt                     @map("operator_user_id")
+  exceptionRevision        Int                        @map("exception_revision")
+  purchaseSyncRevision     Int                        @map("purchase_sync_revision")
+  targetFingerprint        String                     @map("target_fingerprint") @db.VarChar(64)
+  previousPlatformPackages Json                       @map("previous_platform_packages")
+  targetPlatformPackages   Json                       @map("target_platform_packages")
+  targetPurchaseShipments  Json                       @map("target_purchase_shipments")
+  targetPurchaseStatus     PurchaseOrderStatus        @map("target_purchase_status")
+  targetPurchaseCost       Decimal                    @map("target_purchase_cost") @db.Decimal(10, 2)
+  reconciledCost           Decimal                    @map("reconciled_cost") @db.Decimal(10, 2)
+  resolutionNote           String                     @map("resolution_note") @db.Text
+  status                   OrderLogisticsRepairStatus @default(pending)
+  attempts                 Int                        @default(0)
+  lockedAt                 DateTime?                  @map("locked_at")
+  lockedBy                 String?                    @map("locked_by") @db.VarChar(128)
+  lastError                String?                    @map("last_error") @db.VarChar(500)
+  completedAt              DateTime?                  @map("completed_at")
+  createdAt                DateTime                   @default(now()) @map("created_at")
+  updatedAt                DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  order         Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  operator      User          @relation(fields: [operatorUserId], references: [id], onDelete: Restrict)
+
+  @@unique([purchaseOrderId, exceptionRevision], name: "uk_order_logistics_repair_exception", map: "uk_order_logistics_repair_exception")
+  @@index([orderId])
+  @@index([purchaseOrderId])
+  @@index([operatorUserId])
+  @@index([status, lockedAt])
+  @@map("order_logistics_repairs")
+}
+
+model PurchaseOrderItem {
+  id              BigInt   @id @default(autoincrement())
+  purchaseOrderId BigInt   @map("purchase_order_id")
+  orderItemId     BigInt   @unique @map("order_item_id")
+  offerId         String   @map("offer_id") @db.VarChar(32)
+  specId          String?  @map("spec_id") @db.VarChar(128)
+  quantity        Int
+  unitCost        Decimal? @map("unit_cost") @db.Decimal(10, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  orderItem     OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseOrderId])
+  @@map("purchase_order_items")
+}
+
+model PurchaseShipment {
+  id              BigInt   @id @default(autoincrement())
+  purchaseOrderId BigInt   @map("purchase_order_id")
+  trackingNo      String   @map("tracking_no") @db.VarChar(64)
+  carrier         String?  @db.VarChar(64)
+  status          String?  @db.VarChar(32)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  purchaseOrder PurchaseOrder          @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  items         PurchaseShipmentItem[]
+
+  @@unique([purchaseOrderId, trackingNo])
+  @@index([trackingNo])
+  @@map("purchase_shipments")
+}
+
+model PurchaseShipmentItem {
+  id                 BigInt @id @default(autoincrement())
+  purchaseShipmentId BigInt @map("purchase_shipment_id")
+  orderItemId        BigInt @map("order_item_id")
+  quantity           Int
+
+  purchaseShipment PurchaseShipment @relation(fields: [purchaseShipmentId], references: [id], onDelete: Cascade)
+  orderItem        OrderItem        @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@unique([purchaseShipmentId, orderItemId], name: "uk_shipment_order_item")
+  @@index([orderItemId])
+  @@map("purchase_shipment_items")
+}
+
+// ----- 审计与运行告警 -----
+
+enum AuditOutcome {
+  success
+  failure
+}
+
+model AuditLog {
+  id           BigInt       @id @default(autoincrement())
+  userId       BigInt?      @map("user_id")
+  action       String       @db.VarChar(128)
+  method       String?      @db.VarChar(8)
+  route        String?      @db.VarChar(255)
+  resourceType String?      @map("resource_type") @db.VarChar(64)
+  resourceId   String?      @map("resource_id") @db.VarChar(128)
+  outcome      AuditOutcome
+  statusCode   Int          @map("status_code")
+  requestId    String       @map("request_id") @db.VarChar(64)
+  ipHash       String?      @map("ip_hash") @db.VarChar(64)
+  userAgent    String?      @map("user_agent") @db.VarChar(256)
+  durationMs   Int          @map("duration_ms")
+  metadata     Json?        @db.JsonB
+  createdAt    DateTime     @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
+  @@index([outcome, createdAt(sort: Desc)])
+  @@index([requestId])
+  @@map("audit_logs")
+}
+
+enum OperationalAlertSeverity {
+  warning
+  critical
+}
+
+enum OperationalAlertStatus {
+  active
+  resolved
+}
+
+model OperationalAlert {
+  id             BigInt                   @id @default(autoincrement())
+  key            String                   @unique @db.VarChar(160)
+  type           String                   @db.VarChar(64)
+  severity       OperationalAlertSeverity
+  status         OperationalAlertStatus   @default(active)
+  summary        String                   @db.VarChar(255)
+  details        Json?                    @db.JsonB
+  occurrences    Int                      @default(1)
+  firstSeenAt    DateTime                 @default(now()) @map("first_seen_at")
+  lastSeenAt     DateTime                 @default(now()) @map("last_seen_at")
+  lastNotifiedAt DateTime?                @map("last_notified_at")
+  resolvedAt     DateTime?                @map("resolved_at")
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @updatedAt @map("updated_at")
+
+  @@index([status, severity, lastSeenAt(sort: Desc)])
+  @@index([type, lastSeenAt(sort: Desc)])
+  @@map("operational_alerts")
 }
 
 // ----- AI 使用与计费 -----
@@ -294,20 +811,22 @@ enum AiModule {
 }
 
 model AiUsageLog {
-  id            BigInt   @id @default(autoincrement())
-  userId        BigInt   @map("user_id")
-  module        AiModule
-  model         String   @db.VarChar(64)
-  inputTokens   Int      @default(0) @map("input_tokens")
-  outputTokens  Int      @default(0) @map("output_tokens")
-  imageCount    Int      @default(0) @map("image_count")
-  costCny       Decimal  @map("cost_cny") @db.Decimal(10, 4)
-  traceId       String?  @map("trace_id") @db.VarChar(64)
-  createdAt     DateTime @default(now()) @map("created_at")
+  id           BigInt   @id @default(autoincrement())
+  userId       BigInt   @map("user_id")
+  module       AiModule
+  model        String   @db.VarChar(64)
+  inputTokens  Int      @default(0) @map("input_tokens")
+  outputTokens Int      @default(0) @map("output_tokens")
+  imageCount   Int      @default(0) @map("image_count")
+  costCny      Decimal  @map("cost_cny") @db.Decimal(10, 4)
+  // true = 用户自带密钥（BYOK）调用，不计入平台额度
+  viaByok      Boolean  @default(false) @map("via_byok")
+  traceId      String?  @map("trace_id") @db.VarChar(64)
+  createdAt    DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId, createdAt])
+  @@index([userId, viaByok, createdAt])
   @@index([module])
   @@map("ai_usage_logs")
 }
@@ -326,18 +845,49 @@ enum SubscriptionStatus {
 }
 
 model Subscription {
-  id          BigInt             @id @default(autoincrement())
-  userId      BigInt             @map("user_id")
-  plan        SubscriptionPlan
-  startDate   DateTime           @map("start_date") @db.Date
-  endDate     DateTime           @map("end_date") @db.Date
-  amountCny   Decimal            @map("amount_cny") @db.Decimal(10, 2)
-  status      SubscriptionStatus @default(active)
-  createdAt   DateTime           @default(now()) @map("created_at")
+  id        BigInt             @id @default(autoincrement())
+  userId    BigInt             @map("user_id")
+  plan      SubscriptionPlan
+  startDate DateTime           @map("start_date") @db.Date
+  endDate   DateTime           @map("end_date") @db.Date
+  amountCny Decimal            @map("amount_cny") @db.Decimal(10, 2)
+  status    SubscriptionStatus @default(active)
+  createdAt DateTime           @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([endDate])
   @@map("subscriptions")
+}
+
+// ----- BYOK：用户自带 LLM 密钥（按用户绑定，密文存储） -----
+
+enum LlmProviderName {
+  openai
+  anthropic
+  deepseek
+  dashscope
+}
+
+enum LlmCredentialStatus {
+  active
+  disabled
+}
+
+model LlmCredential {
+  id         BigInt              @id @default(autoincrement())
+  userId     BigInt              @unique @map("user_id")
+  provider   LlmProviderName
+  // AES-256-GCM 密文，格式 base64(iv).base64(tag).base64(ciphertext)
+  apiKeyEnc  String              @map("api_key_enc") @db.VarChar(1024)
+  label      String?             @db.VarChar(64)
+  status     LlmCredentialStatus @default(active)
+  lastUsedAt DateTime?           @map("last_used_at")
+  createdAt  DateTime            @default(now()) @map("created_at")
+  updatedAt  DateTime            @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("llm_credentials")
 }

@@ -9,6 +9,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -52,7 +53,15 @@ const PRODUCTS = [
     categoryL2: 'T恤',
     monthlySold: 8200,
     isOnePieceDrop: true,
-    score: { demand: 92, competition: 65, profit: 78, compliance: 95, trend: 88, overall: 84.6, reason: ['抖音 7 日热度 +210%', '同款利润空间 35%+', '类目合规度高'] },
+    score: {
+      demand: 92,
+      competition: 65,
+      profit: 78,
+      compliance: 95,
+      trend: 88,
+      overall: 84.6,
+      reason: ['抖音 7 日热度 +210%', '同款利润空间 35%+', '类目合规度高'],
+    },
   },
   {
     productId1688: 'mock-1002',
@@ -66,7 +75,15 @@ const PRODUCTS = [
     categoryL2: '口罩',
     monthlySold: 23400,
     isOnePieceDrop: true,
-    score: { demand: 88, competition: 72, profit: 60, compliance: 70, trend: 90, overall: 76.0, reason: ['夏季旺季', '小红书种草量大', '注意"防晒"宣称合规'] },
+    score: {
+      demand: 88,
+      competition: 72,
+      profit: 60,
+      compliance: 70,
+      trend: 90,
+      overall: 76.0,
+      reason: ['夏季旺季', '小红书种草量大', '注意"防晒"宣称合规'],
+    },
   },
   {
     productId1688: 'mock-1003',
@@ -80,7 +97,15 @@ const PRODUCTS = [
     categoryL2: '水杯',
     monthlySold: 5600,
     isOnePieceDrop: true,
-    score: { demand: 75, competition: 55, profit: 82, compliance: 95, trend: 70, overall: 75.4, reason: ['利润空间大', '竞争中等'] },
+    score: {
+      demand: 75,
+      competition: 55,
+      profit: 82,
+      compliance: 95,
+      trend: 70,
+      overall: 75.4,
+      reason: ['利润空间大', '竞争中等'],
+    },
   },
   {
     productId1688: 'mock-1004',
@@ -94,7 +119,15 @@ const PRODUCTS = [
     categoryL2: '饮水器',
     monthlySold: 3100,
     isOnePieceDrop: true,
-    score: { demand: 82, competition: 50, profit: 75, compliance: 90, trend: 85, overall: 78.4, reason: ['宠物赛道增长', '同款少'] },
+    score: {
+      demand: 82,
+      competition: 50,
+      profit: 75,
+      compliance: 90,
+      trend: 85,
+      overall: 78.4,
+      reason: ['宠物赛道增长', '同款少'],
+    },
   },
   {
     productId1688: 'mock-1005',
@@ -108,7 +141,15 @@ const PRODUCTS = [
     categoryL2: '手机壳',
     monthlySold: 18200,
     isOnePieceDrop: true,
-    score: { demand: 80, competition: 90, profit: 50, compliance: 85, trend: 65, overall: 64.5, reason: ['竞争激烈', '需差异化设计'] },
+    score: {
+      demand: 80,
+      competition: 90,
+      profit: 50,
+      compliance: 85,
+      trend: 65,
+      overall: 64.5,
+      reason: ['竞争激烈', '需差异化设计'],
+    },
   },
   {
     productId1688: 'mock-1006',
@@ -122,7 +163,15 @@ const PRODUCTS = [
     categoryL2: '沙发垫',
     monthlySold: 4500,
     isOnePieceDrop: true,
-    score: { demand: 70, competition: 60, profit: 80, compliance: 92, trend: 72, overall: 73.4, reason: ['客单价较高', '类目稳定'] },
+    score: {
+      demand: 70,
+      competition: 60,
+      profit: 80,
+      compliance: 92,
+      trend: 72,
+      overall: 73.4,
+      reason: ['客单价较高', '类目稳定'],
+    },
   },
   {
     productId1688: 'mock-1007',
@@ -136,7 +185,15 @@ const PRODUCTS = [
     categoryL2: '榨汁机',
     monthlySold: 6800,
     isOnePieceDrop: true,
-    score: { demand: 78, competition: 70, profit: 70, compliance: 88, trend: 80, overall: 73.8, reason: ['暑期需求旺', '内容好做'] },
+    score: {
+      demand: 78,
+      competition: 70,
+      profit: 70,
+      compliance: 88,
+      trend: 80,
+      overall: 73.8,
+      reason: ['暑期需求旺', '内容好做'],
+    },
   },
   {
     productId1688: 'mock-1008',
@@ -150,7 +207,15 @@ const PRODUCTS = [
     categoryL2: '收纳',
     monthlySold: 9100,
     isOnePieceDrop: true,
-    score: { demand: 72, competition: 75, profit: 65, compliance: 95, trend: 68, overall: 65.4, reason: ['长青品类', '注意打差异'] },
+    score: {
+      demand: 72,
+      competition: 75,
+      profit: 65,
+      compliance: 95,
+      trend: 68,
+      overall: 65.4,
+      reason: ['长青品类', '注意打差异'],
+    },
   },
   {
     productId1688: 'mock-1009',
@@ -164,7 +229,15 @@ const PRODUCTS = [
     categoryL2: '益智',
     monthlySold: 4300,
     isOnePieceDrop: true,
-    score: { demand: 76, competition: 55, profit: 78, compliance: 80, trend: 72, overall: 71.6, reason: ['母婴垂类好做', '注意 3C 认证'] },
+    score: {
+      demand: 76,
+      competition: 55,
+      profit: 78,
+      compliance: 80,
+      trend: 72,
+      overall: 71.6,
+      reason: ['母婴垂类好做', '注意 3C 认证'],
+    },
   },
   {
     productId1688: 'mock-1010',
@@ -178,7 +251,15 @@ const PRODUCTS = [
     categoryL2: '腰包',
     monthlySold: 7400,
     isOnePieceDrop: true,
-    score: { demand: 74, competition: 68, profit: 70, compliance: 92, trend: 75, overall: 70.8, reason: ['夏季运动旺季'] },
+    score: {
+      demand: 74,
+      competition: 68,
+      profit: 70,
+      compliance: 92,
+      trend: 75,
+      overall: 70.8,
+      reason: ['夏季运动旺季'],
+    },
   },
 ];
 
@@ -199,10 +280,36 @@ async function main() {
   let created = 0;
   for (const p of PRODUCTS) {
     const { score, ...productData } = p;
+    const skuList = [
+      {
+        skuId: `${p.productId1688}-default`,
+        specName: '默认',
+        price: p.price,
+        stock: 100,
+        attributes: {},
+      },
+    ];
+    const inventoryFingerprint = createHash('sha256')
+      .update(
+        JSON.stringify({
+          availability: 'available',
+          inventory: [{ skuId: skuList[0].skuId, stock: 100 }],
+          productId1688: p.productId1688,
+        }),
+      )
+      .digest('hex');
+    const sourceData = {
+      ...productData,
+      skuList,
+      availability: 'available',
+      totalStock: 100,
+      inventoryFingerprint,
+      inventoryVersion: 1,
+    };
     const product = await prisma.sourceProduct.upsert({
       where: { productId1688: p.productId1688 },
-      create: productData,
-      update: productData,
+      create: sourceData,
+      update: sourceData,
     });
     await prisma.productScore.upsert({
       where: { productId: product.id },

@@ -95,12 +95,18 @@ export interface TitleParseResult {
   rejected: Array<{ title: string; reason: string }>;
 }
 
-/** 解析 LLM 返回的 JSON 并过滤违禁词 */
-export function parseAndFilterTitles(
-  raw: string,
-  platform: PlatformType,
-): TitleParseResult {
+/** 最终发布前复用同一套平台标题规则，避免只在 LLM 解析阶段校验。 */
+export function validateTitleForPlatform(title: string, platform: PlatformType): string | null {
+  const normalized = title.trim();
+  if (!normalized) return '标题不能为空';
   const rule = PLATFORM_RULES[platform];
+  if (normalized.length > rule.maxLength) return `超过 ${rule.maxLength} 字`;
+  const hit = rule.forbidden.find((word) => normalized.includes(word));
+  return hit ? `包含禁用词: ${hit}` : null;
+}
+
+/** 解析 LLM 返回的 JSON 并过滤违禁词 */
+export function parseAndFilterTitles(raw: string, platform: PlatformType): TitleParseResult {
   let parsed: { titles?: unknown };
   try {
     parsed = JSON.parse(extractJson(raw));
@@ -115,17 +121,14 @@ export function parseAndFilterTitles(
   const accepted: string[] = [];
   const rejected: Array<{ title: string; reason: string }> = [];
 
-  for (const t of titles) {
-    if (t.length > rule.maxLength) {
-      rejected.push({ title: t, reason: `超过 ${rule.maxLength} 字` });
+  for (const rawTitle of titles) {
+    const title = rawTitle.trim();
+    const reason = validateTitleForPlatform(title, platform);
+    if (reason) {
+      rejected.push({ title: rawTitle, reason });
       continue;
     }
-    const hit = rule.forbidden.find((w) => t.includes(w));
-    if (hit) {
-      rejected.push({ title: t, reason: `包含禁用词: ${hit}` });
-      continue;
-    }
-    accepted.push(t);
+    if (!accepted.includes(title)) accepted.push(title);
   }
 
   return { titles: accepted, rejected };

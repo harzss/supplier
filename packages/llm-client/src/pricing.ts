@@ -24,7 +24,9 @@ export function calcCostCny(model: LlmModel, inputTokens: number, outputTokens: 
   const price = PRICES[model];
   if (!price) return 0;
   return Number(
-    ((price.inputPerKToken * inputTokens) / 1000 +
-      (price.outputPerKToken * outputTokens) / 1000).toFixed(6),
+    (
+      (price.inputPerKToken * inputTokens) / 1000 +
+      (price.outputPerKToken * outputTokens) / 1000
+    ).toFixed(6),
   );
 }

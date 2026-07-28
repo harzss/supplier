@@ -1,0 +1,129 @@
+name: Release gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit:prod
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: node --test deploy/cloudflare/staging-gateway/worker.test.mjs
+      - run: pnpm build
+      - run: pnpm exec prettier --check "**/*.{ts,tsx,md,json,yml,yaml}"
+      - run: git diff --check
+
+  images:
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build immutable runtime targets
+        run: |
+          docker build --target bff -t supplier-bff:${IMAGE_TAG} .
+          docker build --target migrate -t supplier-migrate:${IMAGE_TAG} .
+          docker build --target web -t supplier-web:${IMAGE_TAG} \
+            --build-arg NEXT_PUBLIC_AUTH_MODE=supabase \
+            --build-arg NEXT_PUBLIC_BFF_URL=https://api.ci.example \
+            --build-arg NEXT_PUBLIC_SUPABASE_URL=https://auth.ci.example \
+            --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=ci-public-anon-key .
+      - name: Run migrations and production smoke tests
+        run: |
+          set -euo pipefail
+          docker network create supplier-ci
+          cleanup() {
+            docker rm -f supplier-web-ci supplier-bff-ci supplier-redis-ci supplier-postgres-ci >/dev/null 2>&1 || true
+            docker network rm supplier-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run -d --name supplier-postgres-ci --network supplier-ci \
+            -e POSTGRES_USER=supplier -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=supplier \
+            postgres:15-alpine
+          docker run -d --name supplier-redis-ci --network supplier-ci redis:7-alpine
+
+          for attempt in $(seq 1 30); do
+            if docker exec supplier-postgres-ci pg_isready -U supplier -d supplier >/dev/null 2>&1; then break; fi
+            if [ "$attempt" = 30 ]; then docker logs supplier-postgres-ci; exit 1; fi
+            sleep 1
+          done
+
+          docker run --rm --network supplier-ci \
+            -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            -e DIRECT_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            supplier-migrate:${IMAGE_TAG}
+
+          docker run --rm --network supplier-ci \
+            -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            -e DIRECT_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            supplier-migrate:${IMAGE_TAG} \
+            migrate status --schema node_modules/@supplier/db/prisma/schema.prisma
+
+          docker run --rm --network supplier-ci \
+            -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            -e DIRECT_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            supplier-migrate:${IMAGE_TAG} \
+            migrate diff --exit-code \
+            --from-url postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            --to-schema-datamodel node_modules/@supplier/db/prisma/schema.prisma
+
+          docker run -d --name supplier-bff-ci --network supplier-ci -p 3101:3001 \
+            -e NODE_ENV=production -e AUTH_MODE=supabase \
+            -e SUPABASE_URL=https://auth.ci.example \
+            -e SUPABASE_JWT_SECRET=ci-jwt-secret-that-is-longer-than-thirty-two \
+            -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            -e REDIS_URL=redis://supplier-redis-ci:6379 \
+            -e ENCRYPTION_KEY=ci-encryption-key-that-is-longer-than-thirty-two \
+            -e OPERATIONS_TOKEN=ci-operations-token-that-is-longer-than-thirty-two \
+            -e ALERT_WEBHOOK_URL=https://alerts.ci.example/hooks/supplier \
+            -e ALERT_WEBHOOK_SECRET=ci-alert-webhook-secret-longer-than-thirty-two \
+            -e CORS_ORIGINS=https://supplier.ci.example \
+            -e PUBLISH_QUEUE_MODE=database \
+            supplier-bff:${IMAGE_TAG}
+          docker run -d --name supplier-web-ci -p 3100:3000 supplier-web:${IMAGE_TAG}
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3101/api/health/ready >/dev/null && \
+               curl -fsS http://127.0.0.1:3100/ >/dev/null; then break; fi
+            if [ "$attempt" = 30 ]; then docker logs supplier-bff-ci; docker logs supplier-web-ci; exit 1; fi
+            sleep 1
+          done
+
+          ALLOW_INSECURE_DEPLOY_VERIFY=true \
+          BFF_URL=http://127.0.0.1:3101 \
+          WEB_URL=http://127.0.0.1:3100 \
+          OPERATIONS_TOKEN=ci-operations-token-that-is-longer-than-thirty-two \
+          node scripts/verify-deployment.mjs
+
+          test "$(docker image inspect supplier-bff:${IMAGE_TAG} --format '{{.Config.User}}')" = node
+          test "$(docker image inspect supplier-web:${IMAGE_TAG} --format '{{.Config.User}}')" = node
+          docker stop supplier-bff-ci supplier-web-ci
+          test "$(docker inspect supplier-bff-ci --format '{{.State.ExitCode}}')" = 0
+          test "$(docker inspect supplier-web-ci --format '{{.State.ExitCode}}')" = 0

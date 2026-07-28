@@ -14,6 +14,8 @@ export interface TokenSet {
   refreshToken?: string;
   expiresAt: Date;
   scope?: string[];
+  platformShopId?: string;
+  shopName?: string;
 }
 
 export interface PlatformShop {

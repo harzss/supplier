@@ -1,4 +1,12 @@
-import { Global, Logger, Module, type Provider } from '@nestjs/common';
+import {
+  Global,
+  Inject,
+  Injectable,
+  Logger,
+  Module,
+  type OnApplicationShutdown,
+  type Provider,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 
@@ -38,9 +46,26 @@ const redisProvider: Provider = {
   },
 };
 
+@Injectable()
+export class RedisLifecycle implements OnApplicationShutdown {
+  private readonly logger = new Logger(RedisLifecycle.name);
+
+  constructor(@Inject(REDIS_CLIENT) private readonly client: Redis) {}
+
+  async onApplicationShutdown(): Promise<void> {
+    if (this.client.status === 'end') return;
+    try {
+      await this.client.quit();
+    } catch (error) {
+      this.logger.warn(`Redis graceful shutdown failed: ${(error as Error).message}`);
+      this.client.disconnect(false);
+    }
+  }
+}
+
 @Global()
 @Module({
-  providers: [redisProvider],
+  providers: [redisProvider, RedisLifecycle],
   exports: [redisProvider],
 })
 export class RedisModule {}

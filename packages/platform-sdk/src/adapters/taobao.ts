@@ -8,6 +8,8 @@ import type {
   PublishProductDto,
   PublishResult,
   ShipDto,
+  ShipPackagesDto,
+  SyncInventoryDto,
   UpdateProductDto,
 } from '../types';
 
@@ -45,6 +47,10 @@ export class TaobaoAdapter extends BasePlatformAdapter {
     throw new Error('Not implemented: taobao.updateProduct');
   }
 
+  async syncInventory(_token: string, _dto: SyncInventoryDto): Promise<void> {
+    throw new Error('Not implemented: taobao.syncInventory');
+  }
+
   async offlineProduct(_token: string, _productId: string): Promise<void> {
     throw new Error('Not implemented: taobao.offlineProduct');
   }
@@ -63,6 +69,10 @@ export class TaobaoAdapter extends BasePlatformAdapter {
 
   async shipOrder(_token: string, _dto: ShipDto): Promise<void> {
     throw new Error('Not implemented: taobao.shipOrder');
+  }
+
+  async shipPackages(_token: string, _dto: ShipPackagesDto): Promise<void> {
+    throw new Error('Not implemented: taobao.shipPackages');
   }
 
   protected sign(_params: Record<string, unknown>): string {

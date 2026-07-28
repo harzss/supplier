@@ -26,6 +26,7 @@ const opts: ChatOptions = {
 describe('LlmClient', () => {
   it('throws when no provider is configured', async () => {
     const client = new LlmClient({ primary: new Map() });
+    expect(client.supports('deepseek-v3')).toBe(false);
     await expect(client.chat(opts)).rejects.toThrowError(/No provider/);
   });
 
@@ -34,6 +35,7 @@ describe('LlmClient', () => {
     const client = new LlmClient({
       primary: new Map([['deepseek-v3', provider]]),
     });
+    expect(client.supports('deepseek-v3')).toBe(true);
     const r = await client.chat(opts);
     expect(r.content).toBe('ok');
     expect(provider.chat).toHaveBeenCalledTimes(1);

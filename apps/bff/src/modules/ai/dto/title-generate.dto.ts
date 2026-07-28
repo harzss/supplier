@@ -1,5 +1,5 @@
-import { IsArray, IsOptional, IsString } from 'class-validator';
-import type { PlatformType, UserPlan } from '@supplier/shared-types';
+import { IsArray, IsString } from 'class-validator';
+import type { PlatformType } from '@supplier/shared-types';
 
 export class TitleGenerateDto {
   @IsString()
@@ -14,8 +14,4 @@ export class TitleGenerateDto {
 
   @IsString()
   targetPlatform!: PlatformType;
-
-  @IsOptional()
-  @IsString()
-  userPlan?: UserPlan;
 }

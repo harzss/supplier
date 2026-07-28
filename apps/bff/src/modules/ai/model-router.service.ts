@@ -40,9 +40,7 @@ export class ModelRouterService {
 
   async pick(ctx: PickContext): Promise<LlmModel> {
     if (ctx.preferredModel) return ctx.preferredModel;
-    const upgraded = ctx.userPlan
-      ? this.upgradeForPlan[ctx.userPlan]?.[ctx.module]
-      : undefined;
+    const upgraded = ctx.userPlan ? this.upgradeForPlan[ctx.userPlan]?.[ctx.module] : undefined;
     return upgraded ?? this.defaultByModule[ctx.module];
   }
 }

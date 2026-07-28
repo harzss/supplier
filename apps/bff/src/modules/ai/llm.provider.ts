@@ -35,7 +35,11 @@ export const LlmClientProvider: Provider = {
     const openai = openaiKey ? createOpenAi(openaiKey) : null;
     const anthropic = anthropicKey ? createAnthropic(anthropicKey) : null;
 
-    const register = (model: LlmModel, primaryProvider: LlmProvider | null, fallbacks: Array<LlmProvider | null>) => {
+    const register = (
+      model: LlmModel,
+      primaryProvider: LlmProvider | null,
+      fallbacks: Array<LlmProvider | null>,
+    ) => {
       const fb = fallbacks.filter((p): p is LlmProvider => p !== null);
       if (primaryProvider) {
         primary.set(model, primaryProvider);

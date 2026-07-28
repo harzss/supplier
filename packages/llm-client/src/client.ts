@@ -81,6 +81,11 @@ export class LlmClient {
     throw lastErr instanceof Error ? lastErr : new LlmError('All providers failed', 'unknown');
   }
 
+  /** 当前客户端是否至少配置了一个可承接该模型的供应商。 */
+  supports(model: LlmModel): boolean {
+    return this.candidates(model).length > 0;
+  }
+
   private candidates(model: LlmModel): LlmProvider[] {
     const list: LlmProvider[] = [];
     const primary = this.opts.primary.get(model);

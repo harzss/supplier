@@ -1,12 +1,7 @@
 import type { PlatformType } from './platform';
 
-export type OrderStatus =
-  | 'paid'
-  | 'purchasing'
-  | 'shipped'
-  | 'received'
-  | 'refunded'
-  | 'closed';
+export type OrderStatus = 'paid' | 'purchasing' | 'shipped' | 'received' | 'refunded' | 'closed';
+export type OrderAfterSaleStatus = 'none' | 'pending' | 'partial_refund' | 'refunded' | 'failed';
 
 export interface Order {
   id: string;
@@ -18,6 +13,7 @@ export interface Order {
   receiverName: string;
   amount: number;
   status: OrderStatus;
+  afterSaleStatus: OrderAfterSaleStatus;
   paidAt: Date;
   skuInfo: OrderSkuInfo[];
 }
@@ -32,10 +28,18 @@ export interface OrderSkuInfo {
 export interface PurchaseOrder {
   id: string;
   orderId: string;
+  supplierKey: string;
+  outOrderId: string;
   orderId1688?: string;
-  status: 'pending' | 'placed' | 'shipped' | 'received' | 'failed';
+  paymentMode: 'manual';
+  status: 'pending' | 'placed' | 'awaiting_payment' | 'paid' | 'shipped' | 'received' | 'failed';
   trackingNo?: string;
   carrier?: string;
   failureReason?: string;
   retryCount: number;
+  exceptionStatus: 'none' | 'stopped' | 'action_required' | 'resolved';
+  exceptionReason?: string;
+  exceptionDetectedAt?: Date;
+  exceptionResolvedAt?: Date;
+  exceptionResolutionNote?: string;
 }

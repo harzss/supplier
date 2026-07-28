@@ -8,7 +8,13 @@
     "node": ">=20.10.0",
     "pnpm": ">=9.0.0"
   },
+  "pnpm": {
+    "overrides": {
+      "postcss@<8.5.10": "8.5.15"
+    }
+  },
   "scripts": {
+    "audit:prod": "pnpm audit --prod --audit-level high",
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
     "lint": "turbo run lint",
@@ -18,8 +24,13 @@
     "clean": "turbo run clean && rm -rf node_modules",
     "llm:test": "node scripts/test-llm.mjs",
     "db:migrate": "pnpm --filter @supplier/db prisma:migrate",
+    "db:migrate:deploy": "pnpm --filter @supplier/db prisma:migrate:deploy",
+    "db:migrate:status": "pnpm --filter @supplier/db prisma:migrate:status",
     "db:studio": "pnpm --filter @supplier/db prisma:studio",
-    "db:seed": "node scripts/seed.mjs"
+    "db:seed": "node scripts/seed.mjs",
+    "deploy:verify": "node scripts/verify-deployment.mjs",
+    "score": "node scripts/score-products.mjs",
+    "crawl": "node scripts/crawl-products.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

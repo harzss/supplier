@@ -4,6 +4,7 @@
     "module": "CommonJS",
     "moduleResolution": "Node",
     "target": "ES2022",
+    "incremental": false,
     "outDir": "dist",
     "rootDir": "src",
     "experimentalDecorators": true,

@@ -3,11 +3,19 @@ import type {
   AdapterConfig,
   CategoryAttr,
   CategoryNode,
+  CategoryQualification,
+  CategoryRecommendationInput,
+  CategoryRecommendationResult,
   OrderQuery,
   PlatformOrder,
+  PlatformProductState,
+  PlatformExecutionGuard,
   PublishProductDto,
   PublishResult,
+  ReplaceShipPackagesDto,
   ShipDto,
+  ShipPackagesDto,
+  SyncInventoryDto,
   UpdateProductDto,
 } from './types';
 
@@ -21,16 +29,31 @@ export interface PlatformAdapter {
 
   // ---- 商品 ----
   publishProduct(token: string, dto: PublishProductDto): Promise<PublishResult>;
+  findProductByExternalId?(token: string, externalProductId: string): Promise<PublishResult | null>;
   updateProduct(token: string, dto: UpdateProductDto): Promise<void>;
+  getProductState?(token: string, productId: string): Promise<PlatformProductState>;
+  syncInventory(token: string, dto: SyncInventoryDto): Promise<void>;
   offlineProduct(token: string, productId: string): Promise<void>;
 
   // ---- 类目 ----
   getCategoryTree(token: string): Promise<CategoryNode[]>;
   getCategoryAttributes(token: string, categoryId: string): Promise<CategoryAttr[]>;
+  getCategoryQualifications?(token: string, categoryId: string): Promise<CategoryQualification[]>;
+  recommendCategories?(
+    token: string,
+    input: CategoryRecommendationInput,
+  ): Promise<CategoryRecommendationResult>;
 
   // ---- 订单 ----
+  getOrder?(token: string, platformOrderId: string): Promise<PlatformOrder>;
   listOrders(token: string, query: OrderQuery): Promise<PlatformOrder[]>;
   shipOrder(token: string, dto: ShipDto): Promise<void>;
+  shipPackages(token: string, dto: ShipPackagesDto): Promise<void>;
+  replaceShipPackages?(
+    token: string,
+    dto: ReplaceShipPackagesDto,
+    guard?: PlatformExecutionGuard,
+  ): Promise<void>;
 }
 
 export abstract class BasePlatformAdapter implements PlatformAdapter {
@@ -43,11 +66,13 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
   abstract refreshToken(refreshToken: string): Promise<TokenSet>;
   abstract publishProduct(token: string, dto: PublishProductDto): Promise<PublishResult>;
   abstract updateProduct(token: string, dto: UpdateProductDto): Promise<void>;
+  abstract syncInventory(token: string, dto: SyncInventoryDto): Promise<void>;
   abstract offlineProduct(token: string, productId: string): Promise<void>;
   abstract getCategoryTree(token: string): Promise<CategoryNode[]>;
   abstract getCategoryAttributes(token: string, categoryId: string): Promise<CategoryAttr[]>;
   abstract listOrders(token: string, query: OrderQuery): Promise<PlatformOrder[]>;
   abstract shipOrder(token: string, dto: ShipDto): Promise<void>;
+  abstract shipPackages(token: string, dto: ShipPackagesDto): Promise<void>;
 
   /**
    * 通用签名占位 — 各平台覆盖实现

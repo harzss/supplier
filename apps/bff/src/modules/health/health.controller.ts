@@ -1,14 +1,26 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { Public } from '../entitlement/public.decorator';
+import { HealthService } from './health.service';
 
+@Public()
 @Controller('health')
 export class HealthController {
+  constructor(private readonly health: HealthService) {}
+
   @Get()
   check() {
-    return {
-      status: 'ok',
-      service: 'supplier-bff',
-      version: '0.1.0',
-      timestamp: new Date().toISOString(),
-    };
+    return this.health.liveness();
+  }
+
+  @Get('live')
+  live() {
+    return this.health.liveness();
+  }
+
+  @Get('ready')
+  async ready() {
+    const result = await this.health.readiness();
+    if (result.status !== 'ready') throw new ServiceUnavailableException(result);
+    return result;
   }
 }

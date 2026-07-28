@@ -1,10 +1,6 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import {
-  ProductService,
-  type ProductDto,
-  type RecommendationListDto,
-} from './product.service';
+import { ProductService, type ProductDto, type RecommendationListDto } from './product.service';
 import { ProductQueryDto } from './dto/product-query.dto';
 
 @ApiTags('product')
@@ -16,6 +12,12 @@ export class ProductController {
   @Get('recommendations')
   recommendations(@Query() query: ProductQueryDto): Promise<RecommendationListDto> {
     return this.productService.getDailyRecommendations(query);
+  }
+
+  /** 可筛选类目、商品数与采购价范围 */
+  @Get('facets')
+  facets() {
+    return this.productService.getFacets();
   }
 
   /** 按 1688 商品 ID 查询详情 */

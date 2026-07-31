@@ -26,11 +26,18 @@ export function ScoreRadar({ score, size = 220 }: { score: ProductScore; size?: 
   const dataPath = dataPoints.map((p) => p.join(',')).join(' ');
 
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="select-none">
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      className="select-none"
+      role="img"
+      aria-label={`AI 选品评分：需求 ${Math.round(score.demand)}，竞争 ${Math.round(score.competition)}，利润 ${Math.round(score.profit)}，合规 ${Math.round(score.compliance)}，趋势 ${Math.round(score.trend)}`}
+    >
       {/* 网格 */}
       {gridLevels.map((lvl) => {
         const pts = DIMENSIONS.map((_, i) => pointAt(i, lvl * 100).join(',')).join(' ');
-        return <polygon key={lvl} points={pts} fill="none" stroke="#e4e4e7" strokeWidth={1} />;
+        return <polygon key={lvl} points={pts} fill="none" stroke="#e7e9ee" strokeWidth={1} />;
       })}
       {/* 轴线 + 标签 */}
       {DIMENSIONS.map((d, i) => {
@@ -38,14 +45,14 @@ export function ScoreRadar({ score, size = 220 }: { score: ProductScore; size?: 
         const [lx, ly] = pointAt(i, 122);
         return (
           <g key={d.key}>
-            <line x1={cx} y1={cy} x2={x} y2={y} stroke="#e4e4e7" strokeWidth={1} />
+            <line x1={cx} y1={cy} x2={x} y2={y} stroke="#e7e9ee" strokeWidth={1} />
             <text
               x={lx}
               y={ly}
               fontSize={12}
               textAnchor="middle"
               dominantBaseline="middle"
-              fill="#52525b"
+              fill="#4f5663"
             >
               {d.label}
             </text>
@@ -55,7 +62,7 @@ export function ScoreRadar({ score, size = 220 }: { score: ProductScore; size?: 
               fontSize={10}
               textAnchor="middle"
               dominantBaseline="middle"
-              fill="#a1a1aa"
+              fill="#929baa"
             >
               {Math.round(score[d.key] as number)}
             </text>
@@ -63,9 +70,9 @@ export function ScoreRadar({ score, size = 220 }: { score: ProductScore; size?: 
         );
       })}
       {/* 数据多边形 */}
-      <polygon points={dataPath} fill="rgba(255,106,61,0.18)" stroke="#ff6a3d" strokeWidth={2} />
+      <polygon points={dataPath} fill="rgba(91,91,214,0.14)" stroke="#5b5bd6" strokeWidth={2} />
       {dataPoints.map((p, i) => (
-        <circle key={i} cx={p[0]} cy={p[1]} r={3} fill="#ff6a3d" />
+        <circle key={i} cx={p[0]} cy={p[1]} r={3} fill="#5b5bd6" />
       ))}
     </svg>
   );

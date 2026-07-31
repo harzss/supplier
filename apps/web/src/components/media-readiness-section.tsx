@@ -14,8 +14,8 @@ export function MediaReadinessSection() {
       <div className="mb-5 flex items-start justify-between gap-4 border-b border-[var(--line)] pb-5">
         <div>
           <div className="mb-1 flex items-center gap-2">
-            <h2 className="font-serif text-2xl font-semibold">AI 图片服务</h2>
-            <span className="bg-violet-100 px-2 py-0.5 font-mono text-[9px] font-semibold text-violet-700">
+            <h2 className="text-xl font-semibold tracking-tight">AI 图片服务</h2>
+            <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[9px] font-semibold text-violet-700">
               M4
             </span>
           </div>

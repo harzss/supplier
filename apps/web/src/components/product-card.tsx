@@ -17,58 +17,55 @@ export function ProductCard({
 }) {
   const reasons = Array.isArray(product.score?.reason) ? product.score!.reason : [];
   return (
-    <article className="group relative flex flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow-sm)] transition duration-200 hover:-translate-y-1 hover:border-[var(--ink)] hover:shadow-[4px_4px_0_var(--accent)]">
+    <article className="product-card">
       <Link
         href={`/products/${encodeURIComponent(product.productId1688)}`}
-        className="flex flex-1 flex-col"
+        className="product-card-link"
       >
-        <div className="relative aspect-[4/5] overflow-hidden border-b border-[var(--line)] bg-[var(--paper-deep)]">
+        <div className="product-card-media">
           {product.mainImage ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={product.mainImage}
-              alt={product.title}
-              className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.035]"
-            />
+            <img src={product.mainImage} alt={product.title} className="product-card-image" />
           ) : (
-            <div className="flex h-full items-center justify-center font-mono text-xs uppercase tracking-widest text-[var(--muted)]">
-              No image
+            <div className="flex h-full items-center justify-center text-xs text-[var(--muted)]">
+              暂无图片
             </div>
           )}
-          <span className="absolute left-2 top-2 border border-white/50 bg-[var(--ink)] px-2 py-1 font-mono text-[10px] font-bold text-white">
-            RANK {String(rank).padStart(2, '0')}
-          </span>
           {product.score && (
-            <span className="absolute right-2 top-2">
+            <span className="absolute left-2.5 top-2.5">
               <ScoreBadge value={product.score.overall} />
             </span>
           )}
         </div>
 
         <div className="flex flex-1 flex-col gap-2.5 p-3.5 sm:p-4">
+          <div className="flex items-center justify-between gap-3 text-xs text-[var(--muted)]">
+            <span className="font-medium tabular-nums">#{String(rank).padStart(2, '0')}</span>
+            <span className="tabular-nums">月销 {product.monthlySold.toLocaleString('zh-CN')}</span>
+          </div>
           <p className="line-clamp-2 min-h-10 text-sm font-semibold leading-5 text-[var(--ink)]">
             {product.title}
           </p>
-          <div className="flex items-end justify-between gap-3 border-t border-dashed border-[var(--line)] pt-2.5">
-            <span className="font-mono text-lg font-bold tracking-tight text-[var(--accent-dark)]">
+          <div className="flex items-end justify-between gap-3 border-t border-[var(--line)] pt-2.5">
+            <span className="text-lg font-semibold tracking-tight text-[var(--ink)] tabular-nums">
               ¥{product.price}
             </span>
-            <span className="font-mono text-[10px] text-[var(--muted)]">
-              SOLD {product.monthlySold.toLocaleString('zh-CN')}
-            </span>
+            {product.isOnePieceDrop ? (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                一件代发
+              </span>
+            ) : null}
           </div>
           {reasons.length > 0 && (
-            <p className="line-clamp-1 text-xs text-[var(--muted)]">{reasons[0]}</p>
+            <p className="line-clamp-1 rounded-lg bg-brand-50 px-2.5 py-2 text-xs text-brand-700">
+              {reasons[0]}
+            </p>
           )}
-          <div className="mt-auto flex items-center gap-1.5 pr-14 pt-1">
+          <div className="mt-auto flex items-center gap-1.5 pt-1">
             {product.categoryL1 && (
-              <span className="border border-[var(--line)] bg-[var(--surface-strong)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">
+              <span className="rounded-full border border-[var(--line)] bg-[var(--surface-strong)] px-2 py-1 text-[10px] text-[var(--muted)]">
                 {product.categoryL1}
-              </span>
-            )}
-            {product.isOnePieceDrop && (
-              <span className="border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">
-                一件代发
               </span>
             )}
           </div>
@@ -79,10 +76,8 @@ export function ProductCard({
         onClick={onToggleFavorite}
         disabled={favoritePending}
         aria-label={isFavorite ? `取消收藏 ${product.title}` : `收藏 ${product.title}`}
-        className={`absolute bottom-2.5 right-2.5 z-[1] flex h-11 w-11 items-center justify-center rounded-full border text-lg shadow-sm transition disabled:opacity-50 ${
-          isFavorite
-            ? 'border-brand-200 bg-brand-50 text-brand-600'
-            : 'border-[var(--line)] bg-[var(--surface)] text-[var(--muted)] hover:border-brand-300 hover:text-brand-500'
+        className={`product-favorite-button absolute right-2.5 top-2.5 z-[1] flex h-11 w-11 items-center justify-center rounded-full border bg-white/90 text-lg shadow-sm backdrop-blur disabled:opacity-50 ${
+          isFavorite ? 'border-brand-200 text-brand-600' : 'border-white/70 text-[var(--muted)]'
         }`}
       >
         <svg

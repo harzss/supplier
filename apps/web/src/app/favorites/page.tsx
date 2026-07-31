@@ -34,41 +34,36 @@ export default function FavoritesPage() {
   };
 
   return (
-    <main className="app-page text-[#20211e]">
+    <main className="app-page">
       <div>
-        <header className="mb-8 border-b border-[#20211e] pb-6">
-          <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-brand-600">
-            S-05 · Selection desk
-          </p>
+        <header className="mb-6">
+          <p className="page-kicker">选品中心</p>
           <div className="mt-2 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div>
-              <h1 className="font-serif text-4xl font-semibold tracking-tight">收藏与选款对比</h1>
-              <p className="mt-2 text-sm text-[#686a63]">
+              <h1 className="page-title">收藏与选款对比</h1>
+              <p className="page-description">
                 从收藏中选择最多 {MAX_COMPARE} 款，并排核对采购价、月销、五维评分与代发条件。
               </p>
             </div>
-            <div className="font-mono text-xs text-[#686a63]">
+            <div className="rounded-full bg-white px-3 py-1.5 text-xs text-[var(--muted)] shadow-sm ring-1 ring-black/5 tabular-nums">
               已收藏 {items.length} · 已选 {selectedItems.length}/{MAX_COMPARE}
             </div>
           </div>
         </header>
 
-        {favorites.isLoading ? <p className="text-sm text-[#777970]">加载收藏中…</p> : null}
+        {favorites.isLoading ? <p className="text-sm text-[var(--muted)]">加载收藏中…</p> : null}
         {favorites.isError ? (
           <p className="border border-red-200 bg-red-50 p-4 text-sm text-red-600">
             收藏加载失败：{favorites.error.message}
           </p>
         ) : null}
         {favorites.data && items.length === 0 ? (
-          <div className="border border-dashed border-[#aaa69d] bg-[#faf8f2] px-6 py-16 text-center">
-            <p className="font-serif text-2xl font-semibold">收藏夹还是空的</p>
-            <p className="mt-2 text-sm text-[#777970]">
+          <div className="ledger-panel border-dashed px-6 py-16 text-center">
+            <p className="text-xl font-semibold">收藏夹还是空的</p>
+            <p className="mt-2 text-sm text-[var(--muted)]">
               从今日推荐中收藏感兴趣的款，再来这里并排比较。
             </p>
-            <Link
-              href="/"
-              className="mt-5 inline-block border-b border-brand-500 text-sm font-medium text-brand-600"
-            >
+            <Link href="/" className="secondary-button mt-5">
               去今日推荐选款 →
             </Link>
           </div>
@@ -83,8 +78,10 @@ export default function FavoritesPage() {
                 return (
                   <article
                     key={item.productId1688}
-                    className={`relative min-w-0 border bg-[#faf8f2] p-3 transition ${
-                      active ? 'border-[#20211e] shadow-[3px_3px_0_#20211e]' : 'border-[#cbc6bb]'
+                    className={`relative min-w-0 rounded-xl border bg-white p-3 transition ${
+                      active
+                        ? 'border-brand-300 shadow-sm ring-2 ring-brand-100'
+                        : 'border-[var(--line)] shadow-[var(--shadow-sm)]'
                     }`}
                   >
                     <button
@@ -92,16 +89,16 @@ export default function FavoritesPage() {
                       onClick={() => toggle(item.productId1688)}
                       disabled={selectionFull}
                       aria-pressed={active}
-                      className={`absolute right-2 top-2 z-[1] h-7 min-w-7 border px-1 font-mono text-xs ${
+                      className={`absolute right-2 top-2 z-[1] h-10 min-w-10 rounded-full border px-1 text-xs font-semibold shadow-sm backdrop-blur ${
                         active
-                          ? 'border-[#20211e] bg-[#20211e] text-white'
-                          : 'border-[#cbc6bb] bg-white text-[#777970] disabled:opacity-40'
+                          ? 'border-brand-500 bg-brand-600 text-white'
+                          : 'border-white/70 bg-white/90 text-[var(--muted)] disabled:opacity-40'
                       }`}
                     >
                       {active ? '✓' : '+'}
                     </button>
                     <Link href={`/products/${encodeURIComponent(item.productId1688)}`}>
-                      <div className="aspect-square overflow-hidden bg-[#ebe7dd]">
+                      <div className="aspect-square overflow-hidden rounded-lg bg-[var(--paper-deep)]">
                         {item.mainImage ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
@@ -116,14 +113,18 @@ export default function FavoritesPage() {
                       </p>
                     </Link>
                     <div className="mt-3 flex items-center justify-between text-xs">
-                      <span className="font-mono font-semibold text-brand-600">¥{item.price}</span>
-                      <span className="text-[#777970]">月销 {item.monthlySold}</span>
+                      <span className="font-semibold text-[var(--ink)] tabular-nums">
+                        ¥{item.price}
+                      </span>
+                      <span className="text-[var(--muted)] tabular-nums">
+                        月销 {item.monthlySold}
+                      </span>
                     </div>
                     <button
                       type="button"
                       onClick={() => remove.mutate(item.productId1688)}
                       disabled={remove.isPending}
-                      className="mt-3 text-xs text-[#8a5548] underline-offset-2 hover:underline disabled:opacity-50"
+                      className="quiet-button mt-3 min-h-10 px-0 text-xs text-red-600 disabled:opacity-50"
                     >
                       移出收藏
                     </button>
@@ -135,7 +136,7 @@ export default function FavoritesPage() {
             {selectedItems.length ? (
               <ComparisonTable products={selectedItems} />
             ) : (
-              <p className="border border-dashed border-[#aaa69d] py-10 text-center text-sm text-[#777970]">
+              <p className="rounded-xl border border-dashed border-[var(--line-strong)] py-10 text-center text-sm text-[var(--muted)]">
                 至少选择 1 款开始比较。
               </p>
             )}
@@ -171,12 +172,10 @@ function ComparisonTable({ products }: { products: FavoriteProduct[] }) {
   ];
 
   return (
-    <section className="min-w-0 border border-[#20211e] bg-[#faf8f2]">
-      <div className="border-b border-[#20211e] px-5 py-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-brand-600">
-          Compare / {products.length}
-        </p>
-        <h2 className="mt-1 font-serif text-2xl font-semibold">选款对照表</h2>
+    <section className="ledger-panel min-w-0 overflow-hidden">
+      <div className="border-b border-[var(--line)] px-5 py-4">
+        <p className="page-kicker">已选择 {products.length} 款</p>
+        <h2 className="mt-1 text-lg font-semibold">选款对照表</h2>
       </div>
       <div className="overflow-x-auto">
         <table
@@ -184,8 +183,8 @@ function ComparisonTable({ products }: { products: FavoriteProduct[] }) {
           style={{ minWidth: 160 + products.length * 220 }}
         >
           <thead>
-            <tr className="border-b border-[#20211e]">
-              <th className="sticky left-0 z-[1] w-40 min-w-40 bg-[#e9e3d8] px-4 py-4 font-mono text-[10px] uppercase tracking-[0.14em] text-[#686a63]">
+            <tr className="border-b border-[var(--line)]">
+              <th className="sticky left-0 z-[1] w-40 min-w-40 bg-[var(--surface-strong)] px-4 py-4 text-xs font-medium text-[var(--muted)]">
                 对比项
               </th>
               {products.map((product) => (
@@ -200,7 +199,7 @@ function ComparisonTable({ products }: { products: FavoriteProduct[] }) {
                     <p className="line-clamp-3 font-medium leading-5 group-hover:text-brand-600">
                       {product.title}
                     </p>
-                    <p className="mt-2 font-mono text-[10px] font-normal text-[#777970]">
+                    <p className="mt-2 text-[10px] font-normal text-[var(--muted)]">
                       {product.productId1688}
                     </p>
                   </Link>
@@ -210,12 +209,12 @@ function ComparisonTable({ products }: { products: FavoriteProduct[] }) {
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.label} className="border-b border-[#d4cec2] last:border-0">
-                <th className="sticky left-0 z-[1] bg-[#e9e3d8] px-4 py-3 font-medium">
+              <tr key={row.label} className="border-b border-[var(--line)] last:border-0">
+                <th className="sticky left-0 z-[1] bg-[var(--surface-strong)] px-4 py-3 font-medium">
                   {row.label}
                 </th>
                 {products.map((product) => (
-                  <td key={product.productId1688} className="px-4 py-3 text-[#555750]">
+                  <td key={product.productId1688} className="px-4 py-3 text-[var(--ink-soft)]">
                     {row.render(product)}
                   </td>
                 ))}

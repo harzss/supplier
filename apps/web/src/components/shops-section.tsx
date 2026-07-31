@@ -103,8 +103,8 @@ export function ShopsSection() {
       <div className="mb-5 flex items-start justify-between gap-4 border-b border-[var(--line)] pb-5">
         <div>
           <div className="mb-1 flex items-center gap-2">
-            <h2 className="font-serif text-2xl font-semibold">店铺与渠道</h2>
-            <span className="bg-[var(--ink)] px-2 py-0.5 font-mono text-[9px] font-semibold tracking-wide text-white">
+            <h2 className="text-xl font-semibold tracking-tight">店铺与渠道</h2>
+            <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[9px] font-semibold text-brand-700">
               OPENAPI
             </span>
           </div>

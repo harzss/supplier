@@ -140,48 +140,48 @@ function LoginStudio() {
   };
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-[#e9e3d8] px-5 py-8 text-[#20211e] sm:px-8">
-      <div className="pointer-events-none absolute inset-0 opacity-30 [background-image:linear-gradient(#20211e_1px,transparent_1px),linear-gradient(90deg,#20211e_1px,transparent_1px)] [background-size:44px_44px]" />
-      <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] max-w-6xl overflow-hidden border border-[#20211e] bg-[#f7f3eb] shadow-[8px_8px_0_#20211e] lg:grid-cols-[1.08fr_0.92fr]">
-        <section className="flex flex-col justify-between border-b border-[#20211e] p-7 sm:p-10 lg:border-b-0 lg:border-r">
+    <main className="relative min-h-screen overflow-hidden bg-[#f4f5f8] px-5 py-8 text-[#15171c] sm:px-8">
+      <div className="pointer-events-none absolute -left-40 -top-56 h-[34rem] w-[34rem] rounded-full bg-brand-200/45 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-64 -right-32 h-[38rem] w-[38rem] rounded-full bg-blue-100/70 blur-3xl" />
+      <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] max-w-6xl overflow-hidden rounded-3xl border border-black/5 bg-white shadow-[0_28px_90px_-40px_rgba(16,24,40,0.34)] lg:grid-cols-[1.06fr_0.94fr]">
+        <section className="relative flex flex-col justify-between overflow-hidden bg-[#121419] p-7 text-white sm:p-10">
+          <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-brand-500/25 blur-3xl" />
           <div>
-            <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-brand-700">
-              Supplier · Merchant OS
-            </p>
-            <h1 className="mt-8 max-w-xl font-serif text-5xl font-semibold leading-[0.98] sm:text-7xl">
+            <p className="relative text-xs font-semibold text-brand-300">Supplier · Merchant OS</p>
+            <h1 className="relative mt-8 max-w-xl text-4xl font-semibold leading-[1.04] tracking-[-0.04em] sm:text-6xl">
               从货源到订单，
               <br />
               每一步都可追溯。
             </h1>
-            <p className="mt-7 max-w-lg text-sm leading-7 text-[#5c5b55] sm:text-base">
+            <p className="relative mt-7 max-w-lg text-sm leading-7 text-[#aab0bc] sm:text-base">
               可信身份会隔离你的店铺、铺货任务、订单、收藏与模型密钥。登录后才会连接真实商家工作台。
             </p>
           </div>
-          <div className="mt-12 grid grid-cols-3 border border-[#b8b2a8] font-mono text-[10px] uppercase tracking-[0.08em] text-[#686a63]">
+          <div className="relative mt-12 grid grid-cols-3 gap-2 text-[10px] font-medium text-[#aab0bc]">
             {['Tenant isolated', 'Token verified', 'Audit ready'].map((item) => (
-              <span key={item} className="border-r border-[#b8b2a8] px-3 py-3 last:border-r-0">
+              <span
+                key={item}
+                className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3"
+              >
                 {item}
               </span>
             ))}
           </div>
         </section>
 
-        <section className="flex items-center p-7 sm:p-10">
+        <section className="flex items-center p-7 sm:p-10 lg:p-14">
           <div className="w-full">
-            <div className="mb-8 flex items-end justify-between border-b border-[#20211e] pb-4">
+            <div className="mb-8 flex items-end justify-between">
               <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#777970]">
-                  Secure access
-                </p>
-                <h2 className="mt-1 font-serif text-3xl font-semibold">
+                <p className="text-xs font-semibold text-brand-600">安全访问</p>
+                <h2 className="mt-1 text-3xl font-semibold tracking-[-0.025em]">
                   {mode === 'signin' ? '进入工作台' : '创建商家账号'}
                 </h2>
               </div>
-              <span className="font-mono text-xs">01 / AUTH</span>
             </div>
 
             <form className="space-y-5" onSubmit={(event) => void submit(event)}>
-              <label className="grid gap-2 font-mono text-[11px] uppercase tracking-[0.1em]">
+              <label className="grid gap-2 text-xs font-semibold text-zinc-700">
                 登录邮箱
                 <input
                   type="email"
@@ -189,10 +189,10 @@ function LoginStudio() {
                   required
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  className="h-12 border border-[#8e8b83] bg-white px-3 font-sans text-sm normal-case tracking-normal outline-none transition focus:border-[#20211e] focus:shadow-[3px_3px_0_#20211e]"
+                  className="h-12 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-brand-500 focus:ring-4 focus:ring-brand-100"
                 />
               </label>
-              <label className="grid gap-2 font-mono text-[11px] uppercase tracking-[0.1em]">
+              <label className="grid gap-2 text-xs font-semibold text-zinc-700">
                 密码
                 <input
                   type="password"
@@ -201,7 +201,7 @@ function LoginStudio() {
                   minLength={8}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  className="h-12 border border-[#8e8b83] bg-white px-3 font-sans text-sm normal-case tracking-normal outline-none transition focus:border-[#20211e] focus:shadow-[3px_3px_0_#20211e]"
+                  className="h-12 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-brand-500 focus:ring-4 focus:ring-brand-100"
                 />
               </label>
 
@@ -215,7 +215,7 @@ function LoginStudio() {
               <button
                 type="submit"
                 disabled={pending}
-                className="h-12 w-full border border-[#20211e] bg-[#20211e] font-mono text-xs uppercase tracking-[0.14em] text-white transition hover:bg-brand-700 disabled:cursor-wait disabled:opacity-60"
+                className="h-12 w-full rounded-xl bg-brand-600 text-sm font-semibold text-white shadow-[0_10px_24px_-14px_rgba(88,88,204,0.9)] transition hover:bg-brand-700 active:scale-[0.97] disabled:cursor-wait disabled:opacity-60"
               >
                 {pending ? '验证中…' : mode === 'signin' ? '安全登录 →' : '注册并验证邮箱 →'}
               </button>
@@ -228,7 +228,7 @@ function LoginStudio() {
                 setError(undefined);
                 setMessage(undefined);
               }}
-              className="mt-5 text-sm text-[#5c5b55] underline decoration-[#aaa49a] underline-offset-4 hover:text-[#20211e]"
+              className="mt-5 text-sm text-zinc-500 transition hover:text-brand-700"
             >
               {mode === 'signin' ? '首次使用？创建账号' : '已有账号？返回登录'}
             </button>
@@ -241,8 +241,8 @@ function LoginStudio() {
 
 function AuthLoading() {
   return (
-    <main className="grid min-h-screen place-items-center bg-[#f4f1ea] text-[#20211e]">
-      <div className="border border-[#20211e] bg-[#faf8f2] px-8 py-6 font-mono text-xs uppercase tracking-[0.16em] shadow-[4px_4px_0_#20211e]">
+    <main className="grid min-h-screen place-items-center bg-[#f4f5f8] text-[#15171c]">
+      <div className="rounded-2xl border border-zinc-200 bg-white px-8 py-6 text-sm font-medium shadow-[0_18px_50px_-32px_rgba(16,24,40,0.4)]">
         正在验证会话…
       </div>
     </main>
@@ -251,12 +251,10 @@ function AuthLoading() {
 
 function AuthConfigurationError({ message }: { message: string }) {
   return (
-    <main className="grid min-h-screen place-items-center bg-[#f4f1ea] p-6 text-[#20211e]">
-      <div className="max-w-lg border border-red-700 bg-[#fff8f2] p-6 shadow-[5px_5px_0_#991b1b]">
-        <p className="font-mono text-xs uppercase tracking-[0.14em] text-red-700">
-          Auth unavailable
-        </p>
-        <h1 className="mt-2 font-serif text-3xl font-semibold">身份服务配置不完整</h1>
+    <main className="grid min-h-screen place-items-center bg-[#f4f5f8] p-6 text-[#15171c]">
+      <div className="max-w-lg rounded-2xl border border-red-200 bg-white p-6 shadow-[0_18px_50px_-32px_rgba(16,24,40,0.4)]">
+        <p className="text-xs font-semibold text-red-700">Auth unavailable</p>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight">身份服务配置不完整</h1>
         <p className="mt-4 text-sm leading-6 text-red-800">{message}</p>
       </div>
     </main>

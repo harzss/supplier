@@ -37,29 +37,25 @@ export default function AnalyticsPage() {
   });
 
   return (
-    <main className="app-page text-[#1b1d1a]">
+    <main className="app-page">
       <div>
-        <header className="mb-8 flex flex-col gap-5 border-b border-[#1b1d1a] pb-6 md:flex-row md:items-end md:justify-between">
+        <header className="mb-6 flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
           <div>
-            <p className="mb-2 font-mono text-[11px] font-semibold uppercase tracking-[0.24em] text-[#c64b2c]">
-              D-01 / D-02 · Operations ledger
-            </p>
-            <h1 className="font-serif text-4xl font-semibold tracking-tight sm:text-5xl">
-              经营台账
-            </h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-[#64665f]">
+            <p className="page-kicker">数据中心</p>
+            <h1 className="page-title">经营分析</h1>
+            <p className="page-description">
               用订单和采购记录说话。GMV、成本、预计毛利与商品动销均来自当前账户数据，并保留计算口径。
             </p>
           </div>
-          <div className="flex w-fit border border-[#1b1d1a] bg-[#f8f5ed] p-1">
+          <div className="flex w-fit rounded-xl bg-[var(--surface-strong)] p-1">
             {RANGE_OPTIONS.map((option) => (
               <button
                 key={option}
                 onClick={() => setDays(option)}
-                className={`px-4 py-2 font-mono text-xs transition ${
+                className={`min-h-10 rounded-lg px-4 py-2 text-xs font-semibold transition ${
                   days === option
-                    ? 'bg-[#1b1d1a] text-[#f8f5ed]'
-                    : 'text-[#64665f] hover:bg-[#e5dfd2]'
+                    ? 'bg-white text-brand-700 shadow-sm ring-1 ring-black/5'
+                    : 'text-[var(--muted)] hover:bg-white/60'
                 }`}
               >
                 {option} 天
@@ -82,20 +78,17 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
   return (
     <div className="space-y-6">
       {kpis.unreconciledRefundOrders > 0 ? (
-        <section className="flex flex-col gap-3 border border-[#c64b2c] bg-[#f8e8df] px-5 py-4 text-sm sm:flex-row sm:items-center sm:justify-between">
-          <p className="leading-6 text-[#72301f]">
+        <section className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <p className="leading-6 text-amber-800">
             有 {kpis.unreconciledRefundOrders} 笔退款订单尚未核对实际退款金额，涉及原订单金额{' '}
             {formatMoney(kpis.unreconciledGrossAmount)}；当前 GMV、毛利和排行已安全排除这些订单。
           </p>
-          <Link
-            href="/orders"
-            className="shrink-0 border border-[#72301f] px-3 py-2 font-mono text-xs font-semibold text-[#72301f] transition hover:bg-[#72301f] hover:text-[#f8e8df]"
-          >
+          <Link href="/orders" className="secondary-button shrink-0">
             去订单核对
           </Link>
         </section>
       ) : null}
-      <section className="grid gap-px overflow-hidden border border-[#1b1d1a] bg-[#1b1d1a] sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard
           index="01"
           label="有效 GMV"
@@ -132,10 +125,10 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(280px,0.75fr)]">
-        <LedgerPanel title="每日经营曲线" code="A / TREND">
+        <LedgerPanel title="每日经营曲线">
           <TrendChart points={data.daily} />
         </LedgerPanel>
-        <LedgerPanel title="订单状态" code="B / FLOW">
+        <LedgerPanel title="订单状态">
           <div className="space-y-1">
             {data.statuses.map((item) => {
               const total = Math.max(1, ...data.statuses.map((status) => status.count));
@@ -144,21 +137,23 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
                   key={item.status}
                   className="group grid grid-cols-[76px_1fr_36px] items-center gap-3 py-2"
                 >
-                  <span className="text-xs text-[#64665f]">{STATUS_LABELS[item.status]}</span>
-                  <div className="h-2 bg-[#ded9cd]">
+                  <span className="text-xs text-[var(--muted)]">{STATUS_LABELS[item.status]}</span>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-[var(--paper-deep)]">
                     <div
-                      className={`h-full transition-all ${
-                        item.status === 'refunded' ? 'bg-[#c64b2c]' : 'bg-[#22251f]'
+                      className={`h-full origin-left rounded-full transition-transform ${
+                        item.status === 'refunded' ? 'bg-red-500' : 'bg-brand-500'
                       }`}
-                      style={{ width: `${(item.count / total) * 100}%` }}
+                      style={{ transform: `scaleX(${item.count / total})` }}
                     />
                   </div>
-                  <span className="text-right font-mono text-xs font-semibold">{item.count}</span>
+                  <span className="text-right text-xs font-semibold tabular-nums">
+                    {item.count}
+                  </span>
                 </div>
               );
             })}
           </div>
-          <p className="mt-5 border-t border-dashed border-[#b7b2a7] pt-4 text-xs leading-5 text-[#73756d]">
+          <p className="mt-5 border-t border-[var(--line)] pt-4 text-xs leading-5 text-[var(--muted)]">
             统计区间：{formatDate(data.range.startAt)} — {formatDate(data.range.endAt)}
             ，按中国标准时间归档。
           </p>
@@ -166,11 +161,11 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.85fr)]">
-        <LedgerPanel title="店铺账本" code="C / SHOPS">
+        <LedgerPanel title="店铺表现">
           <div className="overflow-x-auto">
             <table className="w-full min-w-[650px] border-collapse text-left text-sm">
-              <thead className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#777970]">
-                <tr className="border-b border-[#1b1d1a]">
+              <thead className="text-xs text-[var(--muted)]">
+                <tr className="border-b border-[var(--line)]">
                   <th className="pb-3 font-medium">店铺</th>
                   <th className="pb-3 text-right font-medium">有效 GMV</th>
                   <th className="pb-3 text-right font-medium">订单</th>
@@ -180,10 +175,10 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
               </thead>
               <tbody>
                 {data.shops.map((shop) => (
-                  <tr key={shop.shopId} className="border-b border-[#d8d2c6] last:border-0">
+                  <tr key={shop.shopId} className="border-b border-[var(--line)] last:border-0">
                     <td className="py-4">
                       <p className="font-medium">{shop.shopName}</p>
-                      <p className="mt-0.5 text-xs text-[#777970]">
+                      <p className="mt-0.5 text-xs text-[var(--muted)]">
                         {PLATFORM_LABELS[shop.platform] ?? shop.platform}
                       </p>
                     </td>
@@ -206,7 +201,7 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
           </div>
         </LedgerPanel>
 
-        <LedgerPanel title="商品贡献" code="D / PRODUCTS">
+        <LedgerPanel title="商品贡献">
           {data.products.length ? (
             <div className="space-y-5">
               {data.products.map((product, index) => {
@@ -218,7 +213,7 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
                         <p className="line-clamp-2 text-sm font-medium leading-5">
                           {product.title}
                         </p>
-                        <p className="mt-1 font-mono text-[10px] text-[#777970]">
+                        <p className="mt-1 text-[10px] text-[var(--muted)]">
                           {product.validOrders} 单 · {product.quantity} 件
                         </p>
                       </div>
@@ -226,10 +221,10 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
                         {formatMoney(product.effectiveGmv)}
                       </span>
                     </div>
-                    <div className="h-1.5 bg-[#ded9cd]">
+                    <div className="h-1.5 overflow-hidden rounded-full bg-[var(--paper-deep)]">
                       <div
-                        className="h-full bg-[#c64b2c]"
-                        style={{ width: `${(product.effectiveGmv / max) * 100}%` }}
+                        className="h-full origin-left rounded-full bg-brand-500 transition-transform"
+                        style={{ transform: `scaleX(${product.effectiveGmv / max})` }}
                       />
                     </div>
                   </div>
@@ -244,24 +239,24 @@ function Dashboard({ data }: { data: AnalyticsOverview }) {
 
       <ProductPerformance data={data.productPerformance} />
 
-      <section className="grid gap-6 border border-[#1b1d1a] bg-[#e7e1d5] p-5 md:grid-cols-[160px_1fr] md:p-6">
+      <section className="ledger-panel grid gap-6 p-5 md:grid-cols-[160px_1fr] md:p-6">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[#c64b2c]">Read me</p>
-          <h2 className="mt-2 font-serif text-2xl font-semibold">数据口径</h2>
+          <p className="page-kicker">说明</p>
+          <h2 className="mt-2 text-xl font-semibold">数据口径</h2>
         </div>
-        <div className="grid gap-4 text-sm leading-6 text-[#565851] lg:grid-cols-3">
+        <div className="grid gap-4 text-sm leading-6 text-[var(--muted)] lg:grid-cols-3">
           <p>
-            <strong className="text-[#1b1d1a]">GMV：</strong>
+            <strong className="text-[var(--ink)]">GMV：</strong>
             {data.methodology.gmv}
           </p>
           <p>
-            <strong className="text-[#1b1d1a]">成本：</strong>
+            <strong className="text-[var(--ink)]">成本：</strong>
             {data.methodology.cost}
           </p>
           <p>
-            <strong className="text-[#1b1d1a]">毛利：</strong>
+            <strong className="text-[var(--ink)]">毛利：</strong>
             {data.methodology.profit}
-            <span className="mt-1 block text-xs text-[#777970]">
+            <span className="mt-1 block text-xs text-[var(--muted)]">
               暂不计：{data.methodology.exclusions.join('、')}。
             </span>
           </p>
@@ -275,8 +270,8 @@ function ProductPerformance({ data }: { data: AnalyticsOverview['productPerforma
   const summary = data.summary;
   const hotMaxRate = data.hot[0]?.dailyOrderRate || 1;
   return (
-    <LedgerPanel title="动销雷达" code="E / SELL-THROUGH">
-      <div className="mb-7 grid gap-px overflow-hidden border border-[#1b1d1a] bg-[#1b1d1a] sm:grid-cols-2 lg:grid-cols-4">
+    <LedgerPanel title="动销雷达">
+      <div className="mb-7 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <PulseMetric label="在线商品" value={String(summary.onlineProducts)} note="当前在线铺货" />
         <PulseMetric
           label="区间有成交"
@@ -297,34 +292,32 @@ function ProductPerformance({ data }: { data: AnalyticsOverview['productPerforma
       </div>
 
       <div className="grid gap-8 lg:grid-cols-2 lg:gap-0">
-        <div className="lg:border-r lg:border-[#1b1d1a] lg:pr-7">
+        <div className="lg:border-r lg:border-[var(--line)] lg:pr-7">
           <div className="mb-5 flex items-baseline justify-between gap-3">
-            <h3 className="font-serif text-xl font-semibold">热销加速榜</h3>
-            <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#777970]">
-              按日均有效订单
-            </span>
+            <h3 className="text-lg font-semibold">热销加速榜</h3>
+            <span className="text-[10px] text-[var(--muted)]">按日均有效订单</span>
           </div>
           {data.hot.length ? (
             <div className="space-y-5">
               {data.hot.slice(0, 5).map((product, index) => (
                 <div key={product.publishedProductId}>
                   <div className="mb-2 grid grid-cols-[28px_minmax(0,1fr)_auto] items-start gap-3">
-                    <span className="font-mono text-xs font-semibold text-[#c64b2c]">
+                    <span className="text-xs font-semibold text-brand-600 tabular-nums">
                       {String(index + 1).padStart(2, '0')}
                     </span>
                     <ProductIdentity product={product} />
                     <div className="text-right">
-                      <p className="font-mono text-sm font-semibold">
+                      <p className="text-sm font-semibold tabular-nums">
                         {formatOrderRate(product.dailyOrderRate)}
                       </p>
-                      <p className="mt-1 font-mono text-[10px] text-[#777970]">
+                      <p className="mt-1 text-[10px] text-[var(--muted)] tabular-nums">
                         {formatMoney(product.effectiveGmv)}
                       </p>
                     </div>
                   </div>
-                  <div className="ml-10 h-1 bg-[#ded9cd]">
+                  <div className="ml-10 h-1 overflow-hidden rounded-full bg-[var(--paper-deep)]">
                     <div
-                      className="h-full bg-[#1b1d1a]"
+                      className="h-full rounded-full bg-brand-500"
                       style={{ width: `${(product.dailyOrderRate / hotMaxRate) * 100}%` }}
                     />
                   </div>
@@ -336,26 +329,24 @@ function ProductPerformance({ data }: { data: AnalyticsOverview['productPerforma
           )}
         </div>
 
-        <div className="border-t border-[#1b1d1a] pt-7 lg:border-0 lg:pl-7 lg:pt-0">
+        <div className="border-t border-[var(--line)] pt-7 lg:border-0 lg:pl-7 lg:pt-0">
           <div className="mb-5 flex items-baseline justify-between gap-3">
-            <h3 className="font-serif text-xl font-semibold">滞销风险榜</h3>
-            <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#777970]">
-              {summary.graceDays} 天观察期
-            </span>
+            <h3 className="text-lg font-semibold">滞销风险榜</h3>
+            <span className="text-[10px] text-[var(--muted)]">{summary.graceDays} 天观察期</span>
           </div>
           {data.slow.length ? (
-            <div className="divide-y divide-[#d8d2c6]">
+            <div className="divide-y divide-[var(--line)]">
               {data.slow.slice(0, 5).map((product, index) => (
                 <div
                   key={product.publishedProductId}
                   className="grid grid-cols-[28px_minmax(0,1fr)_auto] items-start gap-3 py-4 first:pt-0"
                 >
-                  <span className="font-mono text-xs font-semibold text-[#c64b2c]">
+                  <span className="text-xs font-semibold text-brand-600 tabular-nums">
                     {String(index + 1).padStart(2, '0')}
                   </span>
                   <ProductIdentity product={product} />
-                  <div className="text-right font-mono text-[10px] text-[#777970]">
-                    <p className="font-semibold text-[#1b1d1a]">上架 {product.daysOnline} 天</p>
+                  <div className="text-right text-[10px] text-[var(--muted)] tabular-nums">
+                    <p className="font-semibold text-[var(--ink)]">上架 {product.daysOnline} 天</p>
                     <p className="mt-1">
                       {product.daysSinceLastSale === null
                         ? '尚无成交'
@@ -373,7 +364,7 @@ function ProductPerformance({ data }: { data: AnalyticsOverview['productPerforma
         </div>
       </div>
 
-      <p className="mt-7 border-t border-dashed border-[#b7b2a7] pt-4 text-xs leading-5 text-[#73756d]">
+      <p className="mt-7 border-t border-[var(--line)] pt-4 text-xs leading-5 text-[var(--muted)]">
         {data.methodology}
       </p>
     </LedgerPanel>
@@ -392,12 +383,14 @@ function PulseMetric({
   danger?: boolean;
 }) {
   return (
-    <div className="bg-[#eee9de] px-4 py-5">
-      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#777970]">{label}</p>
-      <p className={`mt-3 font-serif text-3xl font-semibold ${danger ? 'text-[#c64b2c]' : ''}`}>
+    <div className="ledger-panel px-4 py-5">
+      <p className="text-xs font-medium text-[var(--muted)]">{label}</p>
+      <p
+        className={`mt-2 text-3xl font-semibold tracking-tight tabular-nums ${danger ? 'text-red-600' : ''}`}
+      >
         {value}
       </p>
-      <p className="mt-1 text-xs text-[#777970]">{note}</p>
+      <p className="mt-1 text-xs text-[var(--muted)]">{note}</p>
     </div>
   );
 }
@@ -406,7 +399,7 @@ function ProductIdentity({ product }: { product: AnalyticsProductPerformanceItem
   return (
     <div className="min-w-0">
       <p className="line-clamp-2 text-sm font-medium leading-5">{product.title}</p>
-      <p className="mt-1 font-mono text-[10px] text-[#777970]">
+      <p className="mt-1 text-[10px] text-[var(--muted)]">
         {product.shopName} · {PLATFORM_LABELS[product.platform] ?? product.platform} ·{' '}
         {product.validOrders} 单 / {product.quantity} 件
       </p>
@@ -416,7 +409,7 @@ function ProductIdentity({ product }: { product: AnalyticsProductPerformanceItem
 
 function ProductPerformanceEmpty({ children }: { children: React.ReactNode }) {
   return (
-    <div className="border border-dashed border-[#b7b2a7] px-4 py-10 text-center text-sm text-[#777970]">
+    <div className="rounded-xl border border-dashed border-[var(--line-strong)] px-4 py-10 text-center text-sm text-[var(--muted)]">
       {children}
     </div>
   );
@@ -452,13 +445,13 @@ function TrendChart({ points }: { points: AnalyticsDailyPoint[] }) {
 
   return (
     <div>
-      <div className="mb-4 flex gap-5 font-mono text-[10px] uppercase tracking-[0.14em] text-[#777970]">
+      <div className="mb-4 flex gap-5 text-[10px] font-medium text-[var(--muted)]">
         <span className="flex items-center gap-2">
-          <i className="h-0.5 w-5 bg-[#1b1d1a]" />
+          <i className="h-0.5 w-5 bg-brand-500" />
           有效 GMV
         </span>
         <span className="flex items-center gap-2">
-          <i className="h-0.5 w-5 bg-[#c64b2c]" />
+          <i className="h-0.5 w-5 bg-red-500" />
           退款额
         </span>
       </div>
@@ -477,27 +470,27 @@ function TrendChart({ points }: { points: AnalyticsDailyPoint[] }) {
                 x2={width - right}
                 y1={lineY}
                 y2={lineY}
-                stroke="#cbc5b9"
+                stroke="#e5e7eb"
                 strokeDasharray="3 5"
               />
-              <text x={left - 8} y={lineY + 4} textAnchor="end" fontSize="10" fill="#777970">
+              <text x={left - 8} y={lineY + 4} textAnchor="end" fontSize="10" fill="#687180">
                 {formatCompactMoney(maxValue * (1 - fraction))}
               </text>
             </g>
           );
         })}
-        <path d={areaPath} fill="#1b1d1a" opacity="0.06" />
+        <path d={areaPath} fill="#5b5bd6" opacity="0.08" />
         <polyline
           points={gmvPoints}
           fill="none"
-          stroke="#1b1d1a"
+          stroke="#5b5bd6"
           strokeWidth="2.5"
           strokeLinejoin="round"
         />
         <polyline
           points={refundPoints}
           fill="none"
-          stroke="#c64b2c"
+          stroke="#d14343"
           strokeWidth="2"
           strokeLinejoin="round"
         />
@@ -508,7 +501,7 @@ function TrendChart({ points }: { points: AnalyticsDailyPoint[] }) {
             y={height - 8}
             textAnchor="middle"
             fontSize="10"
-            fill="#777970"
+            fill="#687180"
           >
             {points[index]?.date.slice(5)}
           </text>
@@ -532,37 +525,26 @@ function KpiCard({
   danger?: boolean;
 }) {
   return (
-    <article className="min-h-40 bg-[#f8f5ed] p-5">
-      <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.18em] text-[#777970]">
+    <article className="ledger-panel min-h-36 p-5">
+      <div className="flex items-center justify-between text-xs font-medium text-[var(--muted)]">
         <span>{label}</span>
         <span>{index}</span>
       </div>
       <p
-        className={`mt-6 font-serif text-3xl font-semibold tracking-tight ${danger ? 'text-[#c64b2c]' : ''}`}
+        className={`mt-5 text-3xl font-semibold tracking-tight tabular-nums ${danger ? 'text-red-600' : ''}`}
       >
         {value}
       </p>
-      <p className="mt-3 text-xs text-[#777970]">{note}</p>
+      <p className="mt-3 text-xs text-[var(--muted)]">{note}</p>
     </article>
   );
 }
 
-function LedgerPanel({
-  title,
-  code,
-  children,
-}: {
-  title: string;
-  code: string;
-  children: React.ReactNode;
-}) {
+function LedgerPanel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="min-w-0 border border-[#1b1d1a] bg-[#f8f5ed] p-5 sm:p-6">
-      <div className="mb-6 flex items-baseline justify-between gap-4 border-b border-[#1b1d1a] pb-3">
-        <h2 className="font-serif text-2xl font-semibold">{title}</h2>
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#777970]">
-          {code}
-        </span>
+    <section className="ledger-panel min-w-0 p-5 sm:p-6">
+      <div className="mb-6 border-b border-[var(--line)] pb-4">
+        <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
       </div>
       {children}
     </section>
@@ -571,9 +553,9 @@ function LedgerPanel({
 
 function DashboardSkeleton() {
   return (
-    <div className="grid animate-pulse gap-px border border-[#1b1d1a] bg-[#1b1d1a] sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {[0, 1, 2, 3].map((item) => (
-        <div key={item} className="h-40 bg-[#e4ded2]" />
+        <div key={item} className="skeleton-surface h-36 rounded-xl" />
       ))}
     </div>
   );
@@ -582,16 +564,11 @@ function DashboardSkeleton() {
 function DashboardError({ error }: { error: Error }) {
   const locked = error instanceof ApiError && error.code === 'FEATURE_LOCKED';
   return (
-    <div className="border border-[#1b1d1a] bg-[#f8f5ed] p-8 text-center">
-      <p className="font-serif text-2xl font-semibold">
-        {locked ? '专业版功能' : '经营数据暂时不可用'}
-      </p>
-      <p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-[#64665f]">{error.message}</p>
+    <div className="ledger-panel p-8 text-center">
+      <p className="text-xl font-semibold">{locked ? '专业版功能' : '经营数据暂时不可用'}</p>
+      <p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-[var(--muted)]">{error.message}</p>
       {locked ? (
-        <a
-          href="/settings"
-          className="mt-5 inline-block border-b border-[#c64b2c] text-sm font-medium text-[#c64b2c]"
-        >
+        <a href="/settings" className="secondary-button mt-5">
           查看套餐 →
         </a>
       ) : null}
@@ -600,7 +577,7 @@ function DashboardError({ error }: { error: Error }) {
 }
 
 function EmptyState() {
-  return <p className="py-10 text-center text-sm text-[#777970]">当前区间还没有有效订单。</p>;
+  return <p className="py-10 text-center text-sm text-[var(--muted)]">当前区间还没有有效订单。</p>;
 }
 
 function formatMoney(value: number): string {

@@ -173,8 +173,8 @@ export default function OrdersPage() {
 
   return (
     <main className="app-page">
-      <header className="mb-8 border-b border-[var(--ink)] pb-7">
-        <p className="page-kicker">Fulfillment queue / 03</p>
+      <header className="mb-6">
+        <p className="page-kicker">订单中心</p>
         <h1 className="page-title">订单履约</h1>
         <p className="page-description">
           销售订单、1688 采购、包裹回传与财务核对集中在一条履约队列中处理。
@@ -186,8 +186,10 @@ export default function OrdersPage() {
           type="button"
           aria-pressed={!pendingOnly}
           onClick={() => setPendingOnly(false)}
-          className={`min-h-11 border px-4 py-2 text-sm font-bold ${
-            pendingOnly ? 'border border-zinc-200 bg-white text-zinc-600' : 'bg-zinc-900 text-white'
+          className={`min-h-11 rounded-lg border px-4 py-2 text-sm font-semibold ${
+            pendingOnly
+              ? 'border-zinc-200 bg-white text-zinc-600'
+              : 'border-brand-200 bg-brand-50 text-brand-700'
           }`}
         >
           全部订单
@@ -199,10 +201,10 @@ export default function OrdersPage() {
             setPendingOnly(true);
             setReconciliationPage(1);
           }}
-          className={`min-h-11 border px-4 py-2 text-sm font-bold ${
+          className={`min-h-11 rounded-lg border px-4 py-2 text-sm font-semibold ${
             pendingOnly
-              ? 'bg-orange-600 text-white'
-              : 'border border-orange-200 bg-white text-orange-700'
+              ? 'border-amber-300 bg-amber-50 text-amber-800'
+              : 'border-amber-200 bg-white text-amber-700'
           }`}
         >
           财务待办

@@ -68,42 +68,49 @@ function RecommendationPage() {
 
   return (
     <main className="app-page">
-      <header className="mb-8 grid gap-7 border-b border-[var(--ink)] pb-8 lg:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)] lg:items-end">
-        <div>
-          <p className="page-kicker">Sourcing desk / Daily brief 01</p>
-          <h1 className="page-title max-w-3xl">今天，搬更有胜算的款</h1>
-          <p className="page-description">
-            把采购价、月销、趋势、利润与合规放在同一张选品桌上。先看判断，再看商品。
-          </p>
-        </div>
-        <div className="ledger-panel overflow-hidden">
-          <div className="grid grid-cols-3 divide-x divide-[var(--line)]">
-            <BriefMetric label="候选货源" value={data ? String(data.total) : '—'} unit="款" />
-            <BriefMetric
-              label="最高评分"
-              value={data?.items[0]?.score?.overall?.toFixed(1) ?? '—'}
-              unit="分"
-            />
-            <BriefMetric
-              label="采购区间"
-              value={
-                facets.data?.priceRange
-                  ? `¥${formatCompactPrice(facets.data.priceRange.min)}–${formatCompactPrice(facets.data.priceRange.max)}`
-                  : '—'
-              }
-            />
+      <section className="home-intelligence mb-6">
+        <header className="home-intelligence-header flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="page-title">今日选品</h1>
+            <p className="page-description">
+              综合采购价、销量趋势、利润与合规表现，快速找到更值得上架的商品。
+            </p>
           </div>
-          <Link
-            href="/favorites"
-            className="flex min-h-12 items-center justify-between border-t border-[var(--line)] px-4 text-xs font-bold text-[var(--ink)] transition hover:bg-[var(--accent-soft)]"
-          >
-            <span>进入收藏对比</span>
-            <span className="font-mono text-[var(--accent-dark)]">
-              {favorites.data ? `${favorites.data.total} SAVED` : 'OPEN'} →
+          <Link href="/favorites" className="secondary-button home-favorite-action shrink-0 gap-2">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              className="h-4 w-4"
+              aria-hidden="true"
+            >
+              <path d="M6 4.5A2.5 2.5 0 0 1 8.5 2h7A2.5 2.5 0 0 1 18 4.5V22l-6-4-6 4V4.5Z" />
+            </svg>
+            收藏对比
+            <span className="home-favorite-count rounded-full px-2 py-0.5 text-[11px] tabular-nums">
+              {favorites.data?.total ?? 0}
             </span>
           </Link>
-        </div>
-      </header>
+        </header>
+
+        <dl className="home-metric-grid mt-8 grid grid-cols-1 sm:grid-cols-3">
+          <BriefMetric label="候选货源" value={data ? String(data.total) : '—'} unit="款" />
+          <BriefMetric
+            label="最高评分"
+            value={data?.items[0]?.score?.overall?.toFixed(1) ?? '—'}
+            unit="分"
+          />
+          <BriefMetric
+            label="采购区间"
+            value={
+              facets.data?.priceRange
+                ? `¥${formatCompactPrice(facets.data.priceRange.min)}–${formatCompactPrice(facets.data.priceRange.max)}`
+                : '—'
+            }
+          />
+        </dl>
+      </section>
 
       <ProductFilters
         facets={facets.data}
@@ -145,17 +152,18 @@ function RecommendationPage() {
 
       {data && data.items.length > 0 ? (
         <>
-          <div className="mb-4 flex items-center justify-between gap-4 border-b border-[var(--line)] pb-3 text-xs text-[var(--muted)]">
-            <p className="font-mono uppercase tracking-[0.12em]">
+          <div className="mb-4 flex items-center justify-between gap-4 text-xs text-[var(--muted)]">
+            <p>
               展示 {data.total} 款{data.degraded ? '（数据库降级中，结果可能不完整）' : ''}
             </p>
             {isFetching ? (
-              <span className="font-mono text-[10px] uppercase text-[var(--accent-dark)]">
-                Updating…
+              <span className="inline-flex items-center gap-1.5 text-[var(--accent-dark)]">
+                <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
+                正在更新
               </span>
             ) : null}
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:gap-5 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+          <div className="product-grid">
             {data.items.map((p, i) => (
               <ProductCard
                 key={p.id}
@@ -184,8 +192,13 @@ function RecommendationPage() {
 function PageSkeleton() {
   return (
     <main className="app-page">
-      <div className="mb-8 h-48 animate-pulse border-b border-[var(--line)] bg-white/20" />
-      <div className="mb-8 h-52 animate-pulse border border-[var(--line)] bg-[var(--surface)]" />
+      <div className="skeleton-surface mb-6 h-28 rounded-2xl" />
+      <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, index) => (
+          <div key={index} className="skeleton-surface h-24 rounded-xl" />
+        ))}
+      </div>
+      <div className="skeleton-surface mb-6 h-32 rounded-xl" />
       <SkeletonGrid />
     </main>
   );
@@ -193,16 +206,13 @@ function PageSkeleton() {
 
 function SkeletonGrid() {
   return (
-    <div className="grid grid-cols-2 gap-3 sm:gap-5 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+    <div className="product-grid">
       {Array.from({ length: 10 }).map((_, i) => (
-        <div
-          key={i}
-          className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface)]"
-        >
-          <div className="aspect-[4/5] animate-pulse bg-[var(--paper-deep)]" />
+        <div key={i} className="overflow-hidden rounded-xl border border-[var(--line)] bg-white">
+          <div className="skeleton-surface aspect-square" />
           <div className="space-y-2 p-3">
-            <div className="h-3 animate-pulse bg-[var(--paper-deep)]" />
-            <div className="h-3 w-2/3 animate-pulse bg-[var(--paper-deep)]" />
+            <div className="skeleton-surface h-3 rounded" />
+            <div className="skeleton-surface h-3 w-2/3 rounded" />
           </div>
         </div>
       ))}
@@ -212,16 +222,12 @@ function SkeletonGrid() {
 
 function BriefMetric({ label, value, unit }: { label: string; value: string; unit?: string }) {
   return (
-    <div className="min-w-0 px-3 py-4 sm:px-4">
-      <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-[var(--muted)]">
-        {label}
-      </p>
-      <p className="mt-2 truncate font-mono text-lg font-bold tracking-tight text-[var(--ink)] sm:text-xl">
+    <div className="home-metric min-w-0 px-4 py-4">
+      <dt className="home-metric-label text-xs font-medium">{label}</dt>
+      <dd className="home-metric-value mt-1.5 truncate text-xl font-semibold tracking-tight tabular-nums">
         {value}
-        {unit ? (
-          <span className="ml-1 text-[10px] font-medium text-[var(--muted)]">{unit}</span>
-        ) : null}
-      </p>
+        {unit ? <span className="home-metric-unit ml-1 text-xs font-medium">{unit}</span> : null}
+      </dd>
     </div>
   );
 }

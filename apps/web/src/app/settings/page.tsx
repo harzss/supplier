@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api, getPreviewPlan, setPreviewPlan } from '@/lib/api';
 import { ShopsSection } from '@/components/shops-section';
@@ -32,12 +32,12 @@ const PROVIDERS = [
 ];
 
 const PREVIEW_PLANS = [
-  { v: '', l: '真实套餐' },
-  { v: 'free', l: '免费版' },
-  { v: 'basic', l: '基础版' },
-  { v: 'pro', l: '专业版' },
-  { v: 'flagship', l: '旗舰版' },
-  { v: 'enterprise', l: '企业版' },
+  { v: '', l: '真实' },
+  { v: 'free', l: '免费' },
+  { v: 'basic', l: '基础' },
+  { v: 'pro', l: '专业' },
+  { v: 'flagship', l: '旗舰' },
+  { v: 'enterprise', l: '企业' },
 ];
 
 function priceLabel(price: number): string {
@@ -51,10 +51,12 @@ export default function SettingsPage() {
   const ent = useQuery({ queryKey: ['entitlements'], queryFn: () => api.entitlements() });
   const key = useQuery({ queryKey: ['llmKey'], queryFn: () => api.getLlmKey() });
 
-  const [preview, setPreview] = useState<string>(getPreviewPlan() ?? '');
+  const [preview, setPreview] = useState('');
   const [provider, setProvider] = useState('deepseek');
   const [apiKey, setApiKey] = useState('');
   const [label, setLabel] = useState('');
+
+  useEffect(() => setPreview(getPreviewPlan() ?? ''), []);
 
   const saveKey = useMutation({
     mutationFn: () => api.saveLlmKey({ provider, apiKey, label: label || undefined }),
@@ -84,81 +86,28 @@ export default function SettingsPage() {
 
   return (
     <main className="app-page app-page-narrow">
-      <header className="mb-8 grid gap-6 border-b border-[var(--ink)] pb-8 lg:grid-cols-[minmax(0,1fr)_260px] lg:items-end">
-        <div>
-          <p className="page-kicker">Workspace controls / 06</p>
-          <h1 className="page-title">工作区设置</h1>
-          <p className="page-description">
-            套餐、AI 路由、店铺授权与发布依赖集中在这里。先确认能力状态，再接入真实业务。
-          </p>
-        </div>
-        <div className="ledger-panel overflow-hidden">
-          <div className="border-b border-[var(--line)] px-4 py-3">
-            <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-[var(--muted)]">
-              Active workspace
-            </p>
-            <p className="mt-1 font-serif text-xl font-semibold">
-              {ent.data?.planName ?? (ent.isLoading ? '正在同步…' : '状态待恢复')}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 px-4 py-3 text-xs text-[var(--muted)]">
-            <span
-              className={`h-2 w-2 rounded-full ${
-                ent.isLoading ? 'bg-amber-500' : ent.isError ? 'bg-red-500' : 'bg-emerald-500'
-              }`}
-            />
-            {ent.isLoading ? '能力计量同步中' : ent.isError ? '能力计量暂不可用' : '能力计量已连接'}
-          </div>
-        </div>
+      <header className="settings-page-heading mb-7">
+        <h1 className="page-title">工作区设置</h1>
+        <p className="page-description">
+          套餐、AI 路由、店铺授权与发布依赖集中在这里。先确认能力状态，再接入真实业务。
+        </p>
       </header>
 
-      {isDemoAuthMode ? (
-        <div className="ledger-panel mb-6 flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[var(--accent-dark)]">
-              Sandbox control
-            </p>
-            <p className="mt-1 text-xs text-[var(--muted)]">
-              仅改变本地能力预览，不会产生套餐订单。
-            </p>
-          </div>
-          <div className="grid w-full grid-cols-3 gap-1 border border-[var(--line)] bg-[var(--surface-strong)] p-1 sm:w-auto sm:grid-cols-6">
-            {PREVIEW_PLANS.map((p) => (
-              <button
-                key={p.v}
-                type="button"
-                aria-pressed={preview === p.v}
-                onClick={() => applyPreview(p.v)}
-                className={`min-h-11 min-w-0 px-2 text-xs font-bold transition sm:px-3 ${
-                  preview === p.v
-                    ? 'bg-[var(--ink)] text-white'
-                    : 'text-[var(--muted)] hover:bg-white hover:text-[var(--ink)]'
-                }`}
-              >
-                {p.l}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.06fr)_minmax(360px,0.94fr)]">
-        <section className="ledger-panel-dark overflow-hidden p-5 sm:p-6">
+        <section className="ledger-panel-dark settings-plan-hero overflow-hidden p-5 sm:p-6">
           <div className="mb-8 flex items-start justify-between gap-4">
             <div>
-              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#9fb0a8]">
-                Plan ledger / Current
-              </p>
-              <h2 className="mt-2 font-serif text-3xl font-semibold">
+              <p className="text-xs font-medium text-[#949baa]">当前套餐</p>
+              <h2 className="mt-2 text-3xl font-semibold tracking-tight">
                 {ent.data?.planName ?? '当前套餐'}
               </h2>
             </div>
-            <span className="border border-[#68756f] px-2.5 py-1 font-mono text-[9px] uppercase tracking-[0.14em] text-[#d9e3de]">
-              {isDemoAuthMode ? 'Preview' : 'Active'}
+            <span className="rounded-full border border-[#3b3f4b] bg-white/5 px-2.5 py-1 text-[10px] font-semibold text-[#d9dce4]">
+              {isDemoAuthMode ? '演示预览' : '已启用'}
             </span>
           </div>
 
-          {ent.isLoading && <p className="text-sm text-[#a7b1ac]">正在读取套餐与额度…</p>}
+          {ent.isLoading && <p className="text-sm text-[#9aa1af]">正在读取套餐与额度…</p>}
           {ent.isError ? (
             <p className="border border-[#8f4a42] bg-[#3e2925] px-4 py-3 text-sm leading-6 text-[#ffd7cf]">
               套餐与额度读取失败：{ent.error.message}。在恢复可靠计量前，平台 AI
@@ -169,27 +118,27 @@ export default function SettingsPage() {
             <>
               <div className="mb-3 flex items-end justify-between gap-4">
                 <div>
-                  <p className="text-xs text-[#9eaaa4]">本月平台 AI 调用</p>
-                  <p className="mt-1 font-mono text-3xl font-bold tracking-tight">
+                  <p className="text-xs text-[#949baa]">本月平台 AI 调用</p>
+                  <p className="mt-1 text-3xl font-semibold tracking-tight tabular-nums">
                     {unlimited ? '∞' : usage.remaining}
-                    <span className="ml-2 text-[10px] font-medium uppercase tracking-[0.12em] text-[#9eaaa4]">
-                      {unlimited ? 'unlimited' : 'remaining'}
+                    <span className="ml-2 text-[10px] font-medium text-[#949baa]">
+                      {unlimited ? '不限额度' : '剩余次数'}
                     </span>
                   </p>
                 </div>
-                <span className="font-mono text-xs text-[#b4beb9]">
+                <span className="text-xs text-[#b4bac5] tabular-nums">
                   {unlimited ? '无限' : `${usage.used} / ${usage.limit} 次`}
                 </span>
               </div>
-              <div className="h-2 w-full overflow-hidden bg-[#33403a]">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#2c303b]">
                 <div
-                  className={`h-full transition-[width] duration-300 ${
+                  className={`plan-usage-progress h-full origin-left rounded-full ${
                     pct >= 100 ? 'bg-red-400' : 'bg-[var(--accent)]'
                   }`}
-                  style={{ width: unlimited ? '8%' : `${pct}%` }}
+                  style={{ transform: `scaleX(${unlimited ? 0.08 : pct / 100})` }}
                 />
               </div>
-              <p className="mt-2 text-xs leading-5 text-[#9eaaa4]">
+              <p className="mt-2 text-xs leading-5 text-[#949baa]">
                 {unlimited
                   ? '企业版不限额度'
                   : usage.exceeded
@@ -197,16 +146,16 @@ export default function SettingsPage() {
                     : `剩余 ${usage.remaining} 次；配置自有 Key 可不限额度`}
               </p>
 
-              <div className="mt-6 grid grid-cols-2 gap-px border border-[#46534d] bg-[#46534d] text-sm">
-                <div className="bg-[#202b27] p-4">
-                  <div className="text-xs text-[#89968f]">可连接店铺</div>
-                  <div className="mt-2 font-mono text-xl font-bold">
+              <div className="settings-plan-stats mt-6 grid grid-cols-2 gap-3 text-sm">
+                <div className="rounded-xl border border-[#30343f] bg-[#1e212a] p-4">
+                  <div className="text-xs text-[#8f96a4]">可连接店铺</div>
+                  <div className="mt-2 text-xl font-semibold tabular-nums">
                     {ent.data.quotas.shopsMax === -1 ? '无限' : `${ent.data.quotas.shopsMax} 个`}
                   </div>
                 </div>
-                <div className="bg-[#202b27] p-4">
-                  <div className="text-xs text-[#89968f]">每月铺货上限</div>
-                  <div className="mt-2 font-mono text-xl font-bold">
+                <div className="rounded-xl border border-[#30343f] bg-[#1e212a] p-4">
+                  <div className="text-xs text-[#8f96a4]">每月铺货上限</div>
+                  <div className="mt-2 text-xl font-semibold tabular-nums">
                     {ent.data.quotas.publishMonthly === -1
                       ? '无限'
                       : `${ent.data.quotas.publishMonthly} 件`}
@@ -215,12 +164,37 @@ export default function SettingsPage() {
               </div>
             </>
           )}
+
+          {isDemoAuthMode ? (
+            <div className="settings-plan-preview mt-6 border-t border-white/10 pt-5">
+              <div>
+                <p className="text-xs font-semibold text-[#d9dce4]">演示能力预览</p>
+                <p className="mt-1 text-xs text-[#858d9c]">仅改变本地能力，不会产生套餐订单。</p>
+              </div>
+              <div className="settings-plan-preview-control mt-3 grid grid-cols-3 gap-1 p-1 sm:grid-cols-6">
+                {PREVIEW_PLANS.map((p) => (
+                  <button
+                    key={p.v}
+                    type="button"
+                    aria-label={`预览${p.l}套餐`}
+                    aria-pressed={preview === p.v}
+                    onClick={() => applyPreview(p.v)}
+                    className={`settings-preview-option min-h-10 min-w-0 rounded-lg px-2 text-xs font-semibold sm:px-3 ${
+                      preview === p.v ? 'is-active' : ''
+                    }`}
+                  >
+                    {p.l}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </section>
 
-        <section className="ledger-panel overflow-hidden">
+        <section className="ledger-panel settings-key-card overflow-hidden">
           <div className="ledger-section-heading">
             <div>
-              <p className="page-kicker">AI routing / BYOK</p>
+              <p className="page-kicker">AI 路由</p>
               <h2 className="mt-2">自有模型密钥</h2>
               <p>配置后不计入平台额度，费用由你的模型账户承担。</p>
             </div>
@@ -233,7 +207,14 @@ export default function SettingsPage() {
               </p>
             ) : null}
 
-            {key.data?.configured ? (
+            {key.isLoading ? (
+              <p
+                className="mb-4 rounded-xl border border-[var(--line)] bg-[var(--surface-strong)] px-3 py-3 text-sm text-[var(--muted)]"
+                role="status"
+              >
+                正在读取密钥状态…
+              </p>
+            ) : key.data?.configured ? (
               <div
                 className={`mb-4 flex items-center justify-between border-l-4 px-3 py-3 text-sm ${
                   key.data.usable === false
@@ -256,7 +237,7 @@ export default function SettingsPage() {
                 <button
                   onClick={() => delKey.mutate()}
                   disabled={delKey.isPending}
-                  className="quiet-button min-h-11 text-red-700 hover:bg-red-100 disabled:opacity-50"
+                  className="quiet-button danger-quiet-button min-h-11 disabled:opacity-50"
                 >
                   删除
                 </button>
@@ -315,13 +296,17 @@ export default function SettingsPage() {
                 {saveKey.isPending ? '保存中…' : '保存密钥'}
               </button>
               {saveKey.isError && (
-                <p className="text-sm text-red-600">
+                <p className="text-sm text-red-600" role="alert">
                   保存失败：{(saveKey.error as ApiError).message}
                 </p>
               )}
-              {saveKey.isSuccess && <p className="status-message is-success">已保存并加密存储。</p>}
+              {saveKey.isSuccess && (
+                <p className="status-message is-success" role="status">
+                  已保存并加密存储。
+                </p>
+              )}
               {delKey.isError && (
-                <p className="text-sm text-red-600">
+                <p className="text-sm text-red-600" role="alert">
                   删除失败：{(delKey.error as ApiError).message}。原密钥仍保留，请重试。
                 </p>
               )}
@@ -333,10 +318,10 @@ export default function SettingsPage() {
       <ShopsSection />
       <MediaReadinessSection />
 
-      <section className="ledger-panel mt-8 overflow-hidden">
+      <section className="ledger-panel settings-plan-table mt-8 overflow-hidden">
         <div className="ledger-section-heading">
           <div>
-            <p className="page-kicker">Plan matrix / Reference</p>
+            <p className="page-kicker">套餐能力</p>
             <h2 className="mt-2">套餐能力对照</h2>
             <p>内部测试阶段仅用于核对权限，不在此页面发起支付。</p>
           </div>
@@ -348,24 +333,29 @@ export default function SettingsPage() {
               <article
                 key={p.id}
                 className={`grid gap-4 p-5 sm:p-6 lg:grid-cols-[150px_130px_minmax(0,1fr)_110px] lg:items-center ${
-                  current ? 'bg-[var(--accent-soft)]' : 'bg-[var(--surface)]'
+                  current ? 'bg-brand-50/70' : 'bg-[var(--surface)]'
                 }`}
               >
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="font-serif text-xl font-semibold">{p.name}</h3>
+                    <h3 className="text-lg font-semibold tracking-tight">{p.name}</h3>
                     {current && (
-                      <span className="bg-[var(--ink)] px-2 py-0.5 font-mono text-[9px] font-bold uppercase text-white">
+                      <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-semibold text-brand-700">
                         当前
                       </span>
                     )}
                   </div>
                   <p className="mt-1 text-xs text-[var(--muted)]">{p.highlight}</p>
                 </div>
-                <div className="font-mono text-lg font-bold">{priceLabel(p.priceCnyMonthly)}</div>
+                <div className="text-lg font-semibold tabular-nums">
+                  {priceLabel(p.priceCnyMonthly)}
+                </div>
                 <ul className="flex flex-wrap gap-1.5 text-xs text-[var(--ink-soft)]">
                   {p.features.map((f) => (
-                    <li key={f} className="border border-[var(--line)] bg-white/60 px-2 py-1">
+                    <li
+                      key={f}
+                      className="rounded-full border border-[var(--line)] bg-white/70 px-2.5 py-1"
+                    >
                       {FEATURE_LABELS[f] ?? f}
                     </li>
                   ))}

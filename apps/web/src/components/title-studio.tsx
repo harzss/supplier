@@ -51,7 +51,7 @@ export function TitleStudio({ originalTitle, category, selectedTitle, onSelectTi
     <div className="ledger-panel overflow-hidden">
       <div className="ledger-section-heading">
         <div>
-          <p className="page-kicker">Content studio / AI</p>
+          <p className="page-kicker">AI 内容</p>
           <h2 className="mt-2">AI 标题工作台</h2>
           <p>选择渠道并补充商品卖点，生成可直接用于铺货的标题。</p>
         </div>
@@ -71,10 +71,10 @@ export function TitleStudio({ originalTitle, category, selectedTitle, onSelectTi
                 type="button"
                 aria-pressed={platform === p.value}
                 onClick={() => setPlatform(p.value)}
-                className={`min-h-11 border px-3 py-2 text-xs font-bold transition ${
+                className={`min-h-10 rounded-lg border px-3 py-2 text-xs font-semibold transition ${
                   platform === p.value
-                    ? 'border-[var(--ink)] bg-[var(--ink)] text-white'
-                    : 'border-[var(--line)] bg-[var(--surface-strong)] text-[var(--muted)] hover:border-[var(--ink)] hover:text-[var(--ink)]'
+                    ? 'border-brand-200 bg-brand-50 text-brand-700'
+                    : 'border-[var(--line)] bg-[var(--surface-strong)] text-[var(--muted)] hover:border-brand-300 hover:text-[var(--ink)]'
                 }`}
               >
                 {p.label}
@@ -144,7 +144,7 @@ export function TitleStudio({ originalTitle, category, selectedTitle, onSelectTi
         {mutation.data && (
           <div className="mt-4 space-y-2">
             {/* 计费信息 */}
-            <div className="flex flex-wrap items-center justify-between gap-2 border border-[var(--line)] bg-[var(--surface-strong)] px-3 py-2 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-strong)] px-3 py-2 text-xs">
               {mutation.data.billing.viaByok ? (
                 <span className="inline-flex items-center gap-1.5 text-green-700">
                   <svg
@@ -183,7 +183,7 @@ export function TitleStudio({ originalTitle, category, selectedTitle, onSelectTi
               return (
                 <div
                   key={title}
-                  className="flex flex-col items-start justify-between gap-3 border border-[var(--line)] bg-[var(--surface-strong)] px-3 py-3 sm:flex-row sm:items-center"
+                  className="flex flex-col items-start justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-strong)] px-3 py-3 sm:flex-row sm:items-center"
                 >
                   <span className="text-sm text-[var(--ink-soft)]">{title}</span>
                   <span className="flex shrink-0 items-center gap-1">

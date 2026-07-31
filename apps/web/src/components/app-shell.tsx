@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { AuthStatus } from '@/components/auth-provider';
@@ -20,6 +20,84 @@ type NavIconName = (typeof NAV_ITEMS)[number]['icon'];
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const current = NAV_ITEMS.find((item) => isActive(pathname, item.href)) ?? NAV_ITEMS[0];
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileHeaderRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLElement>(null);
+  const previousPathnameRef = useRef(pathname);
+  const focusAfterCloseRef = useRef<'menu' | 'main' | null>(null);
+  const requestMobileNavClose = useCallback((focusTarget: 'menu' | 'main') => {
+    focusAfterCloseRef.current = focusTarget;
+    setMobileNavOpen(false);
+  }, []);
+  const closeMobileNavForNavigation = () => requestMobileNavClose('main');
+
+  useEffect(() => {
+    if (previousPathnameRef.current === pathname) return;
+    previousPathnameRef.current = pathname;
+    if (mobileNavOpen) requestMobileNavClose('main');
+  }, [mobileNavOpen, pathname, requestMobileNavClose]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const mobileHeader = mobileHeaderRef.current;
+    const stage = stageRef.current;
+    document.body.style.overflow = 'hidden';
+    mobileHeader?.setAttribute('inert', '');
+    stage?.setAttribute('inert', '');
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        requestMobileNavClose('menu');
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const drawer = closeButtonRef.current?.closest<HTMLElement>('.app-mobile-drawer');
+      if (!drawer) return;
+      const focusable = Array.from(
+        drawer.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.hasAttribute('hidden'));
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const desktopQuery = window.matchMedia('(min-width: 1024px)');
+    const onViewportChange = (event: MediaQueryListEvent) => {
+      if (event.matches) requestMobileNavClose('main');
+    };
+    if (desktopQuery.matches) requestMobileNavClose('main');
+    window.addEventListener('keydown', onKeyDown);
+    desktopQuery.addEventListener('change', onViewportChange);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      mobileHeader?.removeAttribute('inert');
+      stage?.removeAttribute('inert');
+      window.removeEventListener('keydown', onKeyDown);
+      desktopQuery.removeEventListener('change', onViewportChange);
+    };
+  }, [mobileNavOpen, requestMobileNavClose]);
+
+  useEffect(() => {
+    if (mobileNavOpen) return;
+    const focusTarget = focusAfterCloseRef.current;
+    if (!focusTarget) return;
+    focusAfterCloseRef.current = null;
+    requestAnimationFrame(() => {
+      if (focusTarget === 'menu') menuButtonRef.current?.focus();
+      else document.getElementById('main-content')?.focus();
+    });
+  }, [mobileNavOpen]);
 
   return (
     <div className="app-shell">
@@ -29,9 +107,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       <aside className="app-sidebar" aria-label="主要导航">
         <Brand />
-        <div className="app-sidebar-label">Merchant workspace</div>
         <nav className="app-sidebar-nav">
-          {NAV_ITEMS.map((item, index) => {
+          {NAV_ITEMS.map((item) => {
             const active = isActive(pathname, item.href);
             return (
               <Link
@@ -40,12 +117,8 @@ export function AppShell({ children }: { children: ReactNode }) {
                 aria-current={active ? 'page' : undefined}
                 className={`app-nav-item ${active ? 'is-active' : ''}`}
               >
-                <span className="app-nav-index">{String(index + 1).padStart(2, '0')}</span>
                 <NavIcon name={item.icon} />
-                <span className="min-w-0">
-                  <span className="app-nav-title">{item.label}</span>
-                  <span className="app-nav-eyebrow">{item.eyebrow}</span>
-                </span>
+                <span className="app-nav-title">{item.label}</span>
               </Link>
             );
           })}
@@ -63,43 +136,110 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
-      <div className="app-mobile-header">
-        <Brand compact />
-        <div className="flex items-center gap-3">
-          <div className="app-mobile-context">
-            <span>{current.eyebrow}</span>
-            <strong>{current.label}</strong>
-          </div>
+      <div ref={mobileHeaderRef} className="app-mobile-header" aria-hidden={mobileNavOpen}>
+        <button
+          ref={menuButtonRef}
+          type="button"
+          className="app-mobile-menu-button"
+          aria-label="打开导航"
+          aria-expanded={mobileNavOpen}
+          aria-controls="mobile-navigation"
+          onClick={() => setMobileNavOpen(true)}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            aria-hidden="true"
+          >
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+        </button>
+        <div className="app-mobile-context">
+          <strong>{current.label}</strong>
+        </div>
+        <div className="app-mobile-trailing">
           <AuthStatus compact />
         </div>
       </div>
 
-      <nav className="app-mobile-nav" aria-label="移动端导航">
-        {NAV_ITEMS.map((item) => {
-          const active = isActive(pathname, item.href);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              aria-current={active ? 'page' : undefined}
-              className={`app-mobile-nav-item ${active ? 'is-active' : ''}`}
+      <div className="app-mobile-overlay" data-open={mobileNavOpen} aria-hidden={!mobileNavOpen}>
+        <button
+          type="button"
+          className="app-mobile-scrim"
+          aria-label="关闭导航"
+          tabIndex={mobileNavOpen ? 0 : -1}
+          onClick={() => requestMobileNavClose('menu')}
+        />
+        <aside
+          id="mobile-navigation"
+          className="app-mobile-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-label="移动端导航"
+        >
+          <div className="app-mobile-drawer-header">
+            <Brand onNavigate={closeMobileNavForNavigation} />
+            <button
+              ref={closeButtonRef}
+              type="button"
+              className="app-mobile-close-button"
+              aria-label="关闭导航"
+              onClick={() => requestMobileNavClose('menu')}
             >
-              <NavIcon name={item.icon} />
-              <span>{item.label}</span>
-            </Link>
-          );
-        })}
-      </nav>
-
-      <section className="app-stage">
-        <header className="app-context-bar">
-          <div>
-            <span className="app-context-code">SUP / {current.eyebrow.toUpperCase()}</span>
-            <span className="app-context-title">{current.label}</span>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                aria-hidden="true"
+              >
+                <path d="m6 6 12 12M18 6 6 18" />
+              </svg>
+            </button>
           </div>
-          <div className="app-context-status">
-            <span className="app-context-pulse" />
-            {isDemoAuthMode ? '本地演示环境' : '内部测试环境'}
+          <p className="app-mobile-drawer-label">工作台</p>
+          <nav className="app-mobile-drawer-nav">
+            {NAV_ITEMS.map((item) => {
+              const active = isActive(pathname, item.href);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  aria-current={active ? 'page' : undefined}
+                  className={`app-mobile-drawer-link ${active ? 'is-active' : ''}`}
+                  onClick={closeMobileNavForNavigation}
+                >
+                  <NavIcon name={item.icon} />
+                  <span>{item.label}</span>
+                </Link>
+              );
+            })}
+          </nav>
+          <div className="app-mobile-drawer-footer">
+            <div className="app-environment">
+              <span className="app-environment-dot" />
+              <span>
+                <strong>{isDemoAuthMode ? 'Demo workspace' : 'Live workspace'}</strong>
+                <small>{isDemoAuthMode ? '安全演示模式' : 'Supabase 已连接'}</small>
+              </span>
+            </div>
+            <AuthStatus />
+          </div>
+        </aside>
+      </div>
+
+      <section ref={stageRef} className="app-stage" aria-hidden={mobileNavOpen}>
+        <header className="app-context-bar">
+          <div className="app-context-bar-inner">
+            <div className="app-context-path">
+              <span className="app-context-title">{current.label}</span>
+            </div>
+            <div className="app-context-status">
+              <span className="app-context-pulse" />
+              {isDemoAuthMode ? '本地演示环境' : '内部测试环境'}
+            </div>
           </div>
         </header>
         <div id="main-content" className="app-content" tabIndex={-1}>
@@ -110,12 +250,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function Brand({ compact = false }: { compact?: boolean }) {
+function Brand({ compact = false, onNavigate }: { compact?: boolean; onNavigate?: () => void }) {
   return (
     <Link
       href="/"
       className={`app-brand ${compact ? 'is-compact' : ''}`}
       aria-label="Supplier 首页"
+      onClick={onNavigate}
     >
       <span className="app-brand-mark" aria-hidden="true">
         <svg viewBox="0 0 38 38" fill="none">

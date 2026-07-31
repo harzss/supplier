@@ -88,8 +88,8 @@ export default function PublishedPage() {
 
   return (
     <main className="app-page">
-      <header className="mb-8 border-b border-[var(--ink)] pb-7">
-        <p className="page-kicker">Catalog operations / 02</p>
+      <header className="mb-6">
+        <p className="page-kicker">商品管理</p>
         <h1 className="page-title">铺货中心</h1>
         <p className="page-description">
           跟踪铺货任务、平台上架状态、库存同步和需要人工修正的商品。

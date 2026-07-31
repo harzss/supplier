@@ -2,15 +2,25 @@
 export function ScoreBadge({ value }: { value: number }) {
   const tier =
     value >= 80
-      ? { bg: 'bg-[#dcece7]', text: 'text-[#185145]', border: 'border-[#7cb4a6]', label: '强推' }
+      ? {
+          bg: 'bg-emerald-50/95',
+          text: 'text-emerald-800',
+          border: 'border-emerald-200',
+          label: '强推',
+        }
       : value >= 70
-        ? { bg: 'bg-[#f7e9ca]', text: 'text-[#754913]', border: 'border-[#d7b56c]', label: '可选' }
-        : { bg: 'bg-[#ece8de]', text: 'text-[#5e655f]', border: 'border-[#b9b4aa]', label: '观望' };
+        ? {
+            bg: 'bg-brand-50/95',
+            text: 'text-brand-800',
+            border: 'border-brand-200',
+            label: '可选',
+          }
+        : { bg: 'bg-white/95', text: 'text-zinc-700', border: 'border-zinc-200', label: '观望' };
   return (
     <span
-      className={`inline-flex items-center gap-1 border px-2 py-1 font-mono text-xs font-bold ${tier.bg} ${tier.text} ${tier.border}`}
+      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold shadow-sm backdrop-blur ${tier.bg} ${tier.text} ${tier.border}`}
     >
-      {value.toFixed(1)}
+      <span className="tabular-nums">{value.toFixed(1)}</span>
       <span className="text-[9px] font-medium opacity-80">{tier.label}</span>
     </span>
   );

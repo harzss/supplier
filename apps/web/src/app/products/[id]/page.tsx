@@ -65,10 +65,14 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
                 </div>
               )}
             </div>
-            <p className="page-kicker mt-6">Source product / {data.productId1688}</p>
-            <h1 className="mt-2 font-serif text-3xl font-semibold leading-tight">{data.title}</h1>
+            <p className="page-kicker mt-6">货源商品 · {data.productId1688}</p>
+            <h1 className="mt-2 text-2xl font-semibold leading-tight tracking-tight">
+              {data.title}
+            </h1>
             <div className="mt-3 flex items-center gap-4">
-              <span className="text-2xl font-bold text-brand-600">¥{data.price}</span>
+              <span className="text-2xl font-semibold text-[var(--ink)] tabular-nums">
+                ¥{data.price}
+              </span>
               {data.priceRange && (
                 <span className="text-sm text-zinc-400">
                   区间 ¥{data.priceRange[0]}–{data.priceRange[1]}

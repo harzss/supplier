@@ -1,6 +1,7 @@
 'use client';
 
 import { Suspense, useCallback, useTransition } from 'react';
+import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type RecommendationList } from '@/lib/api';
@@ -29,7 +30,7 @@ function RecommendationPage() {
       ? '最低价不能高于最高价，请重新设置价格范围。'
       : undefined;
 
-  const { data, isLoading, isFetching, isError, error } = useQuery<RecommendationList>({
+  const { data, isLoading, isFetching, isError, error, refetch } = useQuery<RecommendationList>({
     queryKey: [
       'recommendations',
       filters.categoryL1 ?? '',
@@ -66,21 +67,42 @@ function RecommendationPage() {
   );
 
   return (
-    <main className="mx-auto max-w-7xl px-6 py-10">
-      <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <main className="app-page">
+      <header className="mb-8 grid gap-7 border-b border-[var(--ink)] pb-8 lg:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)] lg:items-end">
         <div>
-          <p className="text-sm font-medium uppercase tracking-widest text-brand-500">
-            今日推荐 · AI 选品
+          <p className="page-kicker">Sourcing desk / Daily brief 01</p>
+          <h1 className="page-title max-w-3xl">今天，搬更有胜算的款</h1>
+          <p className="page-description">
+            把采购价、月销、趋势、利润与合规放在同一张选品桌上。先看判断，再看商品。
           </p>
-          <h1 className="mt-2 text-3xl font-bold tracking-tight">今天搬什么款</h1>
-          <p className="mt-2 text-zinc-600">五维打分 + AI 推荐理由，按综合分排序。</p>
         </div>
-        <a
-          href="/favorites"
-          className="w-fit rounded-full border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-600 transition hover:border-brand-400 hover:text-brand-600"
-        >
-          收藏对比 {favorites.data ? `· ${favorites.data.total}` : ''} →
-        </a>
+        <div className="ledger-panel overflow-hidden">
+          <div className="grid grid-cols-3 divide-x divide-[var(--line)]">
+            <BriefMetric label="候选货源" value={data ? String(data.total) : '—'} unit="款" />
+            <BriefMetric
+              label="最高评分"
+              value={data?.items[0]?.score?.overall?.toFixed(1) ?? '—'}
+              unit="分"
+            />
+            <BriefMetric
+              label="采购区间"
+              value={
+                facets.data?.priceRange
+                  ? `¥${formatCompactPrice(facets.data.priceRange.min)}–${formatCompactPrice(facets.data.priceRange.max)}`
+                  : '—'
+              }
+            />
+          </div>
+          <Link
+            href="/favorites"
+            className="flex min-h-12 items-center justify-between border-t border-[var(--line)] px-4 text-xs font-bold text-[var(--ink)] transition hover:bg-[var(--accent-soft)]"
+          >
+            <span>进入收藏对比</span>
+            <span className="font-mono text-[var(--accent-dark)]">
+              {favorites.data ? `${favorites.data.total} SAVED` : 'OPEN'} →
+            </span>
+          </Link>
+        </div>
       </header>
 
       <ProductFilters
@@ -94,40 +116,46 @@ function RecommendationPage() {
 
       {isLoading && !rangeError ? <SkeletonGrid /> : null}
 
-      {rangeError ? (
-        <div className="border border-red-200 bg-red-50 p-4 text-sm text-red-600">{rangeError}</div>
-      ) : null}
+      {rangeError ? <div className="status-message is-danger mb-6">{rangeError}</div> : null}
 
       {isError ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-600">
-          加载失败：{(error as Error).message}
-          <p className="mt-1 text-red-400">
-            请确认 BFF 已启动（pnpm --filter @supplier/bff dev）。
-          </p>
+        <div className="status-message is-danger mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <span>货源读取失败：{(error as Error).message}</span>
+          <button
+            type="button"
+            onClick={() => void refetch()}
+            className="secondary-button shrink-0"
+          >
+            重新读取
+          </button>
         </div>
       ) : null}
 
       {data?.degraded && data.items.length === 0 ? (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
+        <div className="mb-6 border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
           选品数据暂时无法从数据库完整读取，请稍后重试；当前空结果不代表没有可推荐商品。
         </div>
       ) : null}
 
       {data && !data.degraded && data.items.length === 0 ? (
-        <div className="rounded-xl border border-zinc-200 bg-white p-10 text-center text-zinc-500">
+        <div className="ledger-panel p-12 text-center text-[var(--muted)]">
           当前筛选条件下暂无已打分商品，试试放宽类目或价格范围。
         </div>
       ) : null}
 
       {data && data.items.length > 0 ? (
         <>
-          <div className="mb-3 flex items-center justify-between gap-4 text-sm text-zinc-400">
-            <p>
+          <div className="mb-4 flex items-center justify-between gap-4 border-b border-[var(--line)] pb-3 text-xs text-[var(--muted)]">
+            <p className="font-mono uppercase tracking-[0.12em]">
               展示 {data.total} 款{data.degraded ? '（数据库降级中，结果可能不完整）' : ''}
             </p>
-            {isFetching ? <span className="font-mono text-[10px] uppercase">Updating…</span> : null}
+            {isFetching ? (
+              <span className="font-mono text-[10px] uppercase text-[var(--accent-dark)]">
+                Updating…
+              </span>
+            ) : null}
           </div>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 sm:gap-5 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
             {data.items.map((p, i) => (
               <ProductCard
                 key={p.id}
@@ -155,9 +183,9 @@ function RecommendationPage() {
 
 function PageSkeleton() {
   return (
-    <main className="mx-auto max-w-7xl px-6 py-10">
-      <div className="mb-8 h-24 animate-pulse bg-zinc-100" />
-      <div className="mb-8 h-64 animate-pulse border border-zinc-200 bg-white" />
+    <main className="app-page">
+      <div className="mb-8 h-48 animate-pulse border-b border-[var(--line)] bg-white/20" />
+      <div className="mb-8 h-52 animate-pulse border border-[var(--line)] bg-[var(--surface)]" />
       <SkeletonGrid />
     </main>
   );
@@ -165,18 +193,41 @@ function PageSkeleton() {
 
 function SkeletonGrid() {
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 sm:gap-5 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
       {Array.from({ length: 10 }).map((_, i) => (
-        <div key={i} className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">
-          <div className="aspect-square animate-pulse bg-zinc-100" />
+        <div
+          key={i}
+          className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface)]"
+        >
+          <div className="aspect-[4/5] animate-pulse bg-[var(--paper-deep)]" />
           <div className="space-y-2 p-3">
-            <div className="h-3 animate-pulse rounded bg-zinc-100" />
-            <div className="h-3 w-2/3 animate-pulse rounded bg-zinc-100" />
+            <div className="h-3 animate-pulse bg-[var(--paper-deep)]" />
+            <div className="h-3 w-2/3 animate-pulse bg-[var(--paper-deep)]" />
           </div>
         </div>
       ))}
     </div>
   );
+}
+
+function BriefMetric({ label, value, unit }: { label: string; value: string; unit?: string }) {
+  return (
+    <div className="min-w-0 px-3 py-4 sm:px-4">
+      <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-[var(--muted)]">
+        {label}
+      </p>
+      <p className="mt-2 truncate font-mono text-lg font-bold tracking-tight text-[var(--ink)] sm:text-xl">
+        {value}
+        {unit ? (
+          <span className="ml-1 text-[10px] font-medium text-[var(--muted)]">{unit}</span>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
+function formatCompactPrice(value: number): string {
+  return value.toLocaleString('zh-CN', { maximumFractionDigits: 1 });
 }
 
 function readFilters(searchParams: ReturnType<typeof useSearchParams>): AppliedProductFilters {

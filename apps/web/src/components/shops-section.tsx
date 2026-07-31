@@ -99,16 +99,18 @@ export function ShopsSection() {
   }, [qc]);
 
   return (
-    <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-6">
-      <div className="mb-4 flex items-start justify-between gap-4">
+    <section className="ledger-panel mt-8 p-5 sm:p-6">
+      <div className="mb-5 flex items-start justify-between gap-4 border-b border-[var(--line)] pb-5">
         <div>
           <div className="mb-1 flex items-center gap-2">
-            <h2 className="text-base font-semibold">店铺管理</h2>
-            <span className="rounded-full bg-zinc-900 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white">
+            <h2 className="font-serif text-2xl font-semibold">店铺与渠道</h2>
+            <span className="bg-[var(--ink)] px-2 py-0.5 font-mono text-[9px] font-semibold tracking-wide text-white">
               OPENAPI
             </span>
           </div>
-          <p className="text-xs text-zinc-500">授权真实店铺后，可直接铺货、同步订单并回传物流。</p>
+          <p className="mt-1 text-xs text-[var(--muted)]">
+            授权真实店铺后，可直接铺货、同步订单并回传物流。
+          </p>
         </div>
       </div>
 

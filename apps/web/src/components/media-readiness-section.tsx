@@ -10,12 +10,12 @@ export function MediaReadinessSection() {
   });
 
   return (
-    <section className="mt-6 rounded-2xl border border-zinc-200 bg-white p-6">
-      <div className="mb-4 flex items-start justify-between gap-4">
+    <section className="ledger-panel mt-8 p-5 sm:p-6">
+      <div className="mb-5 flex items-start justify-between gap-4 border-b border-[var(--line)] pb-5">
         <div>
           <div className="mb-1 flex items-center gap-2">
-            <h2 className="text-base font-semibold">AI 图片服务</h2>
-            <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+            <h2 className="font-serif text-2xl font-semibold">AI 图片服务</h2>
+            <span className="bg-violet-100 px-2 py-0.5 font-mono text-[9px] font-semibold text-violet-700">
               M4
             </span>
           </div>

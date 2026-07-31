@@ -87,9 +87,14 @@ export default function PublishedPage() {
   });
 
   return (
-    <main className="mx-auto max-w-4xl px-4 py-8">
-      <h1 className="mb-1 text-2xl font-bold">我的铺货</h1>
-      <p className="mb-6 text-sm text-zinc-500">最近的铺货任务与已发布商品。</p>
+    <main className="app-page">
+      <header className="mb-8 border-b border-[var(--ink)] pb-7">
+        <p className="page-kicker">Catalog operations / 02</p>
+        <h1 className="page-title">铺货中心</h1>
+        <p className="page-description">
+          跟踪铺货任务、平台上架状态、库存同步和需要人工修正的商品。
+        </p>
+      </header>
 
       {isDemoAuthMode && simulate.isSuccess && (
         <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
@@ -119,7 +124,7 @@ export default function PublishedPage() {
 
       <div className="space-y-4">
         {data?.items.map((t) => (
-          <div key={t.taskId} className="rounded-2xl border border-zinc-200 bg-white p-5">
+          <div key={t.taskId} className="ledger-panel p-5">
             <div className="flex items-start gap-4">
               {t.mainImage && (
                 // eslint-disable-next-line @next/next/no-img-element

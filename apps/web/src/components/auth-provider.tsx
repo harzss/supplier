@@ -78,20 +78,32 @@ export function AuthGate({ children }: { children: ReactNode }) {
   return children;
 }
 
-export function AuthStatus() {
+export function AuthStatus({ compact = false }: { compact?: boolean }) {
   const { session } = useContext(AuthContext);
   if (isDemoAuthMode || !session) return null;
 
   const signOut = async () => {
     await getSupabaseClient().auth.signOut();
   };
-  return (
-    <div className="flex shrink-0 items-center gap-2 border-l border-zinc-200 pl-3 text-xs text-zinc-500">
-      <span className="hidden max-w-36 truncate lg:inline">{session.user.email ?? '已登录'}</span>
+  if (compact) {
+    return (
       <button
         type="button"
         onClick={() => void signOut()}
-        className="border border-zinc-300 bg-white px-2.5 py-1.5 font-medium text-zinc-700 transition hover:border-zinc-900 hover:text-zinc-900"
+        aria-label={`退出账号 ${session.user.email ?? ''}`.trim()}
+        className="min-h-11 border border-[var(--line-strong)] bg-[var(--surface)] px-3 text-xs font-bold text-[var(--ink-soft)] transition hover:border-[var(--ink)]"
+      >
+        退出
+      </button>
+    );
+  }
+  return (
+    <div className="grid gap-2 border-t border-[#34403b] pt-3 text-xs text-[#9eaaa4]">
+      <span className="max-w-48 truncate">{session.user.email ?? '已登录'}</span>
+      <button
+        type="button"
+        onClick={() => void signOut()}
+        className="min-h-11 border border-[#56625c] px-3 py-2 font-medium text-[#dce3df] transition hover:border-white hover:text-white"
       >
         退出
       </button>

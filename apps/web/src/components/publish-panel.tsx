@@ -110,9 +110,10 @@ export function PublishPanel({
   if (!open) {
     return (
       <button
+        type="button"
         onClick={() => setOpen(true)}
         disabled={!!unavailableMessage}
-        className="mt-4 block w-full rounded-xl bg-brand-500 py-3 text-center font-medium text-white transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-zinc-300"
+        className="primary-button mt-4 w-full"
       >
         {unavailableMessage ?? `一键铺货 · 可售库存 ${totalStock}`}
       </button>
@@ -120,12 +121,13 @@ export function PublishPanel({
   }
 
   return (
-    <div className="mt-4 rounded-2xl border border-zinc-200 bg-white p-6">
+    <div className="ledger-panel mt-4 p-6">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-base font-semibold">一键铺货</h2>
         <button
+          type="button"
           onClick={() => setOpen(false)}
-          className="text-xs text-zinc-400 transition hover:text-zinc-600"
+          className="quiet-button min-h-11 text-xs"
         >
           收起
         </button>
@@ -153,7 +155,7 @@ export function PublishPanel({
           <p className="mb-2 text-xs text-zinc-500">选择目标店铺</p>
           <div className="mb-3 space-y-1.5">
             {sellerShops.map((s) => (
-              <label key={s.id} className="flex items-center gap-2 text-sm">
+              <label key={s.id} className="flex min-h-11 cursor-pointer items-center gap-2 text-sm">
                 <input
                   type="checkbox"
                   checked={selected.includes(s.id)}

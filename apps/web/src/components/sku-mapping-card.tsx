@@ -51,7 +51,7 @@ export function SkuMappingCard({ sourceProductId }: Props) {
     );
 
   return (
-    <section className="mt-4 rounded-2xl border border-zinc-200 bg-white p-5">
+    <section className="ledger-panel mt-4 p-5">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
@@ -141,19 +141,24 @@ export function SkuMappingCard({ sourceProductId }: Props) {
                 {skus.map((sku, skuIndex) => (
                   <tr key={sku.sourceSkuId}>
                     <td className="px-2 py-2">
-                      <input
-                        type="checkbox"
-                        checked={sku.enabled}
-                        onChange={(event) =>
-                          setSkus((current) =>
-                            current.map((item, index) =>
-                              index === skuIndex
-                                ? { ...item, enabled: event.target.checked }
-                                : item,
-                            ),
-                          )
-                        }
-                      />
+                      <label className="inline-flex h-11 w-11 cursor-pointer items-center justify-center">
+                        <input
+                          type="checkbox"
+                          checked={sku.enabled}
+                          onChange={(event) =>
+                            setSkus((current) =>
+                              current.map((item, index) =>
+                                index === skuIndex
+                                  ? { ...item, enabled: event.target.checked }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                        <span className="sr-only">
+                          启用规格 {sku.sourceSpecName || sku.sourceSkuId}
+                        </span>
+                      </label>
                     </td>
                     <td className="max-w-36 px-2 py-2 text-zinc-500">{sku.sourceSpecName}</td>
                     {dimensions.map((_, valueIndex) => (

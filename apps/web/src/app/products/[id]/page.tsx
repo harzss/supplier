@@ -25,19 +25,33 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
   });
 
   return (
-    <main className="mx-auto max-w-5xl px-6 py-10">
-      <Link href="/" className="text-sm text-zinc-500 hover:text-brand-500">
-        ← 返回今日推荐
+    <main className="app-page app-page-narrow">
+      <Link href="/" className="secondary-button">
+        ← 返回选品桌
       </Link>
 
-      {isLoading && <p className="mt-10 text-zinc-400">加载中…</p>}
-      {isError && <p className="mt-10 text-red-600">加载失败：{(error as Error).message}</p>}
+      {isLoading ? (
+        <div
+          role="status"
+          aria-label="正在加载商品详情"
+          className="mt-8 grid animate-pulse gap-8 md:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]"
+        >
+          <div className="aspect-square rounded-xl border border-[var(--line)] bg-[var(--paper-deep)]" />
+          <div className="ledger-panel min-h-80 bg-[var(--surface-strong)]" />
+          <span className="sr-only">正在加载商品详情…</span>
+        </div>
+      ) : null}
+      {isError ? (
+        <p className="status-message is-danger mt-8" role="alert">
+          商品详情加载失败：{(error as Error).message}。请返回选品桌后重试。
+        </p>
+      ) : null}
 
       {data && (
-        <article className="mt-6 grid gap-8 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <article className="mt-8 grid gap-8 md:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
           {/* 左：主图 + 基础 */}
           <div className="min-w-0">
-            <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-100">
+            <div className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--paper-deep)] shadow-[var(--shadow-sm)]">
               {data.mainImage ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -51,7 +65,8 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
                 </div>
               )}
             </div>
-            <h1 className="mt-4 text-lg font-semibold leading-snug">{data.title}</h1>
+            <p className="page-kicker mt-6">Source product / {data.productId1688}</p>
+            <h1 className="mt-2 font-serif text-3xl font-semibold leading-tight">{data.title}</h1>
             <div className="mt-3 flex items-center gap-4">
               <span className="text-2xl font-bold text-brand-600">¥{data.price}</span>
               {data.priceRange && (
@@ -94,7 +109,7 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
           {/* 右：打分 */}
           <div className="min-w-0">
             {data.score ? (
-              <div className="rounded-2xl border border-zinc-200 bg-white p-6">
+              <div className="ledger-panel p-6">
                 <div className="mb-2 flex items-center justify-between">
                   <h2 className="text-base font-semibold">AI 选品打分</h2>
                   <ScoreBadge value={data.score.overall} />
@@ -117,9 +132,7 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
                 )}
               </div>
             ) : (
-              <div className="rounded-2xl border border-zinc-200 bg-white p-6 text-zinc-400">
-                暂无打分数据
-              </div>
+              <div className="ledger-panel p-6 text-[var(--muted)]">暂无打分数据</div>
             )}
 
             <div className="mt-4">

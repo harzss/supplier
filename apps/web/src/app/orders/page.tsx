@@ -172,18 +172,21 @@ export default function OrdersPage() {
   });
 
   return (
-    <main className="mx-auto max-w-4xl px-4 py-8">
-      <h1 className="mb-1 text-2xl font-bold">订单代发</h1>
-      <p className="mb-6 text-sm text-zinc-500">
-        买家下单后按供应商拆分 1688 代发采购单；人工付款后同步包裹并回传抖店。
-      </p>
+    <main className="app-page">
+      <header className="mb-8 border-b border-[var(--ink)] pb-7">
+        <p className="page-kicker">Fulfillment queue / 03</p>
+        <h1 className="page-title">订单履约</h1>
+        <p className="page-description">
+          销售订单、1688 采购、包裹回传与财务核对集中在一条履约队列中处理。
+        </p>
+      </header>
 
       <div className="mb-5 flex flex-wrap items-center gap-2">
         <button
           type="button"
           aria-pressed={!pendingOnly}
           onClick={() => setPendingOnly(false)}
-          className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+          className={`min-h-11 border px-4 py-2 text-sm font-bold ${
             pendingOnly ? 'border border-zinc-200 bg-white text-zinc-600' : 'bg-zinc-900 text-white'
           }`}
         >
@@ -196,7 +199,7 @@ export default function OrdersPage() {
             setPendingOnly(true);
             setReconciliationPage(1);
           }}
-          className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+          className={`min-h-11 border px-4 py-2 text-sm font-bold ${
             pendingOnly
               ? 'bg-orange-600 text-white'
               : 'border border-orange-200 bg-white text-orange-700'
@@ -345,6 +348,7 @@ export default function OrdersPage() {
                       min="0.01"
                       max={Math.max(0.01, o.amount - 0.01)}
                       step="0.01"
+                      aria-label="累计实际退款金额"
                       value={refundAmounts[o.orderId] ?? ''}
                       onChange={(event) =>
                         setRefundAmounts((current) => ({
@@ -356,6 +360,7 @@ export default function OrdersPage() {
                       className="w-full rounded border border-orange-200 bg-white px-2.5 py-1.5 text-xs text-zinc-700 outline-none focus:border-orange-400 sm:w-36"
                     />
                     <input
+                      aria-label="退款金额核对依据"
                       value={refundAmountNotes[o.orderId] ?? ''}
                       onChange={(event) =>
                         setRefundAmountNotes((current) => ({
@@ -429,6 +434,7 @@ export default function OrdersPage() {
                       : '当前不满足自动继续条件；如采购已创建，请先完成人工取消、退款或拦截。'}
                   </p>
                   <input
+                    aria-label="部分退款处置说明"
                     value={partialRefundNotes[o.orderId] ?? ''}
                     onChange={(event) =>
                       setPartialRefundNotes((current) => ({
@@ -561,6 +567,7 @@ export default function OrdersPage() {
                                     min="0"
                                     max="99999999.99"
                                     step="0.01"
+                                    aria-label="最终实际采购成本"
                                     value={costText}
                                     onChange={(event) =>
                                       setResolutionCosts((current) => ({
@@ -572,6 +579,7 @@ export default function OrdersPage() {
                                     className="w-full rounded border border-amber-200 bg-white px-2.5 py-1.5 text-xs text-zinc-700 outline-none focus:border-amber-400 sm:w-36"
                                   />
                                   <input
+                                    aria-label="1688 与抖店物流核对依据"
                                     value={resolutionNotes[purchase.purchaseOrderId] ?? ''}
                                     onChange={(event) =>
                                       setResolutionNotes((current) => ({
@@ -614,6 +622,7 @@ export default function OrdersPage() {
                                 </p>
                                 <div className="flex flex-col gap-2 sm:flex-row">
                                   <input
+                                    aria-label="1688 物流处理依据"
                                     value={resolutionNotes[purchase.purchaseOrderId] ?? ''}
                                     onChange={(event) =>
                                       setResolutionNotes((current) => ({
@@ -657,6 +666,7 @@ export default function OrdersPage() {
                                     min="0"
                                     max="99999999.99"
                                     step="0.01"
+                                    aria-label="最终实际采购成本"
                                     value={costText}
                                     onChange={(event) =>
                                       setResolutionCosts((current) => ({
@@ -668,6 +678,7 @@ export default function OrdersPage() {
                                     className="w-full rounded border border-red-200 bg-white px-2.5 py-1.5 text-xs text-zinc-700 outline-none focus:border-red-400 sm:w-36"
                                   />
                                   <input
+                                    aria-label="1688 取消退款或拦截处理依据"
                                     value={resolutionNotes[purchase.purchaseOrderId] ?? ''}
                                     onChange={(event) =>
                                       setResolutionNotes((current) => ({

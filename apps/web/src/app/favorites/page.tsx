@@ -34,8 +34,8 @@ export default function FavoritesPage() {
   };
 
   return (
-    <main className="min-h-[calc(100vh-57px)] bg-[#f4f1ea] px-4 py-8 text-[#20211e] sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-7xl">
+    <main className="app-page text-[#20211e]">
+      <div>
         <header className="mb-8 border-b border-[#20211e] pb-6">
           <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-brand-600">
             S-05 · Selection desk

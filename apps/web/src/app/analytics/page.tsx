@@ -37,8 +37,8 @@ export default function AnalyticsPage() {
   });
 
   return (
-    <main className="min-h-[calc(100vh-57px)] bg-[#f1eee5] text-[#1b1d1a]">
-      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 lg:py-10">
+    <main className="app-page text-[#1b1d1a]">
+      <div>
         <header className="mb-8 flex flex-col gap-5 border-b border-[#1b1d1a] pb-6 md:flex-row md:items-end md:justify-between">
           <div>
             <p className="mb-2 font-mono text-[11px] font-semibold uppercase tracking-[0.24em] text-[#c64b2c]">

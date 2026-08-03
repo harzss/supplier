@@ -19,7 +19,7 @@ export function ProductCard({
   return (
     <article className="product-card">
       <Link
-        href={`/products/${encodeURIComponent(product.productId1688)}`}
+        href={`/products?id=${encodeURIComponent(product.productId1688)}`}
         className="product-card-link"
       >
         <div className="product-card-media">

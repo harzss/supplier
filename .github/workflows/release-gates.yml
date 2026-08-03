@@ -30,7 +30,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
-      - run: node --test scripts/verify-supabase-boundary.test.mjs
+      - run: pnpm test:ops
       - run: node --test deploy/cloudflare/staging-gateway/worker.test.mjs
       - run: pnpm build
       - run: pnpm exec prettier --check "**/*.{ts,tsx,md,json,yml,yaml}"

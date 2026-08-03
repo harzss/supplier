@@ -1,7 +1,8 @@
 'use client';
 
-import { use, useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Product } from '@/lib/api';
 import { ScoreRadar } from '@/components/score-radar';
@@ -12,8 +13,16 @@ import { CategoryMappingCard } from '@/components/category-mapping-card';
 import { SkuMappingCard } from '@/components/sku-mapping-card';
 import { FavoriteToggleButton } from '@/components/favorite-toggle-button';
 
-export default function ProductDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
+export default function ProductDetailPage() {
+  return (
+    <Suspense fallback={<ProductDetailSkeleton />}>
+      <ProductDetailContent />
+    </Suspense>
+  );
+}
+
+function ProductDetailContent() {
+  const id = useSearchParams().get('id')?.trim() ?? '';
   const [selectedTitle, setSelectedTitle] = useState<{
     title: string;
     platformLabel: string;
@@ -22,6 +31,7 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
   const { data, isLoading, isError, error } = useQuery<Product>({
     queryKey: ['product', id],
     queryFn: () => api.productDetail(id),
+    enabled: Boolean(id),
   });
 
   return (
@@ -30,17 +40,12 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
         ← 返回选品桌
       </Link>
 
-      {isLoading ? (
-        <div
-          role="status"
-          aria-label="正在加载商品详情"
-          className="mt-8 grid animate-pulse gap-8 md:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]"
-        >
-          <div className="aspect-square rounded-xl border border-[var(--line)] bg-[var(--paper-deep)]" />
-          <div className="ledger-panel min-h-80 bg-[var(--surface-strong)]" />
-          <span className="sr-only">正在加载商品详情…</span>
-        </div>
+      {!id ? (
+        <p className="status-message is-danger mt-8" role="alert">
+          缺少商品编号。请返回选品桌重新选择商品。
+        </p>
       ) : null}
+      {isLoading ? <ProductDetailSkeleton /> : null}
       {isError ? (
         <p className="status-message is-danger mt-8" role="alert">
           商品详情加载失败：{(error as Error).message}。请返回选品桌后重试。
@@ -163,5 +168,19 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
         </article>
       )}
     </main>
+  );
+}
+
+function ProductDetailSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-label="正在加载商品详情"
+      className="mt-8 grid animate-pulse gap-8 md:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]"
+    >
+      <div className="aspect-square rounded-xl border border-[var(--line)] bg-[var(--paper-deep)]" />
+      <div className="ledger-panel min-h-80 bg-[var(--surface-strong)]" />
+      <span className="sr-only">正在加载商品详情…</span>
+    </div>
   );
 }

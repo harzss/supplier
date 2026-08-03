@@ -49,7 +49,7 @@ flowchart LR
 | AI 详情 / 主图   | 🔄 开发中                       | 详情链路已完成；主图权益、远程 GPU 流水线编排、托管与铺货接入已完成，待真实 worker 联调     |
 | 真实平台 OAuth   | 🔄 开发中                       | M3-1～5 已完成；M3-6 已增加联调准备度检查，当前环境 0/6 待配置                              |
 
-**2026-08-03 当前结论**：代码门禁已通过 522 项测试、lint、typecheck、production build、Prisma、Prettier 与依赖安全审计；BFF、migration 和 Web 三类非 root 镜像已重新构建。staging 已完成 33/33 migration、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF 和告警基础 smoke。R0-03 仍缺稳定 Web URL、真实邀请账号生命周期、非空持久性演练与长期进程守护；抖店/1688 真实小额闭环及其他生产 P0 门禁仍未关闭，因此不能宣称生产可用。
+**2026-08-03 当前结论**：代码门禁已通过 522 项测试、lint、typecheck、production build、Prisma、Prettier 与依赖安全审计；BFF、migration 和 Web 三类非 root 镜像已重新构建。staging 已完成 33/33 migration、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF、告警基础 smoke，以及 Redis / 数据库队列非空重启持久性实测。Cloudflare Web 已从超出 CPU 门禁的 OpenNext 方案改为 59 个纯静态 Assets；固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 再验收均通过，Cloudflare API 明确该部署只有 assets、没有可执行 Worker。R0-03 仍缺真实邀请账号生命周期和已授权安装的长期进程守护验收，因此不能宣称生产可用。
 
 <details>
 <summary>M1～M67 历史增量台账（其中“当前”均指记录当时，不代表 2026-08-03 状态）</summary>
@@ -1346,9 +1346,15 @@ M67 已补齐已发货物流修复的长任务执行权：修复服务每 60 秒
 
 ## 54. 变更记录
 
+- 2026-08-03：关闭 Cloudflare Workers Free Web CPU 缺口。商品详情从运行时 `/products/[id]` 改为静态 `/products?id=<id>` 壳，浏览器仍按同一 Bearer API 加载商品；`public/_redirects` 把旧 `/products/<id>` 以 301 兼容到新地址。Next 默认继续输出 standalone 供 Docker 使用，仅 `WEB_BUILD_TARGET=static` 导出静态站。Wrangler 改为 assets-only，部署 59 个 `out` 资源，当前版本 `7d15e88a-20bc-40c8-a255-4dae8dcd7e52`；Cloudflare tail API 返回“Cannot tail a Worker which only has assets”，证明请求不再进入 Worker CPU 路径。Web 测试 10/10、typecheck、静态构建、dry-run、固定 URL 路由和 15/15 HTTPS 部署验证通过。
+
+- 2026-08-03：部署固定 Cloudflare Web `supplier-staging-web.chenjie.workers.dev`，版本 `2cfa19b5-0b44-4081-a240-8c0737563922`。OpenNext 上传压缩后 953.71 KiB，首页、设置、订单和动态商品路由均返回 200；BFF 重启后以精确 CORS 允许该 origin，Supabase Auth Site URL 与唯一 Redirect URL 均已回填。固定 Web + 固定 BFF 的部署验证 15/15 通过，浏览器可见邀请制登录页且未发现应用错误。Cloudflare tail 同时发现 `/products/[id]` 热请求 CPU 40ms、设置页冷请求 285ms，未通过免费方案 CPU 门禁；当前 URL 只能作为过渡预览，R0-03 保持进行中并转入纯静态托管改造。
+
 - 2026-08-03：刷新生产依赖安全基线。联网审计发现 Next 15.5.20、Sharp 0.34/0.33、PostCSS 8.5.15、`@fastify/static` 9.3 及 Fastify/Nest 传递依赖新增 14 个 high、6 个 moderate 公告；升级 Next 到 15.5.22、Sharp 到 0.35.3，并把 PostCSS、`find-my-way`、`fast-uri`、`js-yaml` 与 `brace-expansion` 固定到已修复版本。BFF 不需要静态业务资源，最终移除 optional static 插件和内嵌 Swagger UI；生产固定不注册文档路由，非生产只提供 `/docs-json`。最终 `pnpm audit --prod --audit-level high` 返回 `No known vulnerabilities found`，严格 peer 检查通过；lint 2/2、typecheck 14/14、全仓 522 项测试、build 9/9、Prisma validate、Supabase 边界 4/4、Worker 7/7、Prettier 与差异检查均通过。BFF/migrate/Web 三个 Linux 镜像用最终 lockfile 重建成功、保持 `node` 非 root，BFF 镜像确认不包含 static 插件。部署验证改为有序执行，避免单连接 staging 被自身并发探针压垮；固定 Worker + 本地 Web 的 15 项验证全部通过。
 
-- 2026-08-03：推进 R0-03 免费 SaaS 内测环境。Supabase Storage `supplier-assets` 完成上传、公开读取、删除 smoke；Auth 服务端公开注册已关闭，新增可重复边界验证器并实测匿名访问业务表返回 401。Cloudflare Worker 固定入口与 Quick Tunnel 已贯通更新后的 BFF；readiness 数据库检查合并为单次 migration 查询并跟进最新 migration，staging 超时按实测延迟调整为 8 秒，本机、Tunnel、Worker 各连续 5 次返回 200。Redis 使用 loopback、AOF、命名卷和 `unless-stopped`，BFF 四项真实自动化保持关闭；数据库与 5xx critical 告警已转为 resolved，当前 active 告警为空。邀请链接后的设置密码与找回密码入口、干净 PostgreSQL 的 Supabase 角色初始化、数据库审计 host 防伪也已补齐。稳定 Web URL、Supabase Site/Redirect、真实邀请登录、非空持久性演练和 BFF/Tunnel 进程守护仍未完成，R0-03 保持进行中。
+- 2026-08-03：推进 R0-03 免费 SaaS 内测环境。Supabase Storage `supplier-assets` 完成上传、公开读取、删除 smoke；Auth 服务端公开注册已关闭，新增可重复边界验证器并实测匿名访问业务表返回 401。Cloudflare Worker 固定入口与 Quick Tunnel 已贯通更新后的 BFF；readiness 数据库检查合并为单次 migration 查询并跟进最新 migration，staging 超时按实测延迟调整为 8 秒，本机、Tunnel、Worker 各连续 5 次返回 200。Redis 使用 loopback、AOF、命名卷和 `unless-stopped`，BFF 四项真实自动化保持关闭；数据库与 5xx critical 告警已转为 resolved，当前 active 告警为空。邀请链接后的设置密码与找回密码入口、干净 PostgreSQL 的 Supabase 角色初始化、数据库审计 host 防伪也已补齐。稳定 Web URL、Supabase Site/Redirect、真实邀请登录和 BFF/Tunnel 进程守护仍未完成，R0-03 保持进行中。
+
+- 2026-08-03：继续关闭 R0-03 / R0-04 缺口。Redis 写入 15 分钟自动过期探针后重启 `supplier-staging-redis`，AOF / 命名卷恢复原值；清理探针后本机与固定 Worker readiness 均为 200。staging 数据库创建 `next_run_at=2099-01-01` 的不可执行铺货队列探针，优雅重启 BFF 后任务仍为 `queued`，随后级联清理，证明非空数据库队列不依赖进程内存。新增真实 Supabase Auth 会话验证器，覆盖 password grant、有效 JWT、refresh、刷新后 JWT、logout 后 refresh 撤销与无 Token 401；25 项运维脚本测试全绿且不输出凭据，并纳入 Release Gates。新增并测试 macOS supervisor / LaunchAgent 安装器，可守护 BFF 与 Quick Tunnel、通过仓库锁定的 Wrangler 4.118.0 自动更新 Worker upstream；其中 15 项 supervisor 测试通过，但实际安装因其持续暴露本机 BFF 并可修改 Worker Secret，必须等待用户对该长期权限变更明确授权。R0-04 抖店 + 1688 权限、回调、测试数据、预算和证据清单已完成；R0-05 外部账号与审核仍保持阻塞。
 
 - 2026-08-03：完成 R0-02 staging schema 与公开访问边界审计。Supabase PostgreSQL 17.6 当前为 33/33 migration applied、0 unfinished、0 rolled back，远端 checksum 与仓库 33 个 `migration.sql` 全匹配；最新为 `20260803173000_secure_supabase_public_schema`，`prisma migrate status` 返回 up to date，live schema → Prisma datamodel diff 为空。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限；关键表为 10 条货源、0 条铺货、0 条订单、0 条采购，铺货恢复键重复组为 0。安全 migration 前已完成一致性备份和隔离恢复演练，归档 142614 bytes、SHA256 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，恢复卷保留为 `supplier-staging-pre-rls-20260803-1730`。审计脚本同时校验 Supabase host/project、migration history/checksum、schema diff、RLS 和权限；R0-02 数据库门禁关闭。
 

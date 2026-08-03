@@ -6,11 +6,13 @@ node_modules/
 dist/
 build/
 .next/
+.open-next/
 out/
 *.tsbuildinfo
 
 # Turbo
 .turbo/
+.wrangler/
 
 # Env
 .env

@@ -211,7 +211,7 @@ export default function PublishedPage() {
                             </button>
                           ) : null}
                           <Link
-                            href={`/products/${encodeURIComponent(t.sourceProductId)}`}
+                            href={`/products?id=${encodeURIComponent(t.sourceProductId)}`}
                             className="shrink-0 rounded border border-zinc-200 px-2 py-0.5 text-zinc-600 transition hover:border-brand-500"
                           >
                             调整属性/资质

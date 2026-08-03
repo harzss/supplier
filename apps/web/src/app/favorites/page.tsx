@@ -97,7 +97,7 @@ export default function FavoritesPage() {
                     >
                       {active ? '✓' : '+'}
                     </button>
-                    <Link href={`/products/${encodeURIComponent(item.productId1688)}`}>
+                    <Link href={`/products?id=${encodeURIComponent(item.productId1688)}`}>
                       <div className="aspect-square overflow-hidden rounded-lg bg-[var(--paper-deep)]">
                         {item.mainImage ? (
                           // eslint-disable-next-line @next/next/no-img-element
@@ -193,7 +193,7 @@ function ComparisonTable({ products }: { products: FavoriteProduct[] }) {
                   className="w-[220px] min-w-[220px] px-4 py-4 align-top"
                 >
                   <Link
-                    href={`/products/${encodeURIComponent(product.productId1688)}`}
+                    href={`/products?id=${encodeURIComponent(product.productId1688)}`}
                     className="group"
                   >
                     <p className="line-clamp-3 font-medium leading-5 group-hover:text-brand-600">

@@ -2,10 +2,10 @@
   "name": "supplier",
   "version": "0.0.1",
   "private": true,
-  "description": "AI-powered 1688 distribution & sourcing tool",
+  "description": "Simple, safe, and transparent 1688 distribution operations platform",
   "packageManager": "pnpm@9.12.0",
   "engines": {
-    "node": ">=20.10.0",
+    "node": ">=22.0.0",
     "pnpm": ">=9.0.0"
   },
   "pnpm": {
@@ -25,6 +25,7 @@
     "dev": "turbo run dev --parallel",
     "lint": "turbo run lint",
     "test": "turbo run test",
+    "test:ops": "node --test scripts/*.test.mjs",
     "typecheck": "pnpm --filter @supplier/db prisma:generate && turbo run typecheck",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
     "clean": "turbo run clean && rm -rf node_modules",
@@ -36,7 +37,10 @@
     "db:studio": "pnpm --filter @supplier/db prisma:studio",
     "db:seed": "node scripts/seed.mjs",
     "audit:supabase-boundary": "node scripts/verify-supabase-boundary.mjs",
+    "audit:supabase-auth-session": "node scripts/verify-supabase-auth-session.mjs",
     "deploy:verify": "node scripts/verify-deployment.mjs",
+    "staging:supervise": "node scripts/staging-local-supervisor.mjs",
+    "staging:launchagent:install": "node scripts/install-staging-launchagent.mjs",
     "score": "node scripts/score-products.mjs",
     "crawl": "node scripts/crawl-products.mjs"
   },
@@ -44,6 +48,7 @@
     "@types/node": "^20.14.0",
     "prettier": "^3.3.0",
     "turbo": "^2.3.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "wrangler": "4.118.0"
   }
 }

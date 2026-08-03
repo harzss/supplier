@@ -228,9 +228,10 @@ describe('runtime helpers', () => {
     expect(() => corsOrigins('*', false)).toThrow('must not contain wildcard');
   });
 
-  it('disables Swagger by default in production and allows an explicit override', () => {
+  it('never exposes Swagger in production and allows development to opt out', () => {
     expect(swaggerEnabled('production', undefined)).toBe(false);
     expect(swaggerEnabled('development', undefined)).toBe(true);
-    expect(swaggerEnabled('production', 'true')).toBe(true);
+    expect(swaggerEnabled('production', 'true')).toBe(false);
+    expect(swaggerEnabled('development', 'false')).toBe(false);
   });
 });

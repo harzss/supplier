@@ -114,7 +114,7 @@ docker run --rm \
 1. BFF `/api/health/live` 返回 200。
 2. BFF `/api/health/ready` 返回 200，且 PostgreSQL 最新必需 migration、数据库连接与 Redis 均为 `up`。
 3. Web `/` 返回 200。
-4. BFF `/docs` 返回 404。
+4. BFF `/docs`、`/docs-json`、`/docs-yaml` 与 `/docs/swagger-ui.css` 均返回 404。
 5. 无 token、无效 token、伪造 demo headers 访问受保护 API 均返回 401。
 6. OAuth callback 不应被全局认证守卫改成 401。
 7. `/api/operations/status` 无运维 token 返回 401；有效 token 下 status/check/alerts/metrics 返回 200。
@@ -197,4 +197,6 @@ Prisma migration 按前向历史管理。已应用到任何共享环境的 migra
 
 当前仓库已经使用标准 Dockerfile 验证本地全新 PostgreSQL 15/Redis 7、全部 14 个 migration、最终 BFF/migrate/Web 镜像、非 root uid 1000、12 项部署 smoke 与 SIGTERM exit 0；数据库状态最新且 schema diff 为空，最终镜像中的 `/api/operations/check` 已实测 200，抖店订单同步 worker 的生产配置门禁和启动路径也已复验。告警可靠性加固后的 `m20-current` 三镜像再次通过同范围验证，并确认非法重试次数配置 exit 1、合法配置 ready 200。真实 Supabase 已在 PostgreSQL 17 一致性逻辑备份和事务回滚预演后应用全部 14 个 migration，状态最新且 schema diff 为空。云端镜像仓库、编排平台、生产 Redis、真实域名切流、外部告警接收/监控平台和备份恢复演练仍需在目标环境完成。
 
-以上是 M20 时点的已验证快照。2026-07-22 只读查询确认当前仓库有 32 个 migration，目标 Supabase 仍有 18 个待应用，范围为 `20260720120000_add_inventory_sync`～`20260722091000_add_order_logistics_repairs`；目标库当前只有 30 条货源、6 条铺货、3 条订单和 3 条采购，没有未完成 migration 记录，待新增的 `published_products(task_id, shop_id)` 唯一索引重复组为 0。release-gates 已加入全新库 migration status 和 live schema diff，但该新增步骤尚未在 GitHub runner 实际执行；下一次发布仍必须按本手册从备份、migration-once、schema diff 到关键业务 smoke 全量重验，不能沿用 14 个 migration 时点的结论。
+以上是 M20 时点的已验证快照。2026-07-22 只读查询确认当时仓库有 32 个 migration，现 staging Supabase 当时仍有 18 个待应用，范围为 `20260720120000_add_inventory_sync`～`20260722091000_add_order_logistics_repairs`；当时只有 30 条货源、6 条铺货、3 条订单和 3 条采购，没有未完成 migration 记录，待新增的 `published_products(task_id, shop_id)` 唯一索引重复组为 0。该段仅保留历史迁移证据，不能作为当前状态。
+
+2026-08-03 最新审计确认 staging 已是 PostgreSQL 17.6、33/33 migration applied、0 unfinished、0 rolled back，远端 checksum 与仓库 migration 全匹配，live schema 与 Prisma datamodel 无差异；最新 migration 为 `20260803173000_secure_supabase_public_schema`，28/28 public 表启用 RLS，anon/authenticated 对表和 sequence 均无权限。当前为 10 条货源、0 条铺货、0 条订单和 0 条采购，恢复键重复组为 0。安全 migration 前的一致性归档已在隔离 PostgreSQL 17 中完成恢复演练，归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`。release-gates 已加入全新库 migration status、live schema diff 和 Supabase 角色初始化，但仍需在 GitHub runner 实际验证；未来出现 pending migration 时，仍必须先完成备份与隔离恢复演练，再由单一 migration-once 执行。

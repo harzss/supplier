@@ -21,12 +21,13 @@ install:
 	pnpm install
 
 infra-up:
-	docker compose -f infra/docker-compose.dev.yml up -d
+	docker compose -f infra/docker-compose.dev.yml up -d --wait
 
 infra-down:
 	docker compose -f infra/docker-compose.dev.yml down
 
 db-migrate:
+	pnpm db:dev:up
 	pnpm --filter @supplier/db exec prisma migrate dev $(if $(name),--name $(name),)
 
 db-migrate-deploy:

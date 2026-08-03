@@ -12,7 +12,6 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@fastify/static": "^9.3.0",
     "@nestjs/common": "^11.1.28",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.1.28",
@@ -34,7 +33,7 @@
     "prisma": "^5.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.0",
-    "sharp": "^0.33.5",
+    "sharp": "^0.35.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {

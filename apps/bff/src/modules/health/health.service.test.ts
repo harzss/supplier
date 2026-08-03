@@ -16,10 +16,10 @@ function makeService(
 ) {
   const queryRaw = vi
     .fn()
-    .mockReturnValueOnce(options.database ?? Promise.resolve([{ '?column?': 1 }]))
     .mockReturnValueOnce(
-      options.migration ??
-        Promise.resolve([{ migration_name: '20260722091000_add_order_logistics_repairs' }]),
+      options.database ??
+        options.migration ??
+        Promise.resolve([{ migration_name: LATEST_REQUIRED_MIGRATION }]),
     );
   const prisma = {
     $queryRaw: queryRaw,

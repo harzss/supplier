@@ -1,7 +1,12 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { authMode, getSupabaseConfiguration } from './environment';
 
-export { authMode, frontendConfigurationError, isDemoAuthMode } from './environment';
+export {
+  authMode,
+  frontendConfigurationError,
+  isDemoAuthMode,
+  isSignupEnabled,
+} from './environment';
 
 let client: SupabaseClient | undefined;
 let accessToken: string | null = null;

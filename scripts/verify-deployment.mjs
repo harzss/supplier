@@ -5,65 +5,73 @@ const webUrl = requiredOrigin('WEB_URL');
 const operationsToken = requiredSecret('OPERATIONS_TOKEN');
 
 const checks = [
-  check('BFF liveness', `${bffUrl}/api/health/live`, 200, (body) => body.status === 'ok'),
-  check(
-    'BFF readiness',
-    `${bffUrl}/api/health/ready`,
-    200,
-    (body) =>
-      body.status === 'ready' &&
-      body.checks?.database?.status === 'up' &&
-      body.checks?.redis?.status === 'up',
-  ),
-  check('Swagger production gate', `${bffUrl}/docs`, 404),
-  check('Protected API without token', `${bffUrl}/api/me/entitlements`, 401),
-  check('Protected API with invalid token', `${bffUrl}/api/me/entitlements`, 401, undefined, {
-    authorization: 'Bearer invalid-token',
-  }),
-  check('Forged demo headers', `${bffUrl}/api/me/entitlements`, 401, undefined, {
-    'x-user-id': '1',
-    'x-user-plan': 'flagship',
-  }),
-  check('OAuth callback remains public', `${bffUrl}/api/shops/oauth/douyin/callback`, 400),
-  check('Operations API without token', `${bffUrl}/api/operations/status`, 401),
-  check(
-    'Operations status with token',
-    `${bffUrl}/api/operations/status`,
-    200,
-    (body) =>
-      body.service === 'supplier-bff' &&
-      body.queue &&
-      Array.isArray(body.activeAlerts) &&
-      Number.isInteger(body.auditFailures5m) &&
-      body.auditFailures5m >= 1,
-    { authorization: `Bearer ${operationsToken}` },
-  ),
-  check(
-    'Operations check with token',
-    `${bffUrl}/api/operations/check`,
-    200,
-    (body) => body.service === 'supplier-bff' && body.queue?.available === true,
-    { authorization: `Bearer ${operationsToken}` },
-    'POST',
-  ),
-  checkText(
-    'Prometheus metrics with token',
-    `${bffUrl}/api/operations/metrics`,
-    200,
-    'supplier_http_requests_total',
-    { authorization: `Bearer ${operationsToken}` },
-  ),
-  check('Web root', `${webUrl}/`, 200),
+  () => check('BFF liveness', `${bffUrl}/api/health/live`, 200, (body) => body.status === 'ok'),
+  () =>
+    check(
+      'BFF readiness',
+      `${bffUrl}/api/health/ready`,
+      200,
+      (body) =>
+        body.status === 'ready' &&
+        body.checks?.database?.status === 'up' &&
+        body.checks?.redis?.status === 'up',
+    ),
+  () => check('Swagger production gate', `${bffUrl}/docs`, 404),
+  () => check('OpenAPI JSON production gate', `${bffUrl}/docs-json`, 404),
+  () => check('OpenAPI YAML production gate', `${bffUrl}/docs-yaml`, 404),
+  () => check('Swagger asset production gate', `${bffUrl}/docs/swagger-ui.css`, 404),
+  () => check('Protected API without token', `${bffUrl}/api/me/entitlements`, 401),
+  () =>
+    check('Protected API with invalid token', `${bffUrl}/api/me/entitlements`, 401, undefined, {
+      authorization: 'Bearer invalid-token',
+    }),
+  () =>
+    check('Forged demo headers', `${bffUrl}/api/me/entitlements`, 401, undefined, {
+      'x-user-id': '1',
+      'x-user-plan': 'flagship',
+    }),
+  () => check('OAuth callback remains public', `${bffUrl}/api/shops/oauth/douyin/callback`, 400),
+  () => check('Operations API without token', `${bffUrl}/api/operations/status`, 401),
+  () =>
+    check(
+      'Operations status with token',
+      `${bffUrl}/api/operations/status`,
+      200,
+      (body) =>
+        body.service === 'supplier-bff' &&
+        body.queue &&
+        Array.isArray(body.activeAlerts) &&
+        Number.isInteger(body.auditFailures5m) &&
+        body.auditFailures5m >= 1,
+      { authorization: `Bearer ${operationsToken}` },
+    ),
+  () =>
+    check(
+      'Operations check with token',
+      `${bffUrl}/api/operations/check`,
+      200,
+      (body) => body.service === 'supplier-bff' && body.queue?.available === true,
+      { authorization: `Bearer ${operationsToken}` },
+      'POST',
+    ),
+  () =>
+    checkText(
+      'Prometheus metrics with token',
+      `${bffUrl}/api/operations/metrics`,
+      200,
+      'supplier_http_requests_total',
+      { authorization: `Bearer ${operationsToken}` },
+    ),
+  () => check('Web root', `${webUrl}/`, 200),
 ];
 
-const results = await Promise.allSettled(checks);
 let failed = false;
-for (const result of results) {
-  if (result.status === 'fulfilled') {
-    console.log(`✓ ${result.value}`);
-  } else {
+for (const run of checks) {
+  try {
+    console.log(`✓ ${await run()}`);
+  } catch (error) {
     failed = true;
-    console.error(`✗ ${result.reason.message}`);
+    console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 if (failed) process.exitCode = 1;

@@ -1,5 +1,7 @@
 .git
 .github
+.agents
+skills-lock.json
 .pnpm-store
 .turbo
 node_modules

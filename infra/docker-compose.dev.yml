@@ -1,5 +1,6 @@
 services:
   # 本地开发用的 Postgres，版本对齐 Supabase
+  # 通过 `pnpm db:dev:up` 启动；该入口会等待角色 bootstrap healthcheck 完成。
   postgres:
     image: postgres:15-alpine
     container_name: supplier-postgres
@@ -12,8 +13,16 @@ services:
       - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-supabase-roles.sql:/docker-entrypoint-initdb.d/010-supabase-roles.sql:ro
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      # docker-entrypoint-initdb.d only runs for a new volume. Replaying this
+      # idempotent role bootstrap also upgrades older postgres_data volumes
+      # before Prisma migrations are allowed to treat the service as healthy.
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U postgres -d supplier && psql -v ON_ERROR_STOP=1 -U postgres -d supplier -f /docker-entrypoint-initdb.d/010-supabase-roles.sql >/dev/null',
+        ]
       interval: 5s
       timeout: 3s
       retries: 5

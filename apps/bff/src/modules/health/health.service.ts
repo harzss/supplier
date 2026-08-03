@@ -7,7 +7,7 @@ import { AlertService } from '../observability/alert.service';
 
 type DependencyStatus = { status: 'up' } | { status: 'down' };
 
-export const LATEST_REQUIRED_MIGRATION = '20260722091000_add_order_logistics_repairs';
+export const LATEST_REQUIRED_MIGRATION = '20260803173000_secure_supabase_public_schema';
 
 export interface ReadinessResult {
   status: 'ready' | 'unavailable';
@@ -64,7 +64,6 @@ export class HealthService {
   }
 
   private async checkDatabase(): Promise<void> {
-    await this.prisma.$queryRaw`SELECT 1`;
     const applied = await this.prisma.$queryRaw<Array<{ migration_name: string }>>`
       SELECT "migration_name"
       FROM "_prisma_migrations"

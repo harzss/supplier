@@ -20,7 +20,7 @@ flowchart LR
     G --> H[回传物流]
 ```
 
-## 2. 工程证据快照（截至 2026-07-22）
+## 2. 工程证据快照（截至 2026-08-03）
 
 | 环节             | 状态                            | 说明                                                                                        |
 | ---------------- | ------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -48,6 +48,11 @@ flowchart LR
 | 库存联动         | 🔄 应用侧已通                   | 采集库存指纹/版本、持久队列、抖店逐 SKU 全量同步、缺货/下架/SKU 变化自动下架；待真实店验收  |
 | AI 详情 / 主图   | 🔄 开发中                       | 详情链路已完成；主图权益、远程 GPU 流水线编排、托管与铺货接入已完成，待真实 worker 联调     |
 | 真实平台 OAuth   | 🔄 开发中                       | M3-1～5 已完成；M3-6 已增加联调准备度检查，当前环境 0/6 待配置                              |
+
+**2026-08-03 当前结论**：代码门禁已通过 522 项测试、lint、typecheck、production build、Prisma、Prettier 与依赖安全审计；BFF、migration 和 Web 三类非 root 镜像已重新构建。staging 已完成 33/33 migration、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF 和告警基础 smoke。R0-03 仍缺稳定 Web URL、真实邀请账号生命周期、非空持久性演练与长期进程守护；抖店/1688 真实小额闭环及其他生产 P0 门禁仍未关闭，因此不能宣称生产可用。
+
+<details>
+<summary>M1～M67 历史增量台账（其中“当前”均指记录当时，不代表 2026-08-03 状态）</summary>
 
 **当前结论**：M1～M17 的业务与生产基座保持通过。M18 已完成真实 1688 采购的应用侧闭环。M19 进一步补齐真实订单摄取：抖店订单按固定更新时间窗从第 0 页全分页拉取，以持久成功水位和 5 分钟重叠窗口防漏，跨进程使用 Redis 店铺锁，后台 worker 与设置页手工入口共享同一幂等同步服务；超过安全页数、Redis 不可用或任一页失败时均不推进水位。M20 已补齐真实买家货源采集适配器，M21 已完成库存变化同步与缺货自动下架，M22 已完成发布状态同步与驳回修正，M23 已补齐子订单售后识别、采购/物流保护、人工处置与运维告警，M24 进一步补齐部分退款后的剩余子单决策与安全履约，M25 补齐实际退款金额人工核对、状态失效和经营净额口径，M26 补齐 1688 取消/退款后的最终采购成本核销与售后损失入账，M27 将退款金额和采购成本核对升级为集中待办、指标与主动告警，M28 将普通订单升级为租户隔离的完整分页和店铺/状态筛选，不再静默截断或吞掉数据库错误，M29 补齐店铺主动停用、Token 清除、重新授权配额重验、刷新竞态保护和生产演示边界，M30 进一步把历史演示店从真实执行、查询、经营指标、财务告警和套餐额度中整体隔离，M31 将铺货记录改为完整分页并移除数据库错误降级为空列表，M32 修复选品降级空状态和商品详情数据库错误被误报为 404，M33 将平台 AI 与月度铺货用量统计改为 fail-closed，M34 补齐平台 AI 调用前的原子额度预占、成功后实际成本回填与 stale 告警，M35 修复 BYOK 密钥读取、解密和删除的 fail-open/误报成功。M5 进一步补齐按店铺同步抖店官方类目目录、官方类目预测候选、人工确认、类目必填属性和铺货前目录校验，使真实发布不再依赖手工猜测类目 ID，也不会遗漏 `product_format_new`。此前标准 Dockerfile 三镜像已在全新 PostgreSQL/Redis 中通过完整部署 smoke；告警投递可靠性加固后的 `m20-current` BFF/migrate/Web 也已重新构建并复验 14 个 migration、schema diff、12 项部署门禁、非法重试配置拒绝启动、非 root 和优雅退出。真实 Supabase 已在备份和回滚预演后应用全部 14 个 migration，状态最新且 schema diff 为空；完整 release-check 全绿。当前按功能优先级不继续构建、部署或应用目标库 migration。**当前仍不能宣称生产可用**：真实抖店/1688 凭证、买家授权、人工付款与真实包裹回传尚未端到端验收，同时仍有真实身份项目、生产 Redis/云环境、外部监控告警、恢复演练与法务合规等 P0 门禁，详见 `docs/10-production-readiness.md`。
 
@@ -112,6 +117,8 @@ M65 已补齐铺货长任务租约：worker 每 60 秒按 `running + attempts + 
 M66 已把铺货 AI 结果从“任务全部结束后一次保存”改为阶段性 checkpoint：标题、详情、详情图托管和主图处理每阶段都在下一个外部调用前写入 `ai_optimized`。详情和主图同时持久化 attempted 标记；合规拒绝、解析失败或 Storage 失败后若进程再被接管，新 attempt 会使用已保存结果或原图降级，不重复执行已计费阶段。
 
 M67 已补齐已发货物流修复的长任务执行权：修复服务每 60 秒按 `repair id + running + lockedBy` 续租，不再依赖入口时一次性的 5 分钟锁。抖店 adapter 在承运商查询、订单回读、每个 `logisticsEditByPack` 和最终快照校验前后调用 ownership guard；旧请求失权后最多完成当前在途 HTTP，不会继续修改下一包或提交本地快照。
+
+</details>
 
 **外部约束**：真实平台（抖店/淘宝）OpenAPI 需企业资质、应用审核与 AppKey。代码可先完成 OAuth 骨架，真实联调需开发者凭证。
 
@@ -630,8 +637,8 @@ M67 已补齐已发货物流修复的长任务执行权：修复服务每 60 秒
 | #   | 任务                                                                 | 状态              |
 | --- | -------------------------------------------------------------------- | ----------------- |
 | 1   | 建立 `pnpm audit --prod` 基线并归并直接漏洞来源                      | ✅ 完成           |
-| 2   | Next 15.5.20、Nest 11.1.28、Fastify 5.10 与兼容插件安全升级          | ✅ 完成           |
-| 3   | PostCSS 安全 override，生产依赖审计清零                              | ✅ 完成           |
+| 2   | Next 15.5.22、Nest 11.1.28、Fastify 5.10 与兼容插件安全升级          | ✅ 完成           |
+| 3   | Sharp、PostCSS 与传递依赖安全升级，生产依赖审计清零                  | ✅ 完成           |
 | 4   | `audit:prod` 接入 `make release-check` 与 release-gates CI           | ✅ 完成           |
 | 5   | PR/main/weekly CodeQL 与生产依赖 SCA workflow                        | ✅ 完成           |
 | 6   | GitHub 首次运行、Code Scanning 可用性与 required checks/分支保护验收 | ⬜ 待 GitHub 配置 |
@@ -640,7 +647,7 @@ M67 已补齐已发货物流修复的长任务执行权：修复服务每 60 秒
 
 - [x] 初始审计复现 48 个生产依赖漏洞：3 critical、18 high、22 moderate、5 low
 - [x] `pnpm audit --prod` 返回 `No known vulnerabilities found`
-- [x] Next 15.5.20 production build 通过；Nest 11 BFF build、lint、typecheck 和 47 文件 / 150 项测试通过
+- [x] 当前 Next 15.5.22 与 Sharp 0.35.3 production build 通过；BFF 移除非业务必需的 static 插件，Nest 11 lint、typecheck 和 64 文件 / 338 项测试通过
 - [x] `make release-check` 全绿：lint 2/2、typecheck 14/14、测试任务 11/11（总计 209 项）、build 9/9、Prettier 与 `git diff --check` 通过
 - [x] release-gates 在安装依赖后执行生产 audit；security-scans 对 PR、main、每周和手工触发运行依赖审计与 CodeQL
 - [ ] 在 GitHub 实际完成首次 security-scans，确认 Code Scanning 权限/套餐可用，并将 release/security checks 设为 main 分支 required
@@ -1338,6 +1345,12 @@ M67 已补齐已发货物流修复的长任务执行权：修复服务每 60 秒
 - [x] 全仓 lint/typecheck/test、Prisma 与格式门禁通过
 
 ## 54. 变更记录
+
+- 2026-08-03：刷新生产依赖安全基线。联网审计发现 Next 15.5.20、Sharp 0.34/0.33、PostCSS 8.5.15、`@fastify/static` 9.3 及 Fastify/Nest 传递依赖新增 14 个 high、6 个 moderate 公告；升级 Next 到 15.5.22、Sharp 到 0.35.3，并把 PostCSS、`find-my-way`、`fast-uri`、`js-yaml` 与 `brace-expansion` 固定到已修复版本。BFF 不需要静态业务资源，最终移除 optional static 插件和内嵌 Swagger UI；生产固定不注册文档路由，非生产只提供 `/docs-json`。最终 `pnpm audit --prod --audit-level high` 返回 `No known vulnerabilities found`，严格 peer 检查通过；lint 2/2、typecheck 14/14、全仓 522 项测试、build 9/9、Prisma validate、Supabase 边界 4/4、Worker 7/7、Prettier 与差异检查均通过。BFF/migrate/Web 三个 Linux 镜像用最终 lockfile 重建成功、保持 `node` 非 root，BFF 镜像确认不包含 static 插件。部署验证改为有序执行，避免单连接 staging 被自身并发探针压垮；固定 Worker + 本地 Web 的 15 项验证全部通过。
+
+- 2026-08-03：推进 R0-03 免费 SaaS 内测环境。Supabase Storage `supplier-assets` 完成上传、公开读取、删除 smoke；Auth 服务端公开注册已关闭，新增可重复边界验证器并实测匿名访问业务表返回 401。Cloudflare Worker 固定入口与 Quick Tunnel 已贯通更新后的 BFF；readiness 数据库检查合并为单次 migration 查询并跟进最新 migration，staging 超时按实测延迟调整为 8 秒，本机、Tunnel、Worker 各连续 5 次返回 200。Redis 使用 loopback、AOF、命名卷和 `unless-stopped`，BFF 四项真实自动化保持关闭；数据库与 5xx critical 告警已转为 resolved，当前 active 告警为空。邀请链接后的设置密码与找回密码入口、干净 PostgreSQL 的 Supabase 角色初始化、数据库审计 host 防伪也已补齐。稳定 Web URL、Supabase Site/Redirect、真实邀请登录、非空持久性演练和 BFF/Tunnel 进程守护仍未完成，R0-03 保持进行中。
+
+- 2026-08-03：完成 R0-02 staging schema 与公开访问边界审计。Supabase PostgreSQL 17.6 当前为 33/33 migration applied、0 unfinished、0 rolled back，远端 checksum 与仓库 33 个 `migration.sql` 全匹配；最新为 `20260803173000_secure_supabase_public_schema`，`prisma migrate status` 返回 up to date，live schema → Prisma datamodel diff 为空。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限；关键表为 10 条货源、0 条铺货、0 条订单、0 条采购，铺货恢复键重复组为 0。安全 migration 前已完成一致性备份和隔离恢复演练，归档 142614 bytes、SHA256 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，恢复卷保留为 `supplier-staging-pre-rls-20260803-1730`。审计脚本同时校验 Supabase host/project、migration history/checksum、schema diff、RLS 和权限；R0-02 数据库门禁关闭。
 
 - 2026-07-22：完成 M67 物流修复长任务执行权。`order_logistics_repairs` 运行记录在执行期间每 60 秒按随机 lockId 原子续写 `lockedAt`；读店铺 Token、调用抖店物流修改和本地事务提交前后均复核执行权。Platform SDK 新增可选执行 guard，承运商查询、订单回读、每个包裹修改和最终验证都会停在失权边界，防止大批量包裹超过 5 分钟后新旧请求并发改物流。最终 lint 2/2、typecheck 14/14、测试任务 11/11（Platform SDK 107、BFF 338、全仓 500）、production build 9/9、Prisma schema、本次涉及文件 Prettier 与 `git diff --check` 全部通过。本里程碑无 schema 变更，未构建 Docker、未部署、未执行目标数据库 migration。
 

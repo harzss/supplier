@@ -219,9 +219,10 @@ export function corsOrigins(value: unknown, production: boolean): string[] {
 }
 
 export function swaggerEnabled(nodeEnv: unknown, configured: unknown): boolean {
+  if (nodeEnv === PRODUCTION) return false;
   const value = optionalString(configured);
   if (value !== undefined) return value === 'true';
-  return nodeEnv !== PRODUCTION;
+  return true;
 }
 
 function validateProductionEnvironment(environment: RuntimeEnvironment): void {

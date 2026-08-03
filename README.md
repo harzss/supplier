@@ -52,3 +52,5 @@ supplier/
 ## 本地开发
 
 具体环境变量和部署步骤见 [内部测试环境手册](docs/12-internal-staging.md)。常用命令以根目录 `package.json` 和各 workspace 的 `package.json` 为准。
+
+本地 PostgreSQL 必须通过 `pnpm db:dev:up` 或 `make infra-up` 启动并等待 healthy；这一步会为新旧数据卷幂等准备 Supabase 的 `anon` / `authenticated` 角色。创建或应用开发 migration 使用根目录 `pnpm db:migrate`（需要命名时使用 `make db-migrate name=...`），不要在容器刚启动时直接调用 package 内的 Prisma 命令绕过 readiness。

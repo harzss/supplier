@@ -10,7 +10,13 @@
   },
   "pnpm": {
     "overrides": {
-      "postcss@<8.5.10": "8.5.15"
+      "brace-expansion@5.0.6": "5.0.9",
+      "fast-uri@3.1.2": "3.1.4",
+      "fast-uri@4.1.0": "4.1.2",
+      "find-my-way@9.6.0": "9.7.0",
+      "js-yaml@5.2.1": "5.2.3",
+      "postcss@<8.5.18": "8.5.25",
+      "sharp@<0.35.0": "0.35.3"
     }
   },
   "scripts": {
@@ -23,11 +29,13 @@
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
     "clean": "turbo run clean && rm -rf node_modules",
     "llm:test": "node scripts/test-llm.mjs",
-    "db:migrate": "pnpm --filter @supplier/db prisma:migrate",
+    "db:dev:up": "docker compose -f infra/docker-compose.dev.yml up -d --wait postgres redis",
+    "db:migrate": "pnpm db:dev:up && pnpm --filter @supplier/db prisma:migrate",
     "db:migrate:deploy": "pnpm --filter @supplier/db prisma:migrate:deploy",
     "db:migrate:status": "pnpm --filter @supplier/db prisma:migrate:status",
     "db:studio": "pnpm --filter @supplier/db prisma:studio",
     "db:seed": "node scripts/seed.mjs",
+    "audit:supabase-boundary": "node scripts/verify-supabase-boundary.mjs",
     "deploy:verify": "node scripts/verify-deployment.mjs",
     "score": "node scripts/score-products.mjs",
     "crawl": "node scripts/crawl-products.mjs"

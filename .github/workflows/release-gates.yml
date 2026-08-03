@@ -30,6 +30,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      - run: node --test scripts/verify-supabase-boundary.test.mjs
       - run: node --test deploy/cloudflare/staging-gateway/worker.test.mjs
       - run: pnpm build
       - run: pnpm exec prettier --check "**/*.{ts,tsx,md,json,yml,yaml}"
@@ -51,6 +52,7 @@ jobs:
           docker build --target migrate -t supplier-migrate:${IMAGE_TAG} .
           docker build --target web -t supplier-web:${IMAGE_TAG} \
             --build-arg NEXT_PUBLIC_AUTH_MODE=supabase \
+            --build-arg NEXT_PUBLIC_SIGNUP_ENABLED=false \
             --build-arg NEXT_PUBLIC_BFF_URL=https://api.ci.example \
             --build-arg NEXT_PUBLIC_SUPABASE_URL=https://auth.ci.example \
             --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=ci-public-anon-key .
@@ -75,6 +77,13 @@ jobs:
             sleep 1
           done
 
+          # Supabase creates these PostgREST roles before application migrations.
+          # The clean PostgreSQL smoke database must model that prerequisite so
+          # the immutable, already-applied security migration keeps its checksum.
+          docker exec -i supplier-postgres-ci \
+            psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
+            < infra/postgres/init-supabase-roles.sql
+
           docker run --rm --network supplier-ci \
             -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
             -e DIRECT_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
@@ -93,6 +102,10 @@ jobs:
             migrate diff --exit-code \
             --from-url postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
             --to-schema-datamodel node_modules/@supplier/db/prisma/schema.prisma
+
+          docker exec -i supplier-postgres-ci \
+            psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
+            < infra/postgres/assert-public-schema-isolation.sql
 
           docker run -d --name supplier-bff-ci --network supplier-ci -p 3101:3001 \
             -e NODE_ENV=production -e AUTH_MODE=supabase \

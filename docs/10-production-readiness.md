@@ -5,11 +5,17 @@
 > [00-roadmap.md](./00-roadmap.md) 为准，工程实现证据见
 > [09-main-flow.md](./09-main-flow.md)。
 >
-> **时效说明（2026-08-03）**：本轮只完成文档治理复核，没有执行数据库 migration、部署或真实平台联调。最近一次 2026-07-22 的只读快照显示仓库 32 个 migration 中，现有 Supabase 项目有 18 个未应用；该项目现在按 staging 管理，状态可能已经变化。生产数据库必须独立核验，不能复用 staging 证据宣称生产就绪。
+> **时效说明（2026-08-03）**：现有 Supabase 项目已明确按 staging 管理。实时审计确认 PostgreSQL 17.6、33/33 migration applied、0 unfinished/rolled back、checksum 全匹配且 live schema diff 为空；28/28 public 表启用 RLS，anon/authenticated 对业务表和 sequence 均无权限。该结果只关闭内测数据库 schema 与公开访问边界缺口，生产数据库仍必须独立核验，不能复用 staging 证据宣称生产就绪。
 
-## 1. 当前结论（治理复核 2026-08-03；技术证据截至 2026-07-22）
+## 1. 当前结论（治理与技术证据截至 2026-08-03）
 
 **结论不变：当前不能宣称生产可用或直接正式上架。** 真实抖店与 1688 小额订单 E2E、生产数据库、生产 Redis、目标云部署、监控告警、恢复演练、服务市场商业生命周期和法务合规仍需关闭 P0 门禁。以下内容保留为 M13～M67 的工程历史证据，不能替代新的目标环境验收。
+
+当前 staging 已完成数据库备份恢复、RLS、Storage、关闭公开注册、匿名访问拒绝、Cloudflare Worker、Redis AOF、BFF readiness 和告警 firing/resolved 基础 smoke；仍缺稳定 Web URL、真实邀请账号生命周期、非空持久性演练和长期进程守护。因此 R0-03 仍为进行中，不能把临时 Quick Tunnel 当作生产部署证据。
+
+当前代码门禁已通过 lint 2/2、typecheck 14/14、全仓 522 项测试、production build 9/9、Prisma、Prettier 和依赖安全审计；BFF、migration、Web 三个 Linux 镜像已重新构建并保持非 root。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，其中“未应用”“不部署”或旧测试数量不能覆盖本节和文末 2026-08-03 的最新证据。
+
+### M13～M67 历史账本（按记录当时理解）
 
 核心业务和 M13～M18 生产基座保持通过。应用侧已进一步补齐抖店目录、类目属性、类目资质、已发布商品修正、真实平台状态同步、售后退款保护、部分退款剩余子单处置、实际退款金额核对、采购成本核销及集中财务待办闭环：真实商品创建后先进入待审核，本地不再把平台返回商品 ID 误判为已上线；运营可读取 `product.detail` 刷新审核/上下架状态，驳回后基于最新规则修正重提；采购和物流前会刷新子订单售后，部分退款可在严格安全条件下继续未退款商品；经营看板不会再用原金额统计未核对退款订单，也不会忽略退款/关闭后的采购损失；订单页可集中分页处理全部财务待办，积压会主动进入指标和分级告警；普通订单也已支持完整分页和销售店铺/状态筛选，不再静默截断或把数据库故障伪装为空列表；真实店铺可在保留历史业务数据的同时主动停用并清除本地 Token，刷新竞态不会将其重新激活；生产身份模式不能创建或执行演示店铺，历史演示店、订单和铺货商品也不会进入真实业务查询、经营/财务指标、告警或套餐额度；平台 AI 调用已改为先原子预占额度再回填实际成本，供应商已计费但数据库回填失败时不会静默漏记。当前按功能优先级暂不继续 Docker、镜像和部署工作；M21～M26 及类目相关新增 migration 尚未在目标 PostgreSQL 实际应用。**当前仍不可直接面向真实多租户商家上线**：尚未用真实抖店测试店完成目录、属性、资质、状态同步、修正重提、售后处置和退款金额交叉验收，也未用 1688 买家账号和小额订单完成采购、真实物流回传及采购退款成本核销；真实 Supabase Auth 邮件账号生命周期、生产 Redis/目标云部署与恢复演练、外部告警/监控以及法务合规也仍是 P0 门禁。
 
@@ -84,7 +90,7 @@ M67 已将已发货物流修复改为持续租约：服务每 60 秒按 `repair 
 | API 防护               | ✅ 基座完成  | 全局 120 次/分钟限流；生产默认关闭 Swagger；仅允许显式 HTTPS CORS origin                                                                       |
 | 优雅退出               | ✅ 基座完成  | Nest shutdown hooks、Prisma 断连、Redis `QUIT`/强制断连                                                                                        |
 | 发布门禁               | ✅ 基座完成  | 代码检查、三镜像构建、migration、部署 smoke、非 root 与优雅退出均已纳入 CI                                                                     |
-| 依赖与 SAST            | 🔄 P0 待验收 | 上次生产依赖审计为 0 已知高危；本轮 registry 联网被执行环境拒绝，须在 CI/发布环境重跑 audit 和 CodeQL 并设为 required checks                   |
+| 依赖与 SAST            | 🔄 CI 待验收 | 2026-08-03 联网生产依赖审计为 0 已知漏洞；须在 GitHub 首次跑通 audit/CodeQL，并将 release/security checks 设为 required                        |
 | 身份与租户隔离         | 🔄 P0 待验收 | 应用侧已验证 JWT、内部用户映射和数据隔离；staging 须完成真实邮件账号生命周期，生产 Auth 项目还须独立配置和验收                                 |
 | 真实抖店闭环           | 🔄 P0 阻塞   | 发布幂等恢复、状态同步、修正重提、订单、物流应用链路已通；须用测试店验收 `outer_product_id`、`quality_list`、`product.detail`、`editV2` 与物流 |
 | 真实 1688 货源         | 🔄 P0 待联调 | 搜索、详情、分销价、SKU 与错误映射应用侧已通；须验证方案订购、真实买家 Token、配额、限流和曝光回传                                             |
@@ -125,7 +131,7 @@ M67 已将已发货物流修复改为持续租约：服务每 60 秒按 `repair 
 
 `AUDIT_RETENTION_DAYS` 默认 180 天；`ALERT_WEBHOOK_TIMEOUT_MS`、重试次数/退避、监控周期、队列阈值和 5xx 阈值可按生产容量调整，但不得通过放宽阈值掩盖持续故障。
 
-生产默认不挂载 Swagger；确需在受控网络查看时才显式设置 `SWAGGER_ENABLED=true`。
+生产环境始终不注册 Swagger UI、OpenAPI JSON/YAML 或静态资源路由；`SWAGGER_ENABLED` 只在非生产生效，开发环境仅提供 `/docs-json` 原始契约，不内嵌 UI。
 
 Web 生产构建还必须显式设置 `NEXT_PUBLIC_AUTH_MODE=supabase`、`NEXT_PUBLIC_SUPABASE_URL`、`NEXT_PUBLIC_SUPABASE_ANON_KEY` 与 `NEXT_PUBLIC_BFF_URL`；两个 URL 都必须是无路径、query、hash 的 HTTPS origin。漏配时前端展示配置错误，不回退 demo。
 
@@ -140,11 +146,11 @@ Web 生产构建还必须显式设置 `NEXT_PUBLIC_AUTH_MODE=supabase`、`NEXT_P
 
 ### 3.3 探针语义
 
-| 端点                    | 用途                      | 成功条件                                                   |
-| ----------------------- | ------------------------- | ---------------------------------------------------------- |
-| `GET /api/health`       | 兼容旧探针，等同 liveness | 进程可处理 HTTP                                            |
-| `GET /api/health/live`  | 容器存活检查              | 返回 200，不检查外部依赖                                   |
-| `GET /api/health/ready` | 流量接入检查              | PostgreSQL `SELECT 1` 与 Redis `PING` 都成功；否则返回 503 |
+| 端点                    | 用途                      | 成功条件                                                           |
+| ----------------------- | ------------------------- | ------------------------------------------------------------------ |
+| `GET /api/health`       | 兼容旧探针，等同 liveness | 进程可处理 HTTP                                                    |
+| `GET /api/health/live`  | 容器存活检查              | 返回 200，不检查外部依赖                                           |
+| `GET /api/health/ready` | 流量接入检查              | PostgreSQL 最新 migration 查询与 Redis `PING` 都成功；否则返回 503 |
 
 负载均衡只应把 readiness 为 200 的实例加入流量池，不能用 liveness 代替 readiness。
 
@@ -189,8 +195,8 @@ Web 生产构建还必须显式设置 `NEXT_PUBLIC_AUTH_MODE=supabase`、`NEXT_P
 ## 7. M17 当前验证证据
 
 - 初始生产依赖审计复现 48 个漏洞：3 critical、18 high、22 moderate、5 low
-- Next 由 15.0.0 升至 15.5.20；Nest common/core/platform-fastify 升至 11.1.28，运行链路使用 Fastify 5.10
-- Swagger、Config、JWT、Nest CLI 和 `@fastify/static` 同步升级；PostCSS 通过根 override 固定到已修复版本
+- Next 当前为 15.5.22；Nest common/core/platform-fastify 为 11.1.28，运行链路使用 Fastify 5.10
+- Sharp 当前为 0.35.3；业务不需要的可选 `@fastify/static` 已移除，PostCSS、`find-my-way`、`fast-uri`、`js-yaml` 与 `brace-expansion` 固定到已修复版本
 - `pnpm audit --prod` 返回 `No known vulnerabilities found`
 - `audit:prod` 已进入 `make release-check` 与 GitHub release-gates；新增 PR/main/weekly CodeQL + SCA workflow
 - 完整 release-check：lint 2/2、typecheck 14/14、测试任务 11/11（BFF 150、总计 209）、build 9/9、Prettier 与差异检查通过
@@ -292,12 +298,12 @@ Web 生产构建还必须显式设置 `NEXT_PUBLIC_AUTH_MODE=supabase`、`NEXT_P
 - 订单同步与采购快照创建统一使用可重试 Serializable 事务；采购只基于事务内重读的最新订单项一次固化全部供应商快照
 - Token 刷新成功先写 Redis 密文恢复记录，再以旧凭证 CAS 重试 PostgreSQL；持久化故障不误标过期，后续请求可恢复同一轮换结果
 - 人工商品修正、平台状态回读和库存 worker 共享商品级 Redis 锁；平台调用前后续租，并复核任务所有权与货源库存版本
-- 当前代码验证通过：lint 2/2、typecheck 14/14、测试任务 11/11（Platform SDK 107、BFF 338、全仓 500）、production build 9/9、Prisma schema、涉及文件 Prettier 与 `git diff --check` 通过
-- 本轮 `pnpm audit:prod` 在受限环境内因 registry DNS 失败，沙箱外网络审批又因会向外部 npm registry 发送依赖图而被拒绝；本轮未刷新依赖漏洞结论
-- M22～M37 期间以及 M50～M51、M54～M58 新增的业务 migration 尚未应用到目标 PostgreSQL；真实测试店尚未完成发布幂等恢复、状态同步、修正重提、售后退款、收入/采购成本核对、剩余子单履约、已履约巡检与物流修复的小范围端到端验收
+- 当前代码验证通过：lint 2/2、typecheck 14/14、测试任务 13/13（Platform SDK 107、BFF 338、全仓 522）、production build 9/9、Prisma schema、Prettier 与 `git diff --check` 通过；BFF/migrate/Web 三个 Linux 镜像重新构建成功且保持非 root
+- 2026-08-03 联网 `pnpm audit --prod --audit-level high` 返回 `No known vulnerabilities found`；新增公告触发的 Next、Sharp、PostCSS、Fastify/Nest 传递依赖升级已纳入当前 lockfile
+- 2026-07-22 M67 收尾时，M22～M37 期间以及 M50～M51、M54～M58 新增的业务 migration 尚未应用到目标 PostgreSQL；该迁移状态已被 2026-08-03 的 33/33 staging 证据取代，但真实测试店 E2E 仍未完成
 - 2026-07-22 只读 `prisma migrate status` 已连接目标 Supabase：仓库 32 个 migration 中 18 个仍待应用，范围为 `20260720120000_add_inventory_sync`～`20260722091000_add_order_logistics_repairs`
 - 同次只读迁移预检确认目标库当前 `source_products=30`、`published_products=6`、`orders=3`、`purchase_orders=3`，没有未完成 migration 记录，`published_products(task_id, shop_id)` 重复组为 0；待迁移数据量和唯一索引前置条件当前无已知阻塞
-- 本轮已执行本地 production build；未重新构建 Docker 镜像，未执行目标数据库 migration、部署或云环境 smoke
+- 2026-07-22 M67 当时仅执行本地 production build、未重新构建 Docker 或部署；该镜像与 migration 证据已被本文顶部 2026-08-03 staging 记录取代
 
 ## 11. 执行顺序引用
 

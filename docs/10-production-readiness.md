@@ -292,7 +292,7 @@ Web 生产构建还必须显式设置 `NEXT_PUBLIC_AUTH_MODE=supabase`、`NEXT_P
 - 已发货订单的专用物流修复支持旧/目标/当前三方快照核验、逐包幂等更新、平台回读、数据库执行锁、异常修订号唯一性和本地原子替换；普通成本核销不能误关闭该类异常
 - 物流修复执行期每 60 秒按 lockId 续租，并在每次抖店读写前后校验 ownership guard；失权请求不再继续剩余包裹或本地提交
 - 订单增量同步在每页平台调用前后续租并校验分布式锁；失去执行权时不写订单，成功水位/错误状态按当前 attempt 条件更新，旧 worker 不产生误告警
-- release-gates 已要求迁移镜像在全新数据库上通过 `migrate status` 和 live schema diff；该新增 GitHub CI 步骤尚待首次运行
+- release-gates 已要求迁移镜像在全新数据库上通过 `migrate status`、live schema diff 和 RLS/ACL 断言；2026-08-03 的 [GitHub Actions #30811827585](https://github.com/harzss/supplier/actions/runs/30811827585) 已在全新 Runner 上完成首次 verify + images 全绿验证
 - BFF readiness 除 PostgreSQL/Redis 连通性外还校验仓库最新必需 migration；目标 schema 落后时保持 liveness、拒绝 readiness 和流量接入
 - 抖店单笔订单详情在 SDK 映射后和 BFF 写入前双层核对请求父订单 ID；串单响应不会写入其他订单，也不会让目标订单旧状态进入采购
 - 订单同步与采购快照创建统一使用可重试 Serializable 事务；采购只基于事务内重读的最新订单项一次固化全部供应商快照

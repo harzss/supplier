@@ -17,11 +17,9 @@ const FEATURE_LABELS: Record<string, string> = {
   'ai.image.watermark': '主图去水印',
   'ai.image.relight': '主图重打光',
   'ai.image.compose': '主图换背景',
-  'ai.customer_service': 'AI 客服',
-  'ai.pricing': '智能定价',
-  'publish.batch': '批量铺货',
+  'ai.pricing': '目标毛利与竞品区间定价',
+  'publish.batch': '单商品多店铺货',
   'analytics.dashboard': '经营数据看板',
-  'crawler.custom': '自定义采集',
 };
 
 const PROVIDERS = [
@@ -33,18 +31,12 @@ const PROVIDERS = [
 
 const PREVIEW_PLANS = [
   { v: '', l: '真实' },
-  { v: 'free', l: '免费' },
+  { v: 'free', l: '内测' },
   { v: 'basic', l: '基础' },
   { v: 'pro', l: '专业' },
   { v: 'flagship', l: '旗舰' },
   { v: 'enterprise', l: '企业' },
 ];
-
-function priceLabel(price: number): string {
-  if (price === 0) return '免费';
-  if (price < 0) return '定制';
-  return `¥${price}/月`;
-}
 
 export default function SettingsPage() {
   const qc = useQueryClient();
@@ -55,6 +47,7 @@ export default function SettingsPage() {
   const [provider, setProvider] = useState('deepseek');
   const [apiKey, setApiKey] = useState('');
   const [label, setLabel] = useState('');
+  const [capacityRequestPlan, setCapacityRequestPlan] = useState<string | null>(null);
 
   useEffect(() => setPreview(getPreviewPlan() ?? ''), []);
 
@@ -89,7 +82,7 @@ export default function SettingsPage() {
       <header className="settings-page-heading mb-7">
         <h1 className="page-title">工作区设置</h1>
         <p className="page-description">
-          套餐、AI 路由、店铺授权与发布依赖集中在这里。先确认能力状态，再接入真实业务。
+          内测权限、AI 路由、店铺授权与发布依赖集中在这里。先确认能力状态，再接入真实业务。
         </p>
       </header>
 
@@ -97,14 +90,28 @@ export default function SettingsPage() {
         <section className="ledger-panel-dark settings-plan-hero overflow-hidden p-5 sm:p-6">
           <div className="mb-8 flex items-start justify-between gap-4">
             <div>
-              <p className="text-xs font-medium text-[#949baa]">当前套餐</p>
+              <p className="text-xs font-medium text-[#949baa]">邀请制内测 · 当前能力档位</p>
               <h2 className="mt-2 text-3xl font-semibold tracking-tight">
-                {ent.data?.planName ?? '当前套餐'}
+                {isDemoAuthMode ? (ent.data?.planName ?? '当前权限') : '邀请制内测'}
               </h2>
             </div>
             <span className="rounded-full border border-[#3b3f4b] bg-white/5 px-2.5 py-1 text-[10px] font-semibold text-[#d9dce4]">
               {isDemoAuthMode ? '演示预览' : '已启用'}
             </span>
+          </div>
+
+          <div className="mb-7 rounded-2xl border border-white/10 bg-white/[0.04] p-4 sm:p-5">
+            <p className="text-xs font-medium text-[#949baa]">内测期软件订阅费</p>
+            <p className="mt-1 text-3xl font-semibold tracking-tight tabular-nums">
+              ¥0
+              <span className="ml-2 text-xs font-medium text-[#949baa]">/ 内测期</span>
+            </p>
+            <p className="mt-3 text-xs leading-5 text-[#b4bac5]">
+              当前免费不代表永久免费，平台不会自动扣费。正式套餐会在价格验证完成后另行通知。
+            </p>
+            <p className="mt-1 text-xs leading-5 text-[#858d9c]">
+              模型 API、1688、销售平台及其他第三方服务产生的费用，由对应服务商另行收取。
+            </p>
           </div>
 
           {ent.isLoading && <p className="text-sm text-[#9aa1af]">正在读取套餐与额度…</p>}
@@ -140,26 +147,29 @@ export default function SettingsPage() {
               </div>
               <p className="mt-2 text-xs leading-5 text-[#949baa]">
                 {unlimited
-                  ? '企业版不限额度'
+                  ? '当前内测档位不限额度'
                   : usage.exceeded
-                    ? '额度已用完，升级套餐或配置自有 Key 以继续'
-                    : `剩余 ${usage.remaining} 次；配置自有 Key 可不限额度`}
+                    ? '额度已用完；文本 AI 可配置自有 Key，主图处理需申请内测扩容'
+                    : `剩余 ${usage.remaining} 次；文本 AI 配置自有 Key 后不计平台额度`}
               </p>
 
               <div className="settings-plan-stats mt-6 grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded-xl border border-[#30343f] bg-[#1e212a] p-4">
-                  <div className="text-xs text-[#8f96a4]">可连接店铺</div>
+                  <div className="text-xs text-[#8f96a4]">可连接销售店铺</div>
                   <div className="mt-2 text-xl font-semibold tabular-nums">
                     {ent.data.quotas.shopsMax === -1 ? '无限' : `${ent.data.quotas.shopsMax} 个`}
                   </div>
                 </div>
                 <div className="rounded-xl border border-[#30343f] bg-[#1e212a] p-4">
-                  <div className="text-xs text-[#8f96a4]">每月铺货上限</div>
+                  <div className="text-xs text-[#8f96a4]">每月铺货记录上限</div>
                   <div className="mt-2 text-xl font-semibold tabular-nums">
                     {ent.data.quotas.publishMonthly === -1
                       ? '无限'
                       : `${ent.data.quotas.publishMonthly} 件`}
                   </div>
+                  <p className="mt-1 text-[10px] leading-4 text-[#7f8796]">
+                    每成功发布到 1 个目标店铺计 1 条
+                  </p>
                 </div>
               </div>
             </>
@@ -191,7 +201,10 @@ export default function SettingsPage() {
           ) : null}
         </section>
 
-        <section className="ledger-panel settings-key-card overflow-hidden">
+        <section
+          id="ai-key-settings"
+          className="ledger-panel settings-key-card scroll-mt-24 overflow-hidden"
+        >
           <div className="ledger-section-heading">
             <div>
               <p className="page-kicker">AI 路由</p>
@@ -318,60 +331,120 @@ export default function SettingsPage() {
       <ShopsSection />
       <MediaReadinessSection />
 
-      <section className="ledger-panel settings-plan-table mt-8 overflow-hidden">
+      <section
+        id="capacity-options"
+        className="ledger-panel settings-plan-table mt-8 overflow-hidden"
+      >
         <div className="ledger-section-heading">
-          <div>
-            <p className="page-kicker">套餐能力</p>
-            <h2 className="mt-2">套餐能力对照</h2>
-            <p>内部测试阶段仅用于核对权限，不在此页面发起支付。</p>
-          </div>
+          {isDemoAuthMode ? (
+            <div>
+              <p className="page-kicker">内部预览</p>
+              <h2 className="mt-2">权限档位预览</h2>
+              <p>仅模拟内部权限，不代表报价或可购买套餐；未开放档位不会在真实环境展示。</p>
+            </div>
+          ) : (
+            <div>
+              <p className="page-kicker">邀请制内测</p>
+              <h2 className="mt-2">当前内测权限</h2>
+              <p>
+                软件订阅费为 ¥0 / 内测期；如需更多销售店铺、铺货记录或 AI 额度，可申请人工扩容。
+              </p>
+            </div>
+          )}
         </div>
-        <div className="divide-y divide-[var(--line)]">
-          {ent.data?.plans.map((p) => {
-            const current = p.id === ent.data!.plan;
-            return (
-              <article
-                key={p.id}
-                className={`grid gap-4 p-5 sm:p-6 lg:grid-cols-[150px_130px_minmax(0,1fr)_110px] lg:items-center ${
-                  current ? 'bg-brand-50/70' : 'bg-[var(--surface)]'
-                }`}
-              >
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-semibold tracking-tight">{p.name}</h3>
-                    {current && (
-                      <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-semibold text-brand-700">
-                        当前
-                      </span>
-                    )}
-                  </div>
-                  <p className="mt-1 text-xs text-[var(--muted)]">{p.highlight}</p>
-                </div>
-                <div className="text-lg font-semibold tabular-nums">
-                  {priceLabel(p.priceCnyMonthly)}
-                </div>
-                <ul className="flex flex-wrap gap-1.5 text-xs text-[var(--ink-soft)]">
-                  {p.features.map((f) => (
-                    <li
-                      key={f}
-                      className="rounded-full border border-[var(--line)] bg-white/70 px-2.5 py-1"
-                    >
-                      {FEATURE_LABELS[f] ?? f}
-                    </li>
-                  ))}
-                </ul>
-                <button
-                  type="button"
-                  disabled={current}
-                  onClick={() => alert('支付接入开发中，敬请期待')}
-                  className={current ? 'primary-button' : 'secondary-button'}
+        {isDemoAuthMode ? (
+          <div className="divide-y divide-[var(--line)]">
+            {ent.data?.plans.map((p) => {
+              const current = p.id === ent.data!.plan;
+              return (
+                <article
+                  key={p.id}
+                  className={`grid gap-4 p-5 sm:p-6 lg:grid-cols-[150px_170px_minmax(0,1fr)_110px] lg:items-center ${
+                    current ? 'bg-brand-50/70' : 'bg-[var(--surface)]'
+                  }`}
                 >
-                  {current ? '使用中' : p.priceCnyMonthly < 0 ? '联系我们' : '升级'}
-                </button>
-              </article>
-            );
-          })}
-        </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-lg font-semibold tracking-tight">{p.name}</h3>
+                      {current && (
+                        <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-semibold text-brand-700">
+                          当前
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-xs text-[var(--muted)]">{p.highlight}</p>
+                  </div>
+                  <div className="text-sm font-semibold text-[var(--ink-soft)]">
+                    {current && p.billingStatus === 'unavailable' ? '内测授权中' : p.billingLabel}
+                  </div>
+                  <ul className="flex flex-wrap gap-1.5 text-xs text-[var(--ink-soft)]">
+                    {p.features
+                      .filter((f) => FEATURE_LABELS[f])
+                      .map((f) => (
+                        <li
+                          key={f}
+                          className="rounded-full border border-[var(--line)] bg-white/70 px-2.5 py-1"
+                        >
+                          {FEATURE_LABELS[f]}
+                        </li>
+                      ))}
+                  </ul>
+                  <button
+                    type="button"
+                    disabled={current}
+                    aria-controls="capacity-request-help"
+                    aria-expanded={!current && capacityRequestPlan === p.name}
+                    onClick={() => setCapacityRequestPlan(p.name)}
+                    className={current ? 'primary-button' : 'secondary-button'}
+                  >
+                    {current ? '当前' : '申请扩容'}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <article className="flex flex-col gap-5 bg-[var(--surface)] p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-lg font-semibold tracking-tight">邀请制内测</h3>
+                <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-semibold text-brand-700">
+                  当前
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-[var(--muted)]">
+                当前实际额度与能力以上方数据为准。正式套餐和价格尚未开放。
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" disabled className="primary-button">
+                当前
+              </button>
+              <button
+                type="button"
+                aria-controls="capacity-request-help"
+                aria-expanded={capacityRequestPlan !== null}
+                onClick={() => setCapacityRequestPlan('当前内测')}
+                className="secondary-button"
+              >
+                申请扩容
+              </button>
+            </div>
+          </article>
+        )}
+        {capacityRequestPlan ? (
+          <div
+            id="capacity-request-help"
+            className="border-t border-[var(--line)] bg-brand-50/60 px-5 py-4 text-sm text-[var(--ink-soft)] sm:px-6"
+            role="status"
+          >
+            <span className="font-semibold text-[var(--ink)]">
+              申请 {capacityRequestPlan} 扩容：
+            </span>
+            内测期间由管理员人工处理。请把所需销售店铺数、月铺货量和 AI
+            额度发给邀请你加入内测的管理员；提交前不会产生订阅或扣费。
+          </div>
+        ) : null}
       </section>
     </main>
   );

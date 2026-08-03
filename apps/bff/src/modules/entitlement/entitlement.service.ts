@@ -7,8 +7,7 @@ import {
   getPlan,
   getQuota,
   listPlans,
-  planForQuota,
-  requiredPlanFor,
+  type BillingStatus,
   type FeatureId,
   type PlanId,
   type QuotaCheck,
@@ -18,7 +17,7 @@ import type { UserPlan } from '@supplier/shared-types';
 import { PrismaService } from '../../common/prisma.module';
 
 export interface EntitlementView {
-  plan: PlanId;
+  plan: PlanId | null;
   planName: string;
   features: FeatureId[];
   aiUsage: { used: number; limit: number; remaining: number; exceeded: boolean };
@@ -26,7 +25,8 @@ export interface EntitlementView {
   plans: Array<{
     id: PlanId;
     name: string;
-    priceCnyMonthly: number;
+    billingStatus: BillingStatus;
+    billingLabel: string;
     highlight: string;
     features: FeatureId[];
   }>;
@@ -43,15 +43,13 @@ export class EntitlementService {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
   }
 
-  /** 功能门禁：无权限抛 403，附带升级所需套餐 */
+  /** 功能门禁：无权限抛 403，不对外暴露内部权限档位。 */
   assertFeature(plan: UserPlan, feature: FeatureId): void {
     if (!canUseFeature(plan, feature)) {
-      const rp = requiredPlanFor(feature);
       throw new ForbiddenException({
         code: 'FEATURE_LOCKED',
         feature,
-        requiredPlan: rp,
-        message: rp ? `该功能需要「${getPlan(rp).name}」及以上套餐` : '该功能暂不可用',
+        message: '当前内测账号未开放此能力，请申请内测扩容。',
       });
     }
   }
@@ -70,21 +68,17 @@ export class EntitlementService {
     return checkQuota(plan, 'ai.calls.monthly', used);
   }
 
-  /** 通用配额校验：requestedTotal 超过上限则抛 402，并给出可满足的套餐 */
+  /** 通用配额校验：requestedTotal 超过上限则抛 402。 */
   assertWithinQuota(plan: UserPlan, key: QuotaKey, requestedTotal: number): void {
     const limit = getQuota(plan, key);
     if (limit === UNLIMITED || requestedTotal <= limit) return;
-    const suggested = planForQuota(key, requestedTotal);
     throw new HttpException(
       {
         code: 'QUOTA_EXCEEDED',
         quota: key,
         limit,
         requested: requestedTotal,
-        requiredPlan: suggested,
-        message: suggested
-          ? `已达当前套餐上限（${limit}），升级到「${getPlan(suggested).name}」可继续。`
-          : `已达上限（${limit}）。`,
+        message: `已达当前内测权限上限（${limit}），请申请内测扩容。`,
       },
       HttpStatus.PAYMENT_REQUIRED,
     );
@@ -101,24 +95,27 @@ export class EntitlementService {
     });
   }
 
-  /** 供前端展示：当前套餐、功能、用量、可升级套餐列表 */
+  /** 供前端展示：当前套餐、功能、用量与套餐开放状态 */
   async buildView(userId: bigint, plan: UserPlan): Promise<EntitlementView> {
     const p = getPlan(plan);
     const used = await this.getMonthlyAiUsage(userId);
     const ai = checkQuota(plan, 'ai.calls.monthly', used);
     return {
-      plan,
-      planName: p.name,
+      plan: this.demoMode ? plan : null,
+      planName: this.demoMode ? p.name : '邀请制内测',
       features: p.features,
       aiUsage: { used: ai.used, limit: ai.limit, remaining: ai.remaining, exceeded: ai.exceeded },
       quotas: { shopsMax: p.quotas['shops.max'], publishMonthly: p.quotas['publish.monthly'] },
-      plans: listPlans().map((x) => ({
-        id: x.id,
-        name: x.name,
-        priceCnyMonthly: x.priceCnyMonthly,
-        highlight: x.highlight,
-        features: x.features,
-      })),
+      plans: this.demoMode
+        ? listPlans().map((x) => ({
+            id: x.id,
+            name: x.name,
+            billingStatus: x.billingStatus,
+            billingLabel: x.billingLabel,
+            highlight: x.highlight,
+            features: x.features,
+          }))
+        : [],
     };
   }
 }

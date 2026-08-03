@@ -22,6 +22,11 @@ export class PublishController {
     return this.publishService.enqueue(user, dto);
   }
 
+  @Post('preflight')
+  preflight(@CurrentUser() user: CurrentUserType, @Body() dto: CreatePublishTaskDto) {
+    return this.publishService.preflight(user, dto);
+  }
+
   @Post('pricing-preview')
   @AuditAction('publish.pricing.preview', 'source_product')
   pricingPreview(@CurrentUser() user: CurrentUserType, @Body() dto: PricingPreviewDto) {

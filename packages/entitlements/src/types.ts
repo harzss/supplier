@@ -5,8 +5,8 @@ export type PlanId = UserPlan;
 
 /**
  * 功能标识。分两类：
- * - 基础功能（免费版即可用，覆盖小店常用场景）
- * - 高级功能（需付费套餐解锁）
+ * - 基础功能（内测版即可用，覆盖小店常用场景）
+ * - 进阶功能（需更高套餐权限）
  * 命名用 `域.动作` 便于按域批量判断。
  */
 export type FeatureId =
@@ -21,24 +21,27 @@ export type FeatureId =
   | 'ai.image.watermark' // 主图去水印
   | 'ai.image.relight' // 主图重打光
   | 'ai.image.compose' // 主图换背景/合成
-  | 'ai.customer_service' // AI 客服
-  | 'ai.pricing' // 智能定价
-  | 'publish.batch' // 批量多店铺铺货
-  | 'analytics.dashboard' // 经营数据看板
-  | 'crawler.custom'; // 自定义采集任务
+  | 'ai.pricing' // 目标毛利与竞品区间定价
+  | 'publish.batch' // 单商品多店铺货
+  | 'analytics.dashboard'; // 经营数据看板
+
+/** 套餐计费开放状态。内测阶段仅免费邀请可用，其他套餐尚未开放购买。 */
+export type BillingStatus = 'internal_beta' | 'unavailable';
 
 /** 额度键。数值为「每自然月上限」或「资源上限」，-1 表示无限。 */
 export type QuotaKey =
   | 'ai.calls.monthly' // 每月平台 AI 调用次数（BYOK 调用不计入）
-  | 'shops.max' // 可连接店铺数上限
+  | 'shops.max' // 可连接活跃销售店铺数上限（1688 buyer 采购账号不计入）
   | 'publish.monthly'; // 每月铺货商品数上限
 
 export interface PlanDefinition {
   id: PlanId;
   /** 展示名 */
   name: string;
-  /** 月费（人民币），0=免费，-1=定制（联系销售） */
-  priceCnyMonthly: number;
+  /** 当前计费开放状态 */
+  billingStatus: BillingStatus;
+  /** 面向用户的计费说明，不承诺尚未验证的正式价格 */
+  billingLabel: string;
   /** 该套餐授予的功能集合 */
   features: FeatureId[];
   /** 该套餐的额度 */

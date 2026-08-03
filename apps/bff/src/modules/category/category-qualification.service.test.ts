@@ -32,6 +32,25 @@ const QUALIFICATIONS = [
 const PROPERTY_VALUES = { '2176': [{ value: 111, name: '棉', diyType: 0 }] };
 
 describe('CategoryQualificationService', () => {
+  it('uses cached-only publish validation without adapter, token or cache writes', async () => {
+    const fixture = createFixture({
+      qualifications: null,
+      qualificationsFingerprint: null,
+      qualificationsSyncedAt: null,
+    });
+
+    await expect(
+      fixture.service.buildPublishSnapshot(1n, 2n, [{ shopId: 9n, categoryId: '20001' }], {
+        refresh: false,
+        cachedOnly: true,
+      }),
+    ).rejects.toThrow('类目资质规则尚未缓存，请先同步后重试');
+
+    expect(fixture.adapters.create).not.toHaveBeenCalled();
+    expect(fixture.shopTokens.getAccessToken).not.toHaveBeenCalled();
+    expect(fixture.prisma.shopCategory.update).not.toHaveBeenCalled();
+  });
+
   it('loads official rules and marks a dynamically required qualification as missing', async () => {
     const fixture = createFixture({ qualifications: null, qualificationsFingerprint: null });
 
@@ -160,14 +179,17 @@ function createFixture(catalogOverrides: Record<string, unknown>) {
   const adapters = {
     assertAllowed: vi.fn(),
     create: vi.fn().mockReturnValue({ getCategoryQualifications }),
-  } as unknown as PlatformAdapterFactory;
+  };
+  const shopTokens = { getAccessToken: vi.fn().mockResolvedValue('plain-access-token') };
   return {
     service: new CategoryQualificationService(
       prisma as unknown as PrismaService,
-      adapters,
-      {} as ShopTokenService,
+      adapters as unknown as PlatformAdapterFactory,
+      shopTokens as unknown as ShopTokenService,
     ),
     prisma,
+    adapters,
+    shopTokens,
     getCategoryQualifications,
   };
 }

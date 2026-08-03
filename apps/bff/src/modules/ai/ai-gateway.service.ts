@@ -253,7 +253,7 @@ export class AiGatewayService {
     throw new HttpException(
       {
         code: 'QUOTA_EXCEEDED',
-        message: `本月 AI 额度已用完（${quota.used}/${quota.limit}）。可升级套餐，或在设置中配置自有 API Key 以继续使用。`,
+        message: `本月 AI 额度已用完（${quota.used}/${quota.limit}）。可申请内测扩容，或在设置中配置自有 API Key 继续使用。`,
         limit: quota.limit,
         used: quota.used,
       },

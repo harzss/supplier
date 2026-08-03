@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
   Logger,
   NotFoundException,
@@ -89,6 +90,23 @@ export interface PublishTaskAccepted {
 }
 
 export type PricingPreviewResult = PricingQuote & PricingPreviewReceipt;
+
+export interface PublishPreflightCheck {
+  id: string;
+  severity: 'blocker' | 'warning';
+  scope?: 'entitlement' | 'source' | 'pricing' | 'shop' | 'title' | 'category' | 'sku' | 'quota';
+  shopId?: string;
+  message: string;
+  actionHref?: string;
+}
+
+export interface PublishPreflightResult {
+  ready: boolean;
+  checks: PublishPreflightCheck[];
+  sourcePricingFingerprint: string | null;
+  pricingPreviewConfirmed: boolean;
+  pricing: PricingQuote | null;
+}
 
 export interface PublishTaskReplay {
   taskId: string;
@@ -422,6 +440,317 @@ export class PublishService {
     };
   }
 
+  /**
+   * 只读发布预检：聚合当前输入可独立发现的问题，不创建任务、不刷新平台缓存。
+   * create/enqueue 仍会在提交时重新执行权威校验并 fail closed。
+   */
+  async preflight(user: CurrentUser, dto: CreatePublishTaskDto): Promise<PublishPreflightResult> {
+    const checks: PublishPreflightCheck[] = [];
+    let publishAllowed = true;
+    let pricingAllowed = true;
+    for (const assertion of this.publishFeatureAssertions(user, dto)) {
+      try {
+        assertion.run();
+      } catch (error) {
+        if (assertion.id === 'entitlement.publish') publishAllowed = false;
+        if (assertion.id === 'entitlement.pricing') pricingAllowed = false;
+        checks.push(
+          preflightCheck(assertion.id, 'entitlement', error, {
+            actionHref: '/settings#capacity-options',
+          }),
+        );
+      }
+    }
+    if (!publishAllowed) {
+      return {
+        ready: false,
+        checks,
+        sourcePricingFingerprint: null,
+        pricingPreviewConfirmed: false,
+        pricing: null,
+      };
+    }
+
+    let product: SourceProductForPublish | null = null;
+    try {
+      product = await this.prisma.sourceProduct.findUnique({
+        where: { productId1688: dto.sourceProductId },
+        include: { score: true },
+      });
+      if (!product) throw new NotFoundException('货源不存在');
+    } catch (error) {
+      checks.push(preflightCheck('source.lookup', 'source', error, { actionHref: '#publish' }));
+    }
+
+    let sourcePricingFingerprint: string | null = null;
+    let pricing: PricingQuote | null = null;
+    let pricingPreviewConfirmed = false;
+    if (product) {
+      try {
+        assertSourceAvailable(product);
+      } catch (error) {
+        checks.push(
+          preflightCheck('source.availability', 'source', error, { actionHref: '#publish' }),
+        );
+      }
+      if (pricingAllowed) {
+        try {
+          sourcePricingFingerprint = pricingSourceFingerprint(product);
+          pricing = calculatePricing(Number(product.price), dto.pricingStrategy);
+        } catch (error) {
+          checks.push(
+            preflightCheck('pricing.quote', 'pricing', error, { actionHref: '#publish' }),
+          );
+        }
+        if (pricing && sourcePricingFingerprint) {
+          try {
+            this.pricingPreviewReceipts.assertValid(dto.pricingPreviewToken, {
+              userId: user.userId,
+              sourceProductId: dto.sourceProductId,
+              pricingStrategy: dto.pricingStrategy,
+              costPrice: Number(product.price),
+              sourcePricingFingerprint,
+            });
+            pricingPreviewConfirmed = true;
+          } catch (error) {
+            checks.push(
+              preflightCheck('pricing.preview_receipt', 'pricing', error, {
+                actionHref: '#publish',
+              }),
+            );
+          }
+          if (pricing.warning) {
+            checks.push({
+              id: 'pricing.margin_warning',
+              severity: 'warning',
+              scope: 'pricing',
+              message: pricing.warning,
+              actionHref: '#publish',
+            });
+          }
+        }
+      }
+    }
+
+    let shops: ShopForPublish[] | null = null;
+    let allTargetShopsAvailable = false;
+    try {
+      const shopIds = dto.targetShopIds.map((id) => BigInt(id));
+      const found = await this.prisma.shop.findMany({
+        where: {
+          id: { in: shopIds },
+          userId: user.userId,
+          role: 'seller',
+          status: 'active',
+          ...runtimeShopWhere(this.demoMode),
+        },
+      });
+      const requestedIds = new Set(dto.targetShopIds);
+      const visible = found.filter(
+        (shop) =>
+          shop.userId === user.userId &&
+          requestedIds.has(shop.id.toString()) &&
+          shop.role === 'seller' &&
+          shop.status === 'active' &&
+          (this.demoMode || !isDemoShop(shop)),
+      );
+      const byId = new Map(visible.map((shop) => [shop.id.toString(), shop]));
+      shops = dto.targetShopIds.flatMap((id) => {
+        const shop = byId.get(id);
+        if (shop) return [shop];
+        checks.push({
+          id: 'shop.target_unavailable',
+          severity: 'blocker',
+          scope: 'shop',
+          shopId: id,
+          message: '目标店铺不可用、不是当前用户的销售店铺或尚未完成有效授权',
+          actionHref: '/settings#shops',
+        });
+        return [];
+      });
+      allTargetShopsAvailable = shops.length === dto.targetShopIds.length;
+    } catch (error) {
+      checks.push(preflightCheck('shop.lookup', 'shop', error, { actionHref: '/settings#shops' }));
+    }
+
+    if (shops?.length) {
+      const title =
+        dto.aiOptions?.titleOverride ??
+        (dto.aiOptions?.rewriteTitle === false ? product?.title : undefined);
+      if (title !== undefined) {
+        for (const shop of shops) {
+          try {
+            assertTitleForShops(
+              title,
+              [shop],
+              dto.aiOptions?.titleOverride ? '所选标题' : '货源标题',
+            );
+          } catch (error) {
+            checks.push(
+              preflightCheck('title.compliance', 'title', error, {
+                shopId: shop.id.toString(),
+                actionHref: '#publish',
+              }),
+            );
+          }
+        }
+      } else if (product) {
+        checks.push({
+          id: 'title.generated_on_submit',
+          severity: 'warning',
+          scope: 'title',
+          message: '标题将在提交后由 AI 生成，并在调用平台前再次校验',
+          actionHref: '#publish',
+        });
+      }
+    }
+
+    if (product && shops?.length) {
+      let categoryIdByPlatform: Map<string, string> | null = null;
+      try {
+        const confirmedMappings = await this.prisma.productCategoryMapping.findMany({
+          where: {
+            userId: user.userId,
+            sourceProductId: product.id,
+            platform: { in: shops.map((shop) => shop.platform) },
+          },
+          select: { platform: true, categoryId: true },
+        });
+        categoryIdByPlatform = new Map(
+          confirmedMappings.map((mapping) => [mapping.platform, mapping.categoryId]),
+        );
+      } catch (error) {
+        checks.push(
+          preflightCheck('category.mapping_lookup', 'category', error, {
+            actionHref: '#category-setup',
+          }),
+        );
+      }
+
+      if (categoryIdByPlatform) {
+        for (const shop of shops) {
+          let categoryId: string;
+          try {
+            categoryId = resolveCategoryId(
+              shop.platform,
+              product.attributes,
+              `mock-cat-${product.categoryL1 ?? 'general'}`,
+              isDemoShop(shop),
+              categoryIdByPlatform.get(shop.platform),
+            );
+          } catch (error) {
+            checks.push(
+              preflightCheck('category.mapping', 'category', error, {
+                shopId: shop.id.toString(),
+                actionHref: '#category-setup',
+              }),
+            );
+            continue;
+          }
+          if (shop.platform !== 'douyin' || isDemoShop(shop)) continue;
+          try {
+            await this.assertSyncedCategoryCatalog(product, [shop], categoryIdByPlatform);
+          } catch (error) {
+            checks.push(
+              preflightCheck('category.catalog', 'category', error, {
+                shopId: shop.id.toString(),
+                actionHref: '#category-setup',
+              }),
+            );
+            continue;
+          }
+
+          let propertyValues: CategoryPropertyMap | null = null;
+          try {
+            const propertySnapshot = await this.categoryProperties.buildPublishSnapshot(
+              user.userId,
+              product.id,
+              [{ shopId: shop.id, categoryId }],
+              { refresh: false },
+            );
+            propertyValues = propertySnapshot[shop.id.toString()] ?? {};
+          } catch (error) {
+            checks.push(
+              preflightCheck('category.properties', 'category', error, {
+                shopId: shop.id.toString(),
+                actionHref: '#category-setup',
+              }),
+            );
+          }
+          if (!propertyValues) continue;
+          try {
+            await this.categoryQualifications.buildPublishSnapshot(
+              user.userId,
+              product.id,
+              [{ shopId: shop.id, categoryId }],
+              { refresh: false, cachedOnly: true },
+            );
+          } catch (error) {
+            checks.push(
+              preflightCheck('category.qualifications', 'category', error, {
+                shopId: shop.id.toString(),
+                actionHref: '#category-setup',
+              }),
+            );
+          }
+        }
+      }
+
+      try {
+        const skuMappings = await this.prisma.productSkuMapping.findMany({
+          where: {
+            userId: user.userId,
+            sourceProductId: product.id,
+            platform: { in: shops.map((shop) => shop.platform) },
+          },
+        });
+        const skuMappingByPlatform = new Map(
+          skuMappings.map((mapping) => [mapping.platform, mapping]),
+        );
+        const checkedPlatforms = new Set<string>();
+        for (const shop of shops) {
+          if (checkedPlatforms.has(shop.platform)) continue;
+          checkedPlatforms.add(shop.platform);
+          try {
+            assertSkuMappingReady(product, shop.platform, skuMappingByPlatform);
+          } catch (error) {
+            checks.push(
+              preflightCheck('sku.mapping', 'sku', error, {
+                shopId: shop.id.toString(),
+                actionHref: '#sku-setup',
+              }),
+            );
+          }
+        }
+      } catch (error) {
+        checks.push(
+          preflightCheck('sku.mapping_lookup', 'sku', error, { actionHref: '#sku-setup' }),
+        );
+      }
+    }
+
+    if (shops && allTargetShopsAvailable) {
+      try {
+        const monthCount = await this.entitlement.getMonthlyPublishCount(user.userId);
+        this.entitlement.assertWithinQuota(user.plan, 'publish.monthly', monthCount + shops.length);
+      } catch (error) {
+        checks.push(
+          preflightCheck('quota.publish_monthly', 'quota', error, {
+            actionHref: '/settings#capacity-options',
+          }),
+        );
+      }
+    }
+
+    return {
+      ready: !checks.some((check) => check.severity === 'blocker'),
+      checks,
+      sourcePricingFingerprint,
+      pricingPreviewConfirmed,
+      pricing,
+    };
+  }
+
   private async prepare(
     user: CurrentUser,
     dto: CreatePublishTaskDto,
@@ -430,21 +759,7 @@ export class PublishService {
     const replay = await this.findIdempotentReplay(user.userId, dto);
     if (replay) return { kind: 'replayed', value: replay };
 
-    const multi = dto.targetShopIds.length > 1;
-    this.entitlement.assertFeature(user.plan, multi ? 'publish.batch' : 'publish.single');
-    this.assertPricingFeature(user, dto.pricingStrategy);
-    const wantDetail = dto.aiOptions?.rewriteDetail === true;
-    if (wantDetail) this.entitlement.assertFeature(user.plan, 'ai.detail');
-    const imageOperations = resolveMainImageOperations(dto);
-    if (imageOperations.removeWatermark) {
-      this.entitlement.assertFeature(user.plan, 'ai.image.watermark');
-    }
-    if (imageOperations.relight) {
-      this.entitlement.assertFeature(user.plan, 'ai.image.relight');
-    }
-    if (imageOperations.backgroundStyle) {
-      this.entitlement.assertFeature(user.plan, 'ai.image.compose');
-    }
+    this.assertPublishFeatures(user, dto);
 
     const product = await this.prisma.sourceProduct.findUnique({
       where: { productId1688: dto.sourceProductId },
@@ -495,6 +810,7 @@ export class PublishService {
     const categoryIdByPlatform = new Map(
       confirmedMappings.map((mapping) => [mapping.platform, mapping.categoryId]),
     );
+    this.assertCategoryMappingsForShops(product, shops, categoryIdByPlatform);
     await this.assertSyncedCategoryCatalog(product, shops, categoryIdByPlatform);
     const categoryPropertySnapshot = await this.categoryProperties.buildPublishSnapshot(
       user.userId,
@@ -608,6 +924,73 @@ export class PublishService {
       queued: task.job !== null,
       reused: true,
     };
+  }
+
+  private publishFeatureAssertions(
+    user: CurrentUser,
+    dto: CreatePublishTaskDto,
+  ): Array<{ id: string; run: () => void }> {
+    const assertions: Array<{ id: string; run: () => void }> = [
+      {
+        id: 'entitlement.publish',
+        run: () =>
+          this.entitlement.assertFeature(
+            user.plan,
+            dto.targetShopIds.length > 1 ? 'publish.batch' : 'publish.single',
+          ),
+      },
+      {
+        id: 'entitlement.pricing',
+        run: () => this.assertPricingFeature(user, dto.pricingStrategy),
+      },
+    ];
+    if (dto.aiOptions?.rewriteDetail === true) {
+      assertions.push({
+        id: 'entitlement.ai_detail',
+        run: () => this.entitlement.assertFeature(user.plan, 'ai.detail'),
+      });
+    }
+    const imageOperations = resolveMainImageOperations(dto);
+    if (imageOperations.removeWatermark) {
+      assertions.push({
+        id: 'entitlement.image_watermark',
+        run: () => this.entitlement.assertFeature(user.plan, 'ai.image.watermark'),
+      });
+    }
+    if (imageOperations.relight) {
+      assertions.push({
+        id: 'entitlement.image_relight',
+        run: () => this.entitlement.assertFeature(user.plan, 'ai.image.relight'),
+      });
+    }
+    if (imageOperations.backgroundStyle) {
+      assertions.push({
+        id: 'entitlement.image_compose',
+        run: () => this.entitlement.assertFeature(user.plan, 'ai.image.compose'),
+      });
+    }
+    return assertions;
+  }
+
+  private assertPublishFeatures(user: CurrentUser, dto: CreatePublishTaskDto): void {
+    for (const assertion of this.publishFeatureAssertions(user, dto)) assertion.run();
+  }
+
+  private assertCategoryMappingsForShops(
+    product: SourceProductForPublish,
+    shops: ShopForPublish[],
+    categoryIdByPlatform: Map<string, string>,
+  ): void {
+    const mockCategoryId = `mock-cat-${product.categoryL1 ?? 'general'}`;
+    for (const shop of shops) {
+      resolveCategoryId(
+        shop.platform,
+        product.attributes,
+        mockCategoryId,
+        isDemoShop(shop),
+        categoryIdByPlatform.get(shop.platform),
+      );
+    }
   }
 
   private async assertSyncedCategoryCatalog(
@@ -1440,6 +1823,54 @@ export class PublishService {
   }
 }
 
+const preflightLogger = new Logger('PublishPreflight');
+
+function preflightCheck(
+  id: string,
+  scope: NonNullable<PublishPreflightCheck['scope']>,
+  error: unknown,
+  options: Pick<PublishPreflightCheck, 'shopId' | 'actionHref'> = {},
+): PublishPreflightCheck {
+  if (!(error instanceof HttpException)) {
+    preflightLogger.error({
+      event: 'publish.preflight.check_failed',
+      checkId: id,
+      errorType: preflightErrorType(error),
+    });
+  }
+  return {
+    id,
+    severity: 'blocker',
+    scope,
+    message: exceptionMessage(error),
+    ...options,
+  };
+}
+
+function exceptionMessage(error: unknown): string {
+  if (error instanceof HttpException) {
+    const response = error.getResponse();
+    if (typeof response === 'string') return response;
+    const message = unknownRecord(response)?.message;
+    if (typeof message === 'string' && message) return message;
+    if (Array.isArray(message))
+      return message.filter((item) => typeof item === 'string').join('；');
+  }
+  return '预检读取失败，请稍后重试';
+}
+
+function preflightErrorType(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error;
+  const name = Object.getPrototypeOf(error)?.constructor?.name;
+  return typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_$]{0,63}$/.test(name) ? name : 'Error';
+}
+
+function unknownRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function assertSameIdempotentRequest(task: IdempotentPublishTask, dto: CreatePublishTaskDto): void {
   const sameSource = task.sourceProduct.productId1688 === dto.sourceProductId;
   const storedTargets = [...jsonStringArray(task.targetShopIds)].sort();
@@ -1796,6 +2227,32 @@ interface PublishSkuSnapshotEntry {
 }
 
 type PublishSkuSnapshot = Record<string, PublishSkuSnapshotEntry>;
+
+function assertSkuMappingReady(
+  product: SourceProductForPublish,
+  platform: string,
+  mappings: Map<string, SkuMappingForPublish>,
+): void {
+  const suggestion = buildSkuSuggestion(product.skuList, Number(product.price));
+  if (!suggestion.requiresConfirmation) return;
+  if (platform !== 'douyin') {
+    throw new BadRequestException('当前仅支持抖店多 SKU 发布');
+  }
+  const mappingRecord = mappings.get(platform);
+  const mapping = mappingRecord
+    ? parseConfirmedSkuMapping(
+        mappingRecord.dimensions,
+        mappingRecord.skus,
+        mappingRecord.sourceFingerprint,
+      )
+    : null;
+  if (!mapping || mapping.sourceFingerprint !== suggestion.sourceFingerprint) {
+    throw new BadRequestException(`请先确认 ${platform} SKU 规格映射`);
+  }
+  if (!materializeConfirmedSkus(suggestion, mapping).length) {
+    throw new BadRequestException(`${platform} 至少需要启用一个 SKU`);
+  }
+}
 
 function resolveSkuSnapshot(
   product: SourceProductForPublish,

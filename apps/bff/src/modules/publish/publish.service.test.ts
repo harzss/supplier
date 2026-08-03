@@ -1,4 +1,5 @@
 import type { ConfigService } from '@nestjs/config';
+import { BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
 import type { AiGatewayService } from '../ai/ai-gateway.service';
@@ -32,6 +33,284 @@ const SHOP = {
 };
 
 describe('PublishService', () => {
+  it('returns only entitlement blockers and performs no reads when publishing is locked', async () => {
+    const fixture = createFixture();
+    fixture.entitlement.assertFeature.mockImplementation((_plan, feature) => {
+      if (feature === 'publish.single') throw new ForbiddenException('当前套餐不可铺货');
+    });
+
+    const result = await fixture.service.preflight(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+      aiOptions: { titleOverride: '用户确认的纯棉T恤' },
+    });
+
+    expect(result).toEqual({
+      ready: false,
+      checks: [
+        expect.objectContaining({
+          id: 'entitlement.publish',
+          severity: 'blocker',
+          scope: 'entitlement',
+        }),
+      ],
+      sourcePricingFingerprint: null,
+      pricingPreviewConfirmed: false,
+      pricing: null,
+    });
+    expect(fixture.prisma.sourceProduct.findUnique).not.toHaveBeenCalled();
+    expect(fixture.prisma.shop.findMany).not.toHaveBeenCalled();
+    expect(fixture.entitlement.getMonthlyPublishCount).not.toHaveBeenCalled();
+    expect(fixture.pricingPreviewReceipts.assertValid).not.toHaveBeenCalled();
+  });
+
+  it('continues non-pricing checks without exposing a quote when smart pricing is locked', async () => {
+    const fixture = createFixture();
+    fixture.entitlement.assertFeature.mockImplementation((_plan, feature) => {
+      if (feature === 'ai.pricing') throw new ForbiddenException('当前套餐不可使用智能定价');
+    });
+
+    const result = await fixture.service.preflight(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+      pricingStrategy: { mode: 'competitor_anchor' },
+      aiOptions: { titleOverride: '用户确认的纯棉T恤' },
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'entitlement.pricing' })]),
+    );
+    expect(result.checks.some((check) => check.id.startsWith('pricing.'))).toBe(false);
+    expect(result.sourcePricingFingerprint).toBeNull();
+    expect(result.pricing).toBeNull();
+    expect(result.pricingPreviewConfirmed).toBe(false);
+    expect(fixture.pricingPreviewReceipts.assertValid).not.toHaveBeenCalled();
+    expect(fixture.prisma.sourceProduct.findUnique).toHaveBeenCalled();
+    expect(fixture.prisma.shop.findMany).toHaveBeenCalled();
+    expect(fixture.categoryProperties.buildPublishSnapshot).toHaveBeenCalled();
+  });
+
+  it('runs a complete publish preflight without writes, AI or platform adapters', async () => {
+    const fixture = createFixture({ authMode: 'supabase' });
+    const dto = {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+      aiOptions: { titleOverride: '用户确认的纯棉T恤' },
+    };
+
+    await expect(fixture.service.preflight(USER, dto)).resolves.toMatchObject({
+      ready: true,
+      checks: [],
+      sourcePricingFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      pricingPreviewConfirmed: true,
+      pricing: { costPrice: 10, suggestedPrice: 15 },
+    });
+
+    expect(fixture.prisma.shop.findMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: [9n] },
+        userId: 1n,
+        role: 'seller',
+        status: 'active',
+        NOT: { platformShopId: { startsWith: 'demo-' } },
+      },
+    });
+    expect(fixture.categoryProperties.buildPublishSnapshot).toHaveBeenCalledWith(
+      1n,
+      2n,
+      [{ shopId: 9n, categoryId: '12345' }],
+      { refresh: false },
+    );
+    expect(fixture.categoryQualifications.buildPublishSnapshot).toHaveBeenCalledWith(
+      1n,
+      2n,
+      [{ shopId: 9n, categoryId: '12345' }],
+      { refresh: false, cachedOnly: true },
+    );
+    expect(fixture.prisma.$transaction).not.toHaveBeenCalled();
+    expect(fixture.prisma.shopCategory.update).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishTask.create).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishTask.update).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishJob.create).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.upsert).not.toHaveBeenCalled();
+    expect(fixture.ai.generateTitle).not.toHaveBeenCalled();
+    expect(fixture.ai.generateDetail).not.toHaveBeenCalled();
+    expect(fixture.adapters.create).not.toHaveBeenCalled();
+    expect(fixture.shopTokens.getAccessToken).not.toHaveBeenCalled();
+    expect(fixture.publishProduct).not.toHaveBeenCalled();
+  });
+
+  it('aggregates independent publish blockers in one preflight response', async () => {
+    const skuList = [
+      { skuId: 'sku-1', specName: '白色', price: 10, stock: 10, attributes: { 颜色: '白色' } },
+      { skuId: 'sku-2', specName: '黑色', price: 10, stock: 10, attributes: { 颜色: '黑色' } },
+    ];
+    const fixture = createFixture({ attributes: {}, skuList });
+    fixture.entitlement.assertFeature.mockImplementation((_plan, feature) => {
+      if (feature === 'ai.detail') throw new ForbiddenException('当前套餐不可优化详情');
+    });
+    fixture.pricingPreviewReceipts.assertValid.mockImplementation(() => {
+      throw new BadRequestException('利润试算凭证无效');
+    });
+    fixture.entitlement.assertWithinQuota.mockImplementation(() => {
+      throw new BadRequestException('本月铺货额度不足');
+    });
+
+    const result = await fixture.service.preflight(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'invalid-preview',
+      aiOptions: { titleOverride: '全网最便宜纯棉T恤', rewriteDetail: true },
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks.map((check) => check.id)).toEqual(
+      expect.arrayContaining([
+        'entitlement.ai_detail',
+        'pricing.preview_receipt',
+        'title.compliance',
+        'category.mapping',
+        'sku.mapping',
+        'quota.publish_monthly',
+      ]),
+    );
+    expect(result.pricingPreviewConfirmed).toBe(false);
+    expect(fixture.prisma.publishTask.create).not.toHaveBeenCalled();
+  });
+
+  it('does not report dependent qualification errors when category properties are unavailable', async () => {
+    const fixture = createFixture();
+    fixture.categoryProperties.buildPublishSnapshot.mockRejectedValue(
+      new BadRequestException('类目属性尚未确认'),
+    );
+
+    const result = await fixture.service.preflight(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+      aiOptions: { titleOverride: '用户确认的纯棉T恤' },
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'category.properties', shopId: '9' })]),
+    );
+    expect(result.checks.some((check) => check.id === 'category.qualifications')).toBe(false);
+    expect(fixture.categoryQualifications.buildPublishSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('reports cached qualification blockers without refreshing platform data', async () => {
+    const fixture = createFixture();
+    fixture.categoryQualifications.buildPublishSnapshot.mockRejectedValue(
+      new BadRequestException('请上传必填资质：质检报告'),
+    );
+
+    const result = await fixture.service.preflight(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+      aiOptions: { titleOverride: '用户确认的纯棉T恤' },
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'category.qualifications',
+          shopId: '9',
+          message: '请上传必填资质：质检报告',
+        }),
+      ]),
+    );
+    expect(fixture.categoryQualifications.buildPublishSnapshot).toHaveBeenCalledWith(
+      1n,
+      2n,
+      [{ shopId: 9n, categoryId: '12345' }],
+      { refresh: false, cachedOnly: true },
+    );
+  });
+
+  it('filters preflight targets by tenant and production-visible seller shops', async () => {
+    const fixture = createFixture({
+      authMode: 'supabase',
+      shops: [{ ...SHOP, userId: 2n }],
+    });
+
+    const result = await fixture.service.preflight(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+      aiOptions: { titleOverride: '用户确认的纯棉T恤' },
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ id: 'shop.target_unavailable', shopId: '9' }),
+    );
+    expect(fixture.prisma.shop.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ userId: 1n, role: 'seller' }) }),
+    );
+    expect(fixture.entitlement.getMonthlyPublishCount).not.toHaveBeenCalled();
+    expect(fixture.categoryProperties.buildPublishSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('returns a blocker with null confirmations when a required read fails', async () => {
+    const fixture = createFixture();
+    const logError = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    fixture.prisma.sourceProduct.findUnique.mockRejectedValue(new Error('db unavailable'));
+
+    const result = await fixture.service.preflight(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+    });
+
+    expect(result).toMatchObject({
+      ready: false,
+      checks: [
+        expect.objectContaining({
+          id: 'source.lookup',
+          severity: 'blocker',
+          message: '预检读取失败，请稍后重试',
+        }),
+      ],
+      sourcePricingFingerprint: null,
+      pricingPreviewConfirmed: false,
+      pricing: null,
+    });
+    expect(JSON.stringify(result)).not.toContain('db unavailable');
+    expect(logError).toHaveBeenCalledWith({
+      event: 'publish.preflight.check_failed',
+      checkId: 'source.lookup',
+      errorType: 'Error',
+    });
+    expect(JSON.stringify(logError.mock.calls)).not.toContain('db unavailable');
+    logError.mockRestore();
+  });
+
+  it('revalidates authoritative checks on submit after a successful preflight', async () => {
+    const fixture = createFixture();
+    const dto = {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+      aiOptions: { titleOverride: '用户确认的纯棉T恤' },
+    };
+    await expect(fixture.service.preflight(USER, dto)).resolves.toMatchObject({ ready: true });
+    fixture.pricingPreviewReceipts.assertValid.mockImplementation(() => {
+      throw new BadRequestException('利润试算已失效');
+    });
+
+    await expect(fixture.service.enqueue(USER, dto)).rejects.toThrow('利润试算已失效');
+    expect(fixture.pricingPreviewReceipts.assertValid).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.publishTask.create).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishJob.create).not.toHaveBeenCalled();
+  });
+
   it('pages all publish tasks without a silent recent-record limit', async () => {
     const fixture = createFixture();
     fixture.prisma.publishTask.count.mockResolvedValue(51);
@@ -1357,6 +1636,7 @@ function createFixture(
     imagePipelineError?: Error;
     skuList?: unknown;
     skuMappings?: unknown[];
+    attributes?: unknown;
     shops?: unknown[];
     authMode?: 'demo' | 'supabase';
   } = {},
@@ -1379,7 +1659,7 @@ function createFixture(
         mainImage: options.mainImage ?? null,
         detailImages: ['https://img.example/detail.jpg'],
         skuList: options.skuList ?? null,
-        attributes: { douyinCategoryId: '12345', material: '棉' },
+        attributes: options.attributes ?? { douyinCategoryId: '12345', material: '棉' },
         score: null,
       }),
     },
@@ -1395,6 +1675,7 @@ function createFixture(
     shopCategory: {
       count: vi.fn().mockResolvedValue(1),
       findFirst: vi.fn().mockResolvedValue({ id: 1n }),
+      update: vi.fn().mockResolvedValue({}),
     },
     publishTask: {
       create: vi.fn().mockImplementation(({ data }) => Promise.resolve({ id: 3n, ...data })),

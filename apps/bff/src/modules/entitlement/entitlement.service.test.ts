@@ -32,11 +32,38 @@ describe('EntitlementService.assertFeature', () => {
   });
 
   it('blocks premium features on free plan with 403', () => {
-    expect(() => svc.assertFeature('free', 'ai.detail')).toThrow(ForbiddenException);
+    let error: ForbiddenException | undefined;
+    try {
+      svc.assertFeature('free', 'ai.detail');
+    } catch (reason) {
+      error = reason as ForbiddenException;
+    }
+    expect(error).toBeInstanceOf(ForbiddenException);
+    expect(error?.getResponse()).toMatchObject({
+      message: '当前内测账号未开放此能力，请申请内测扩容。',
+    });
+    expect(error?.getResponse()).not.toHaveProperty('requiredPlan');
   });
 
   it('allows premium features on the granting plan', () => {
     expect(() => svc.assertFeature('pro', 'ai.image.watermark')).not.toThrow();
+  });
+});
+
+describe('EntitlementService.assertWithinQuota', () => {
+  const { service: svc } = makeService(0);
+
+  it('directs over-limit accounts to request beta expansion', () => {
+    let response: unknown;
+    try {
+      svc.assertWithinQuota('free', 'shops.max', 2);
+    } catch (reason) {
+      response = (reason as { getResponse: () => unknown }).getResponse();
+    }
+    expect(response).toMatchObject({
+      message: '已达当前内测权限上限（1），请申请内测扩容。',
+    });
+    expect(response).not.toHaveProperty('requiredPlan');
   });
 });
 
@@ -65,16 +92,37 @@ describe('EntitlementService.checkAiQuota', () => {
 });
 
 describe('EntitlementService.buildView', () => {
-  it('returns plan view with usage and upgrade options', async () => {
+  it('returns plan view with usage and billing availability', async () => {
     const { service: svc } = makeService(3);
     const view = await svc.buildView(1n, 'free');
     expect(view.plan).toBe('free');
-    expect(view.planName).toBe('免费版');
+    expect(view.planName).toBe('内测版');
     expect(view.aiUsage.used).toBe(3);
     expect(view.aiUsage.remaining).toBe(17);
     expect(view.plans).toHaveLength(5);
+    expect(view.plans[0]).toMatchObject({
+      billingStatus: 'internal_beta',
+      billingLabel: '邀请内测 · ¥0 / 内测期',
+    });
+    expect(view.plans[1]).toMatchObject({
+      billingStatus: 'unavailable',
+      billingLabel: '暂未开放',
+    });
+    expect(view.plans[0]).not.toHaveProperty('priceCnyMonthly');
     expect(view.features).toContain('ai.title');
     expect(view.features).not.toContain('ai.detail');
+  });
+
+  it('hides internal plan identifiers and plan catalog in Supabase mode', async () => {
+    const { service: svc } = makeService(3, 'supabase');
+
+    const view = await svc.buildView(1n, 'pro');
+
+    expect(view.plan).toBeNull();
+    expect(view.planName).toBe('邀请制内测');
+    expect(view.plans).toEqual([]);
+    expect(view.features).toContain('analytics.dashboard');
+    expect(view.quotas.shopsMax).toBe(10);
   });
 });
 

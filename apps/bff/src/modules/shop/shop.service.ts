@@ -1,11 +1,13 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { Platform, Shop, ShopRole } from '@supplier/db';
+import type { Platform, Prisma, Shop, ShopRole } from '@supplier/db';
 import type { TokenSet, UserPlan } from '@supplier/shared-types';
 import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
@@ -72,7 +74,7 @@ export class ShopService {
     shopName?: string,
   ): Promise<ShopView> {
     if (!this.demoMode) throw new ForbiddenException('当前环境不支持创建演示店铺');
-    const active = await this.countActive(userId);
+    const active = await this.countActiveSellers(userId);
     this.entitlement.assertWithinQuota(plan, 'shops.max', active + 1);
 
     const platformShopId = `demo-${platform}-${Math.random().toString(36).slice(2, 8)}`;
@@ -108,43 +110,75 @@ export class ShopService {
       platform,
       platformShopId: tokenSet.platformShopId,
     };
-    const existing = await this.prisma.shop.findUnique({
-      where: { uk_user_platform_shop: unique },
-    });
-
-    if (!existing || existing.status !== 'active') {
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        select: { plan: true },
-      });
-      if (!user) throw new NotFoundException('用户不存在');
-      const active = await this.countActive(userId);
-      this.entitlement.assertWithinQuota(user.plan as UserPlan, 'shops.max', active + 1);
-    }
-
     const accessTokenEnc = this.crypto.encrypt(tokenSet.accessToken);
-    const refreshTokenEnc = tokenSet.refreshToken
+    const suppliedRefreshTokenEnc = tokenSet.refreshToken
       ? this.crypto.encrypt(tokenSet.refreshToken)
-      : existing?.refreshTokenEnc;
-    const shop = await this.prisma.shop.upsert({
-      where: { uk_user_platform_shop: unique },
-      create: {
-        ...unique,
-        shopName: tokenSet.shopName,
-        role,
-        accessTokenEnc,
-        refreshTokenEnc,
-        tokenExpireAt: tokenSet.expiresAt,
-        status: 'active',
-      },
-      update: {
-        shopName: tokenSet.shopName,
-        role,
-        accessTokenEnc,
-        refreshTokenEnc,
-        tokenExpireAt: tokenSet.expiresAt,
-        status: 'active',
-      },
+      : undefined;
+    const shop = await this.withSerializableTransaction(async (tx) => {
+      const existing = await tx.shop.findUnique({
+        where: { uk_user_platform_shop: unique },
+      });
+
+      if (role === 'buyer') {
+        const otherActiveBuyer = await tx.shop.findFirst({
+          where: {
+            userId,
+            role: 'buyer',
+            status: 'active',
+            ...runtimeShopWhere(this.demoMode),
+            ...(existing ? { id: { not: existing.id } } : {}),
+          },
+          select: { id: true },
+        });
+        if (otherActiveBuyer) {
+          throw new ConflictException({
+            code: 'ACTIVE_BUYER_EXISTS',
+            message: '当前工作区已有启用中的采购账号，请先停用旧账号后再授权新账号',
+          });
+        }
+      }
+
+      const addsActiveSeller =
+        role === 'seller' &&
+        (!existing || existing.status !== 'active' || existing.role !== 'seller');
+      if (addsActiveSeller) {
+        const user = await tx.user.findUnique({
+          where: { id: userId },
+          select: { plan: true },
+        });
+        if (!user) throw new NotFoundException('用户不存在');
+        const active = await tx.shop.count({
+          where: {
+            userId,
+            role: 'seller',
+            status: 'active',
+            ...runtimeShopWhere(this.demoMode),
+          },
+        });
+        this.entitlement.assertWithinQuota(user.plan as UserPlan, 'shops.max', active + 1);
+      }
+
+      const refreshTokenEnc = suppliedRefreshTokenEnc ?? existing?.refreshTokenEnc;
+      return tx.shop.upsert({
+        where: { uk_user_platform_shop: unique },
+        create: {
+          ...unique,
+          shopName: tokenSet.shopName,
+          role,
+          accessTokenEnc,
+          refreshTokenEnc,
+          tokenExpireAt: tokenSet.expiresAt,
+          status: 'active',
+        },
+        update: {
+          shopName: tokenSet.shopName,
+          role,
+          accessTokenEnc,
+          refreshTokenEnc,
+          tokenExpireAt: tokenSet.expiresAt,
+          status: 'active',
+        },
+      });
     });
     await this.alerts.resolve(`credential.shop.${shop.id}`, { status: 'credential_replaced' });
     return toView(shop);
@@ -171,11 +205,31 @@ export class ShopService {
     return toView(shop);
   }
 
-  private async countActive(userId: bigint): Promise<number> {
+  private async countActiveSellers(userId: bigint): Promise<number> {
     return this.prisma.shop.count({
-      where: { userId, status: 'active', ...runtimeShopWhere(this.demoMode) },
+      where: { userId, role: 'seller', status: 'active', ...runtimeShopWhere(this.demoMode) },
     });
   }
+
+  private async withSerializableTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(operation, { isolationLevel: 'Serializable' });
+      } catch (error) {
+        if (!isSerializationConflict(error)) throw error;
+        if (attempt === 3) {
+          throw new ServiceUnavailableException('店铺授权并发冲突，请稍后重试');
+        }
+      }
+    }
+    throw new ServiceUnavailableException('店铺授权失败，请稍后重试');
+  }
+}
+
+function isSerializationConflict(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 'P2034';
 }
 
 function positiveShopId(value: string): bigint {

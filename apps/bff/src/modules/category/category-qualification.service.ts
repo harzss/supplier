@@ -152,7 +152,7 @@ export class CategoryQualificationService {
     userId: bigint,
     sourceProductId: bigint,
     targets: Array<{ shopId: bigint; categoryId: string }>,
-    options: { refresh?: boolean } = {},
+    options: { refresh?: boolean; cachedOnly?: boolean } = {},
   ): Promise<Record<string, ProductQualification[]>> {
     if (targets.length === 0) return {};
     const product = await this.prisma.sourceProduct.findUnique({
@@ -168,6 +168,7 @@ export class CategoryQualificationService {
         product.productId1688,
         target.shopId.toString(),
         options.refresh === true,
+        options.cachedOnly === true,
       );
       const shopKey = target.shopId.toString();
       if (resolution.context.category.categoryId !== target.categoryId) {
@@ -193,9 +194,10 @@ export class CategoryQualificationService {
     sourceProductId: string,
     shopIdValue: string,
     forceRefresh: boolean,
+    cachedOnly = false,
   ): Promise<QualificationResolution> {
     const context = await this.loadContext(userId, sourceProductId, shopIdValue);
-    const schema = await this.loadSchema(userId, context, forceRefresh);
+    const schema = await this.loadSchema(userId, context, forceRefresh, cachedOnly);
     const propertyState = await this.loadPropertyState(context, schema.qualifications);
     const qualifications = resolveQualificationRequirements(
       schema.qualifications,
@@ -336,6 +338,7 @@ export class CategoryQualificationService {
     userId: bigint,
     context: Awaited<ReturnType<CategoryQualificationService['loadContext']>>,
     forceRefresh: boolean,
+    cachedOnly: boolean,
   ): Promise<{ qualifications: CategoryQualification[]; fingerprint: string; syncedAt: Date }> {
     const cached = parseCategoryQualifications(context.catalog.qualifications);
     if (
@@ -349,6 +352,9 @@ export class CategoryQualificationService {
         fingerprint: context.catalog.qualificationsFingerprint,
         syncedAt: context.catalog.qualificationsSyncedAt,
       };
+    }
+    if (cachedOnly) {
+      throw new BadRequestException('类目资质规则尚未缓存，请先同步后重试');
     }
     const adapter = this.adapters.create(context.shop);
     if (!adapter.getCategoryQualifications) {

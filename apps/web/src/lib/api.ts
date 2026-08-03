@@ -61,16 +61,19 @@ export interface RecommendationQuery {
   limit?: number;
 }
 
+export type BillingStatus = 'internal_beta' | 'unavailable';
+
 export interface PlanSummary {
   id: string;
   name: string;
-  priceCnyMonthly: number;
+  billingStatus: BillingStatus;
+  billingLabel: string;
   highlight: string;
   features: string[];
 }
 
 export interface EntitlementView {
-  plan: string;
+  plan: string | null;
   planName: string;
   features: string[];
   aiUsage: { used: number; limit: number; remaining: number; exceeded: boolean };
@@ -330,6 +333,44 @@ export interface PublishTaskReplay {
   reused: true;
 }
 
+export interface PublishAiOptions {
+  titleOverride?: string;
+  rewriteTitle?: boolean;
+  rewriteDetail?: boolean;
+  removeWatermark?: boolean;
+  relightImages?: boolean;
+  backgroundStyle?: 'white_studio' | 'warm_lifestyle' | 'cool_minimal';
+}
+
+export interface PublishPreflightRequest {
+  pricingPreviewToken?: string;
+  sourceProductId: string;
+  targetShopIds: string[];
+  pricingStrategy?: PricingStrategy;
+  aiOptions?: PublishAiOptions;
+}
+
+export interface PublishRequest extends PublishPreflightRequest {
+  clientRequestId?: string;
+}
+
+export interface PublishPreflightCheck {
+  id: string;
+  severity: 'blocker' | 'warning';
+  scope?: string;
+  shopId?: string;
+  message: string;
+  actionHref?: string;
+}
+
+export interface PublishPreflightResult {
+  ready: boolean;
+  checks: PublishPreflightCheck[];
+  sourcePricingFingerprint: string | null;
+  pricingPreviewConfirmed: boolean;
+  pricing: PricingQuote | null;
+}
+
 export type ActivationStepKey =
   | 'connect_shop'
   | 'select_product'
@@ -534,7 +575,7 @@ export class ApiError extends Error {
 
 const PREVIEW_PLAN_KEY = 'supplier.previewPlan';
 
-/** 演示用：预览不同套餐视图（真实系统由登录用户订阅决定） */
+/** 演示用：预览不同内部权限档位（真实系统由登录用户权限决定） */
 export function getPreviewPlan(): string | null {
   if (typeof window === 'undefined') return null;
   return window.localStorage.getItem(PREVIEW_PLAN_KEY);
@@ -824,22 +865,17 @@ export const api = {
     });
   },
 
-  publish(body: {
-    clientRequestId?: string;
-    pricingPreviewToken?: string;
-    sourceProductId: string;
-    targetShopIds: string[];
-    pricingStrategy?: PricingStrategy;
-    aiOptions?: {
-      titleOverride?: string;
-      rewriteTitle?: boolean;
-      rewriteDetail?: boolean;
-      removeWatermark?: boolean;
-      relightImages?: boolean;
-      backgroundStyle?: 'white_studio' | 'warm_lifestyle' | 'cool_minimal';
-    };
-  }): Promise<PublishTaskResult | PublishTaskAccepted | PublishTaskReplay> {
+  publish(
+    body: PublishRequest,
+  ): Promise<PublishTaskResult | PublishTaskAccepted | PublishTaskReplay> {
     return request('/publish-tasks', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  publishPreflight(body: PublishPreflightRequest): Promise<PublishPreflightResult> {
+    return request('/publish-tasks/preflight', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
   },
 
   pricingPreview(body: {

@@ -128,12 +128,20 @@ export function TitleStudio({ originalTitle, category, selectedTitle, onSelectTi
                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
                   <p className="font-medium text-amber-800">本月 AI 额度已用完</p>
                   <p className="mt-1 text-amber-700">{err.message}</p>
-                  <a
-                    href="/settings"
-                    className="mt-2 inline-block rounded-md bg-amber-500 px-3 py-1 text-xs font-medium text-white hover:bg-amber-600"
-                  >
-                    升级套餐 / 配置自有 Key →
-                  </a>
+                  <span className="mt-2 flex flex-wrap gap-2">
+                    <a
+                      href="/settings#capacity-options"
+                      className="inline-block rounded-md bg-amber-500 px-3 py-1 text-xs font-medium text-white hover:bg-amber-600"
+                    >
+                      申请内测扩容 →
+                    </a>
+                    <a
+                      href="/settings#ai-key-settings"
+                      className="inline-block rounded-md border border-amber-400 bg-white px-3 py-1 text-xs font-medium text-amber-800 hover:bg-amber-50"
+                    >
+                      配置自有 Key →
+                    </a>
+                  </span>
                 </div>
               );
             }
@@ -169,8 +177,8 @@ export function TitleStudio({ originalTitle, category, selectedTitle, onSelectTi
               ) : (
                 <span />
               )}
-              <a href="/settings" className="text-brand-600 hover:underline">
-                管理套餐
+              <a href="/settings#ai-key-settings" className="text-brand-600 hover:underline">
+                管理 AI 密钥
               </a>
             </div>
             {mutation.data.titles.length === 0 && (

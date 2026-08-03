@@ -2,7 +2,11 @@ import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { describe, expect, it } from 'vitest';
-import { CreatePublishTaskDto } from './create-publish-task.dto';
+import {
+  CreatePublishTaskDto,
+  MAX_PUBLISH_TARGET_SHOPS,
+  MAX_SOURCE_PRODUCT_ID_LENGTH,
+} from './create-publish-task.dto';
 
 describe('CreatePublishTaskDto', () => {
   it('accepts an optional UUID client request id', async () => {
@@ -31,6 +35,35 @@ describe('CreatePublishTaskDto', () => {
       pricingPreviewToken: 'x'.repeat(4097),
       sourceProductId: '1688-1',
       targetShopIds: ['9'],
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
+  });
+
+  it('rejects an oversized source product id', async () => {
+    const dto = plainToInstance(CreatePublishTaskDto, {
+      sourceProductId: 'x'.repeat(MAX_SOURCE_PRODUCT_ID_LENGTH + 1),
+      targetShopIds: ['9'],
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
+  });
+
+  it('rejects more than the maximum number of publish targets', async () => {
+    const dto = plainToInstance(CreatePublishTaskDto, {
+      sourceProductId: '1688-1',
+      targetShopIds: Array.from({ length: MAX_PUBLISH_TARGET_SHOPS + 1 }, (_, index) =>
+        String(index + 1),
+      ),
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
+  });
+
+  it('rejects a target id above the signed 64-bit database limit', async () => {
+    const dto = plainToInstance(CreatePublishTaskDto, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9223372036854775808'],
     });
 
     expect(await validate(dto)).not.toHaveLength(0);

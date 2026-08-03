@@ -9,7 +9,7 @@ import { ShopService } from './shop.service';
 function makeService(existing: Record<string, unknown> | null = null, authMode = 'demo') {
   const captured: { create?: Record<string, unknown>; update?: Record<string, unknown> } = {};
   const createdAt = new Date('2026-07-16T00:00:00.000Z');
-  const prisma = {
+  const database = {
     user: { findUnique: vi.fn().mockResolvedValue({ plan: 'pro' }) },
     shop: {
       findUnique: vi.fn().mockResolvedValue(existing),
@@ -35,7 +35,13 @@ function makeService(existing: Record<string, unknown> | null = null, authMode =
         };
       }),
     },
-  } as unknown as PrismaService;
+  };
+  const transaction = vi
+    .fn()
+    .mockImplementation(async (callback: (tx: typeof database) => Promise<unknown>) =>
+      callback(database),
+    );
+  const prisma = { ...database, $transaction: transaction } as unknown as PrismaService;
   const entitlement = {
     assertWithinQuota: vi.fn(),
   } as unknown as EntitlementService;
@@ -54,10 +60,33 @@ function makeService(existing: Record<string, unknown> | null = null, authMode =
     entitlement,
     alerts,
     captured,
+    transaction,
   };
 }
 
 describe('ShopService.saveAuthorized', () => {
+  it('retries a Serializable authorization transaction after P2034', async () => {
+    const conflict = Object.assign(new Error('transaction conflict'), { code: 'P2034' });
+    const { service, transaction } = makeService();
+    transaction.mockRejectedValueOnce(conflict);
+
+    await expect(
+      service.saveAuthorized(42n, 'douyin', {
+        accessToken: 'plain-access-token',
+        platformShopId: '4463798',
+        shopName: '测试店铺',
+      }),
+    ).resolves.toMatchObject({ id: '9', role: 'seller' });
+
+    expect(transaction).toHaveBeenCalledTimes(2);
+    expect(transaction).toHaveBeenNthCalledWith(1, expect.any(Function), {
+      isolationLevel: 'Serializable',
+    });
+    expect(transaction).toHaveBeenNthCalledWith(2, expect.any(Function), {
+      isolationLevel: 'Serializable',
+    });
+  });
+
   it('encrypts tokens before creating an authorized shop', async () => {
     const { service, entitlement, alerts, captured } = makeService();
 
@@ -91,6 +120,7 @@ describe('ShopService.saveAuthorized', () => {
   it('updates an existing authorization without consuming another shop quota', async () => {
     const { service, entitlement } = makeService({
       id: 9n,
+      role: 'seller',
       refreshTokenEnc: 'existing-refresh-token-enc',
       status: 'active',
     });
@@ -108,6 +138,7 @@ describe('ShopService.saveAuthorized', () => {
   it('rechecks quota before reactivating a revoked authorization', async () => {
     const { service, entitlement } = makeService({
       id: 9n,
+      role: 'seller',
       refreshTokenEnc: null,
       status: 'revoked',
     });
@@ -123,8 +154,8 @@ describe('ShopService.saveAuthorized', () => {
     expect(entitlement.assertWithinQuota).toHaveBeenCalledWith('pro', 'shops.max', 2);
   });
 
-  it('persists a 1688 authorization as a buyer account', async () => {
-    const { service, captured } = makeService();
+  it('persists a 1688 authorization as a buyer account without consuming seller quota', async () => {
+    const { service, prisma, entitlement, captured } = makeService();
 
     const view = await service.saveAuthorized(
       42n,
@@ -141,6 +172,95 @@ describe('ShopService.saveAuthorized', () => {
 
     expect(captured.create?.role).toBe('buyer');
     expect(view.role).toBe('buyer');
+    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+    expect(prisma.shop.count).not.toHaveBeenCalled();
+    expect(entitlement.assertWithinQuota).not.toHaveBeenCalled();
+  });
+
+  it('rejects a different buyer while another buyer is active', async () => {
+    const { service, prisma, entitlement } = makeService();
+    vi.mocked(prisma.shop.findFirst).mockResolvedValue({ id: 8n } as never);
+
+    await expect(
+      service.saveAuthorized(
+        42n,
+        'alibaba_1688',
+        {
+          accessToken: 'second-buyer-access-token',
+          platformShopId: 'member-1688-new',
+          shopName: 'new-buyer-login',
+        },
+        'buyer',
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: {
+        code: 'ACTIVE_BUYER_EXISTS',
+        message: '当前工作区已有启用中的采购账号，请先停用旧账号后再授权新账号',
+      },
+    });
+
+    expect(prisma.shop.upsert).not.toHaveBeenCalled();
+    expect(prisma.shop.count).not.toHaveBeenCalled();
+    expect(entitlement.assertWithinQuota).not.toHaveBeenCalled();
+  });
+
+  it('allows reauthorization of the same active buyer', async () => {
+    const { service, prisma, entitlement, captured } = makeService({
+      id: 9n,
+      role: 'buyer',
+      refreshTokenEnc: 'existing-refresh-token-enc',
+      status: 'active',
+    });
+    vi.mocked(prisma.shop.findFirst).mockResolvedValue(null);
+
+    await expect(
+      service.saveAuthorized(
+        42n,
+        'alibaba_1688',
+        {
+          accessToken: 'renewed-buyer-access-token',
+          platformShopId: 'member-1688',
+          shopName: 'buyer-login',
+        },
+        'buyer',
+      ),
+    ).resolves.toMatchObject({ role: 'buyer', status: 'active' });
+
+    expect(prisma.shop.findFirst).toHaveBeenCalledWith({
+      where: {
+        userId: 42n,
+        role: 'buyer',
+        status: 'active',
+        id: { not: 9n },
+      },
+      select: { id: true },
+    });
+    expect(captured.update?.refreshTokenEnc).toBe('existing-refresh-token-enc');
+    expect(prisma.shop.count).not.toHaveBeenCalled();
+    expect(entitlement.assertWithinQuota).not.toHaveBeenCalled();
+  });
+
+  it('checks seller quota when an active buyer authorization becomes a seller', async () => {
+    const { service, entitlement } = makeService({
+      id: 9n,
+      role: 'buyer',
+      refreshTokenEnc: 'existing-refresh-token-enc',
+      status: 'active',
+    });
+
+    await service.saveAuthorized(
+      42n,
+      'douyin',
+      {
+        accessToken: 'new-access-token',
+        platformShopId: '4463798',
+        shopName: '测试店铺',
+      },
+      'seller',
+    );
+
+    expect(entitlement.assertWithinQuota).toHaveBeenCalledWith('pro', 'shops.max', 2);
   });
 });
 
@@ -164,6 +284,7 @@ describe('ShopService lifecycle', () => {
     expect(prisma.shop.count).toHaveBeenCalledWith({
       where: {
         userId: 42n,
+        role: 'seller',
         status: 'active',
         NOT: { platformShopId: { startsWith: 'demo-' } },
       },

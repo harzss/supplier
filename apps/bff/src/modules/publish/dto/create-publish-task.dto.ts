@@ -11,16 +11,20 @@ import {
   IsOptional,
   IsString,
   IsUUID,
-  Matches,
   Max,
   MaxLength,
   Min,
+  registerDecorator,
+  type ValidationOptions,
   ValidateNested,
 } from 'class-validator';
 import { MAIN_IMAGE_BACKGROUND_STYLES, type MainImageBackgroundStyle } from '../main-image.types';
 
 export const PRICING_MODES = ['fixed_markup', 'competitor_anchor', 'profit_target'] as const;
 export type PricingMode = (typeof PRICING_MODES)[number];
+export const MAX_SOURCE_PRODUCT_ID_LENGTH = 128;
+export const MAX_PUBLISH_TARGET_SHOPS = 50;
+const MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807n;
 
 export class PricingStrategyDto {
   @IsIn(PRICING_MODES)
@@ -97,13 +101,15 @@ export class CreatePublishTaskDto {
   pricingPreviewToken?: string;
 
   @IsString()
+  @MaxLength(MAX_SOURCE_PRODUCT_ID_LENGTH)
   sourceProductId!: string;
 
   @IsArray()
   @ArrayNotEmpty()
+  @ArrayMaxSize(MAX_PUBLISH_TARGET_SHOPS)
   @ArrayUnique()
   @IsString({ each: true })
-  @Matches(/^[1-9]\d*$/, { each: true })
+  @IsPositiveInt64String({ each: true })
   targetShopIds!: string[];
 
   @IsOptional()
@@ -119,9 +125,28 @@ export class CreatePublishTaskDto {
 
 export class PricingPreviewDto {
   @IsString()
+  @MaxLength(MAX_SOURCE_PRODUCT_ID_LENGTH)
   sourceProductId!: string;
 
   @ValidateNested()
   @Type(() => PricingStrategyDto)
   pricingStrategy!: PricingStrategyDto;
+}
+
+function IsPositiveInt64String(validationOptions?: ValidationOptions): PropertyDecorator {
+  return (target, propertyKey) => {
+    registerDecorator({
+      name: 'isPositiveInt64String',
+      target: target.constructor,
+      propertyName: propertyKey.toString(),
+      options: validationOptions,
+      validator: {
+        validate(value: unknown) {
+          if (typeof value !== 'string' || !/^[1-9]\d{0,18}$/.test(value)) return false;
+          return BigInt(value) <= MAX_SIGNED_BIGINT;
+        },
+        defaultMessage: () => 'targetShopIds must contain positive signed 64-bit integer strings',
+      },
+    });
+  };
 }

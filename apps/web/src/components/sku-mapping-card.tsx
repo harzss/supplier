@@ -51,7 +51,7 @@ export function SkuMappingCard({ sourceProductId }: Props) {
     );
 
   return (
-    <section className="ledger-panel mt-4 p-5">
+    <section id="sku-setup" className="ledger-panel mt-4 scroll-mt-24 p-5">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">

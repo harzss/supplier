@@ -58,7 +58,7 @@ export class AiUsageService {
               where: { userId, viaByok: false, createdAt: { gte: startOfMonth() } },
             });
             const quota = checkQuota(plan, 'ai.calls.monthly', used);
-            if (quota.exceeded) throw quotaExceeded(quota);
+            if (quota.exceeded) throw quotaExceeded(quota, module);
 
             const pendingModel = `${AI_USAGE_RESERVATION_MODEL_PREFIX}${requestedModel}`.slice(
               0,
@@ -242,11 +242,17 @@ export class AiUsageService {
   }
 }
 
-function quotaExceeded(quota: QuotaCheck): HttpException {
+function quotaExceeded(quota: QuotaCheck, module: AiModule): HttpException {
+  const recovery =
+    module === 'title' || module === 'detail'
+      ? '可申请内测扩容，或在设置中配置自有 API Key 继续使用。'
+      : module.startsWith('image_')
+        ? '可申请内测扩容后重试；主图处理不支持使用自有 API Key。'
+        : '可申请内测扩容后重试；该能力不支持使用自有 API Key。';
   return new HttpException(
     {
       code: 'QUOTA_EXCEEDED',
-      message: `本月 AI 额度已用完（${quota.used}/${quota.limit}）。可升级套餐，或在设置中配置自有 API Key 以继续使用。`,
+      message: `本月 AI 额度已用完（${quota.used}/${quota.limit}）。${recovery}`,
       limit: quota.limit,
       used: quota.used,
     },

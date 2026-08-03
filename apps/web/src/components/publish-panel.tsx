@@ -1,8 +1,14 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api, type PricingStrategy } from '@/lib/api';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  ApiError,
+  api,
+  type PricingStrategy,
+  type PublishPreflightCheck,
+  type PublishPreflightRequest,
+} from '@/lib/api';
 
 interface Props {
   sourceProductId: string;
@@ -42,11 +48,11 @@ export function PublishPanel({
   >('');
 
   const shops = useQuery({ queryKey: ['shops'], queryFn: () => api.shops(), enabled: open });
-  const skuMapping = useQuery({
-    queryKey: ['skuMapping', sourceProductId],
-    queryFn: () => api.skuMapping(sourceProductId),
-    enabled: open,
+  const preflight = useMutation({
+    mutationFn: ({ request }: { request: PublishPreflightRequest; inputFingerprint: string }) =>
+      api.publishPreflight(request),
   });
+  const resetPreflight = preflight.reset;
   const pricingStrategy = buildPricingStrategy({
     pricingMode,
     markup,
@@ -65,9 +71,44 @@ export function PublishPanel({
     (pricingMode !== 'competitor_anchor' ||
       (Number(competitorLow) > 0 && Number(competitorHigh) >= Number(competitorLow)));
   const pricingPreview = useMutation({
-    mutationFn: () => api.pricingPreview({ sourceProductId, pricingStrategy }),
+    mutationFn: (input: { sourceProductId: string; pricingStrategy: PricingStrategy }) =>
+      api.pricingPreview(input),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['activation'] }),
   });
+  const pricingPreviewInput = { sourceProductId, pricingStrategy };
+  const pricingPreviewIsCurrent =
+    pricingPreview.isSuccess &&
+    JSON.stringify(pricingPreview.variables) === JSON.stringify(pricingPreviewInput);
+  const currentPricingPreview = pricingPreviewIsCurrent ? pricingPreview.data : undefined;
+
+  const publishRequest: PublishPreflightRequest = {
+    sourceProductId,
+    targetShopIds: [...selected].sort(),
+    pricingStrategy,
+    aiOptions: {
+      ...(titleOverride ? { titleOverride } : {}),
+      rewriteTitle: titleOverride ? false : rewriteTitle,
+      rewriteDetail,
+      removeWatermark,
+      relightImages,
+      ...(backgroundStyle ? { backgroundStyle } : {}),
+    },
+    ...(currentPricingPreview
+      ? { pricingPreviewToken: currentPricingPreview.pricingPreviewToken }
+      : {}),
+  };
+  const publishInputFingerprint = JSON.stringify({ publishRequest, availability, totalStock });
+  const preflightIsCurrent =
+    preflight.isSuccess && preflight.variables?.inputFingerprint === publishInputFingerprint;
+  const currentPreflight = preflightIsCurrent ? preflight.data : undefined;
+  const pricingConfirmationMatches =
+    currentPreflight?.pricingPreviewConfirmed === true &&
+    currentPreflight.sourcePricingFingerprint === currentPricingPreview?.sourcePricingFingerprint;
+  const readyToPublish = currentPreflight?.ready === true && pricingConfirmationMatches;
+
+  useEffect(() => {
+    resetPreflight();
+  }, [resetPreflight, publishInputFingerprint]);
 
   useEffect(() => {
     const openFromHash = () => {
@@ -79,53 +120,20 @@ export function PublishPanel({
   }, [sourceProductId]);
   const sellerShops =
     shops.data?.filter((shop) => shop.role === 'seller' && shop.status === 'active') ?? [];
-  const skuReady = skuMapping.data?.confirmed === true;
-  const selectedRealDouyinShops = sellerShops.filter(
-    (shop) =>
-      selected.includes(shop.id) && shop.platform === 'douyin' && shop.connectionType === 'oauth',
-  );
-  const qualificationQueries = useQueries({
-    queries: selectedRealDouyinShops.map((shop) => ({
-      queryKey: ['categoryQualifications', sourceProductId, shop.id],
-      queryFn: () => api.categoryQualifications(sourceProductId, shop.id),
-      enabled: open,
-    })),
-  });
-  const qualificationsReady = qualificationQueries.every(
-    (query) => query.isSuccess && query.data.confirmed,
-  );
-  const qualificationsLoading = qualificationQueries.some((query) => query.isLoading);
-  const qualificationsError = qualificationQueries.find(
-    (query) => query.isError || (query.data && !query.data.confirmed),
-  );
   const publish = useMutation({
     mutationFn: () => {
-      const payload = {
-        sourceProductId,
-        targetShopIds: [...selected].sort(),
-        pricingStrategy,
-        aiOptions: {
-          ...(titleOverride ? { titleOverride } : {}),
-          rewriteTitle: titleOverride ? false : rewriteTitle,
-          rewriteDetail,
-          removeWatermark,
-          relightImages,
-          ...(backgroundStyle ? { backgroundStyle } : {}),
-        },
-      };
       const requestIdentity = {
-        ...payload,
-        pricingConfirmation: pricingPreview.data
+        ...publishRequest,
+        pricingConfirmation: currentPricingPreview
           ? {
-              costPrice: pricingPreview.data.costPrice,
-              suggestedPrice: pricingPreview.data.suggestedPrice,
-              sourcePricingFingerprint: pricingPreview.data.sourcePricingFingerprint,
+              costPrice: currentPricingPreview.costPrice,
+              suggestedPrice: currentPricingPreview.suggestedPrice,
+              sourcePricingFingerprint: currentPricingPreview.sourcePricingFingerprint,
             }
           : null,
       };
       return api.publish({
-        ...payload,
-        pricingPreviewToken: pricingPreview.data?.pricingPreviewToken,
+        ...publishRequest,
         clientRequestId: getPublishClientRequestId(
           sourceProductId,
           requestIdentity,
@@ -140,12 +148,22 @@ export function PublishPanel({
       ]),
     onError: (error) => {
       const code = (error as ApiError).code;
-      if (code?.startsWith('PRICING_PREVIEW_')) pricingPreview.reset();
+      if (code?.startsWith('PRICING_PREVIEW_')) {
+        pricingPreview.reset();
+        resetPreflight();
+      }
     },
   });
 
-  const toggle = (id: string) =>
+  const toggle = (id: string) => {
+    resetPreflight();
     setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  };
+
+  const resetPricingConfirmation = () => {
+    pricingPreview.reset();
+    resetPreflight();
+  };
 
   const unavailableMessage = sourceUnavailableMessage(availability);
 
@@ -218,13 +236,13 @@ export function PublishPanel({
                 value={pricingMode}
                 onChange={(event) => {
                   setPricingMode(event.target.value as PricingStrategy['mode']);
-                  pricingPreview.reset();
+                  resetPricingConfirmation();
                 }}
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500"
               >
                 <option value="fixed_markup">固定加价</option>
-                <option value="profit_target">目标毛利 · 专业版+</option>
-                <option value="competitor_anchor">竞品对标 · 专业版+</option>
+                <option value="profit_target">目标毛利 · 需扩容权限</option>
+                <option value="competitor_anchor">竞品对标 · 需扩容权限</option>
               </select>
 
               {pricingMode === 'fixed_markup' ? (
@@ -236,7 +254,7 @@ export function PublishPanel({
                   max={500}
                   onChange={(value) => {
                     setMarkup(value);
-                    pricingPreview.reset();
+                    resetPricingConfirmation();
                   }}
                 />
               ) : (
@@ -249,7 +267,7 @@ export function PublishPanel({
                       min={0}
                       onChange={(value) => {
                         setEstimatedShipping(value);
-                        pricingPreview.reset();
+                        resetPricingConfirmation();
                       }}
                     />
                     <NumberField
@@ -260,7 +278,7 @@ export function PublishPanel({
                       max={50}
                       onChange={(value) => {
                         setPlatformFeeRate(value);
-                        pricingPreview.reset();
+                        resetPricingConfirmation();
                       }}
                     />
                   </div>
@@ -273,7 +291,7 @@ export function PublishPanel({
                       max={80}
                       onChange={(value) => {
                         setTargetMargin(value);
-                        pricingPreview.reset();
+                        resetPricingConfirmation();
                       }}
                     />
                   ) : (
@@ -288,7 +306,7 @@ export function PublishPanel({
                           placeholder="最低价"
                           onChange={(event) => {
                             setCompetitorLow(event.target.value);
-                            pricingPreview.reset();
+                            resetPricingConfirmation();
                           }}
                           className="min-w-0 flex-1 rounded border border-zinc-200 px-2 py-1.5 text-sm outline-none focus:border-brand-500"
                         />
@@ -301,7 +319,7 @@ export function PublishPanel({
                           placeholder="最高价"
                           onChange={(event) => {
                             setCompetitorHigh(event.target.value);
-                            pricingPreview.reset();
+                            resetPricingConfirmation();
                           }}
                           className="min-w-0 flex-1 rounded border border-zinc-200 px-2 py-1.5 text-sm outline-none focus:border-brand-500"
                         />
@@ -316,7 +334,10 @@ export function PublishPanel({
 
               <button
                 type="button"
-                onClick={() => pricingPreview.mutate()}
+                onClick={() => {
+                  resetPreflight();
+                  pricingPreview.mutate(pricingPreviewInput);
+                }}
                 disabled={pricingPreview.isPending || !pricingInputValid}
                 className="w-full rounded-lg border border-brand-200 bg-brand-50 py-2 text-xs font-medium text-brand-700 transition hover:bg-brand-100 disabled:opacity-50"
               >
@@ -326,7 +347,7 @@ export function PublishPanel({
               {pricingPreview.isError ? (
                 <p className="text-xs text-red-600">{(pricingPreview.error as ApiError).message}</p>
               ) : null}
-              {pricingPreview.data ? <PricingQuoteCard quote={pricingPreview.data} /> : null}
+              {currentPricingPreview ? <PricingQuoteCard quote={currentPricingPreview} /> : null}
             </div>
           </fieldset>
 
@@ -357,7 +378,10 @@ export function PublishPanel({
                 <input
                   type="checkbox"
                   checked={!titleOverride && rewriteTitle}
-                  onChange={(e) => setRewriteTitle(e.target.checked)}
+                  onChange={(e) => {
+                    resetPreflight();
+                    setRewriteTitle(e.target.checked);
+                  }}
                   disabled={!!titleOverride}
                   className="mt-0.5"
                 />
@@ -372,13 +396,16 @@ export function PublishPanel({
                 <input
                   type="checkbox"
                   checked={rewriteDetail}
-                  onChange={(e) => setRewriteDetail(e.target.checked)}
+                  onChange={(e) => {
+                    resetPreflight();
+                    setRewriteDetail(e.target.checked);
+                  }}
                   className="mt-0.5"
                 />
                 <span>
                   <span className="font-medium text-zinc-700">生成结构化详情</span>
                   <span className="ml-1 rounded-full bg-brand-50 px-1.5 py-0.5 text-[10px] font-semibold text-brand-600">
-                    基础版+
+                    需扩容权限
                   </span>
                   <span className="ml-1 text-xs text-zinc-400">3 段以上，自动规避夸大词</span>
                 </span>
@@ -387,7 +414,7 @@ export function PublishPanel({
                 <div className="mb-2 flex items-center gap-2">
                   <span className="text-xs font-medium text-zinc-600">主图处理</span>
                   <span className="rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-600">
-                    专业版+
+                    需扩容权限
                   </span>
                 </div>
                 <div className="space-y-2">
@@ -395,7 +422,10 @@ export function PublishPanel({
                     <input
                       type="checkbox"
                       checked={removeWatermark}
-                      onChange={(e) => setRemoveWatermark(e.target.checked)}
+                      onChange={(e) => {
+                        resetPreflight();
+                        setRemoveWatermark(e.target.checked);
+                      }}
                       className="mt-0.5"
                     />
                     <span>
@@ -407,7 +437,10 @@ export function PublishPanel({
                     <input
                       type="checkbox"
                       checked={relightImages}
-                      onChange={(e) => setRelightImages(e.target.checked)}
+                      onChange={(e) => {
+                        resetPreflight();
+                        setRelightImages(e.target.checked);
+                      }}
                       className="mt-0.5"
                     />
                     <span>
@@ -419,11 +452,12 @@ export function PublishPanel({
                     <span className="text-zinc-500">替换背景</span>
                     <select
                       value={backgroundStyle}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        resetPreflight();
                         setBackgroundStyle(
                           e.target.value as '' | 'white_studio' | 'warm_lifestyle' | 'cool_minimal',
-                        )
-                      }
+                        );
+                      }}
                       className="rounded border border-zinc-200 bg-white px-2 py-1 text-xs outline-none focus:border-brand-500"
                     >
                       <option value="">不替换</option>
@@ -441,37 +475,53 @@ export function PublishPanel({
           </fieldset>
 
           <button
-            onClick={() => publish.mutate()}
+            type="button"
+            onClick={() =>
+              preflight.mutate({
+                request: publishRequest,
+                inputFingerprint: publishInputFingerprint,
+              })
+            }
             disabled={
-              publish.isPending ||
+              preflight.isPending ||
               selected.length === 0 ||
               !pricingInputValid ||
-              !pricingPreview.isSuccess ||
-              !skuReady ||
-              !qualificationsReady
+              !currentPricingPreview
             }
-            className="w-full rounded-xl bg-brand-500 py-2.5 text-sm font-medium text-white transition hover:bg-brand-600 disabled:opacity-50"
+            className="w-full rounded-xl border border-brand-200 bg-brand-50 py-2.5 text-sm font-medium text-brand-700 transition hover:bg-brand-100 disabled:opacity-50"
           >
-            {publish.isPending ? '铺货中…' : `发布到 ${selected.length} 个店铺`}
+            {preflight.isPending ? '检查中…' : '检查发布条件'}
           </button>
-          {!pricingPreview.isSuccess ? (
+          {!currentPricingPreview ? (
             <p className="mt-2 text-xs text-amber-600">
               请先完成售价与利润试算；任何定价策略变化都会要求重新确认。
             </p>
           ) : null}
-          {skuMapping.isLoading ? (
-            <p className="mt-2 text-xs text-zinc-400">正在检查 SKU 映射…</p>
-          ) : null}
-          {skuMapping.data && !skuMapping.data.confirmed ? (
-            <p className="mt-2 text-xs text-amber-600">请先在上方确认抖店 SKU 规格。</p>
-          ) : null}
-          {qualificationsLoading ? (
-            <p className="mt-2 text-xs text-zinc-400">正在检查真实抖店类目资质…</p>
-          ) : null}
-          {qualificationsError ? (
-            <p className="mt-2 text-xs text-amber-600">
-              真实抖店的必填类目资质尚未满足，请先在上方补齐并确认。
+          {preflight.isError ? (
+            <p className="mt-2 text-xs text-red-600" role="alert">
+              {(preflight.error as ApiError).message}
             </p>
+          ) : null}
+          {currentPreflight ? (
+            <PreflightResult
+              checks={currentPreflight.checks}
+              ready={readyToPublish}
+              pricingConfirmationMatches={pricingConfirmationMatches}
+              shops={sellerShops}
+            />
+          ) : null}
+
+          {readyToPublish ? (
+            <button
+              type="button"
+              onClick={() => publish.mutate()}
+              disabled={publish.isPending}
+              className="mt-3 w-full rounded-xl bg-brand-500 py-2.5 text-sm font-medium text-white transition hover:bg-brand-600 disabled:opacity-50"
+            >
+              {publish.isPending
+                ? '铺货中…'
+                : `确认发布到 ${publishRequest.targetShopIds.length} 个店铺`}
+            </button>
           ) : null}
         </>
       )}
@@ -488,8 +538,8 @@ export function PublishPanel({
             >
               {err.message}
               {upgrade && (
-                <a href="/settings" className="ml-1 font-medium underline">
-                  升级套餐 →
+                <a href="/settings#capacity-options" className="ml-1 font-medium underline">
+                  申请内测扩容 →
                 </a>
               )}
             </div>
@@ -560,6 +610,88 @@ export function PublishPanel({
         </div>
       )}
     </div>
+  );
+}
+
+function PreflightResult({
+  checks,
+  ready,
+  pricingConfirmationMatches,
+  shops,
+}: {
+  checks: PublishPreflightCheck[];
+  ready: boolean;
+  pricingConfirmationMatches: boolean;
+  shops: Array<{ id: string; shopName: string | null }>;
+}) {
+  const blockerCount = checks.filter((check) => check.severity === 'blocker').length;
+  const shopNames = new Map(shops.map((shop) => [shop.id, shop.shopName]));
+
+  return (
+    <section
+      aria-label="发布条件检查结果"
+      aria-live="polite"
+      className={`mt-3 rounded-xl border p-3 ${
+        ready ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'
+      }`}
+    >
+      <div className={`text-sm font-medium ${ready ? 'text-green-800' : 'text-amber-900'}`}>
+        {ready
+          ? '发布条件已通过'
+          : blockerCount > 0
+            ? `发现 ${blockerCount} 项发布阻断`
+            : '发布条件暂未通过'}
+      </div>
+      {checks.length > 0 ? (
+        <ul className="mt-2 space-y-2">
+          {checks.map((check, index) => {
+            const shopName = check.shopId
+              ? (shopNames.get(check.shopId) ?? `店铺 ${check.shopId}`)
+              : null;
+            return (
+              <li
+                key={`${check.id}:${check.shopId ?? check.scope ?? 'global'}:${index}`}
+                className="rounded-lg border border-black/5 bg-white/70 px-2.5 py-2 text-xs text-zinc-700"
+              >
+                <div className="flex items-start gap-2">
+                  <span
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                      check.severity === 'blocker'
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-amber-100 text-amber-700'
+                    }`}
+                  >
+                    {check.severity === 'blocker' ? '阻断' : '提醒'}
+                  </span>
+                  <span className="min-w-0 flex-1 leading-5">
+                    {shopName ? <span className="mr-1 font-medium">{shopName}</span> : null}
+                    {check.message}
+                    {check.actionHref ? (
+                      <a
+                        href={check.actionHref}
+                        className="ml-1 font-medium text-brand-700 underline"
+                      >
+                        去处理 →
+                      </a>
+                    ) : null}
+                  </span>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className={`mt-1 text-xs ${ready ? 'text-green-700' : 'text-amber-800'}`}>
+          {ready ? 'SKU、类目、资质、库存与价格均已核对。' : '未获得可确认的发布结果，请重新检查。'}
+        </p>
+      )}
+      {!pricingConfirmationMatches ? (
+        <p className="mt-2 text-xs text-red-700">
+          利润试算与最新货源价格不一致，请重新试算后检查。
+        </p>
+      ) : null}
+      <p className="mt-2 text-[11px] text-zinc-500">提交时服务端仍会再次完整校验。</p>
+    </section>
   );
 }
 

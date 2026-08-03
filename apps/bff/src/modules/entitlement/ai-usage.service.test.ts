@@ -55,9 +55,29 @@ describe('AiUsageService', () => {
   it('does not create a reservation when the monthly quota is exhausted', async () => {
     const fixture = createFixture(500);
 
-    await expect(
-      fixture.service.reservePlatform(1n, 'basic', 'detail', 'qwen-max'),
-    ).rejects.toMatchObject({ status: 402 });
+    const error = (await fixture.service
+      .reservePlatform(1n, 'basic', 'detail', 'qwen-max')
+      .catch((reason: unknown) => reason)) as { status: number; getResponse: () => unknown };
+    expect(error).toMatchObject({ status: 402 });
+    expect(error.getResponse()).toMatchObject({
+      message:
+        '本月 AI 额度已用完（500/500）。可申请内测扩容，或在设置中配置自有 API Key 继续使用。',
+    });
+    expect(fixture.tx.aiUsageLog.create).not.toHaveBeenCalled();
+  });
+
+  it('does not suggest BYOK when image-processing quota is exhausted', async () => {
+    const fixture = createFixture(500);
+
+    const error = (await fixture.service
+      .reservePlatform(1n, 'basic', 'image_compose', 'image-pipeline')
+      .catch((reason: unknown) => reason)) as { status: number; getResponse: () => unknown };
+
+    expect(error).toMatchObject({ status: 402 });
+    expect(error.getResponse()).toMatchObject({
+      message:
+        '本月 AI 额度已用完（500/500）。可申请内测扩容后重试；主图处理不支持使用自有 API Key。',
+    });
     expect(fixture.tx.aiUsageLog.create).not.toHaveBeenCalled();
   });
 

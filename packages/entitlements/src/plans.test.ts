@@ -25,6 +25,28 @@ describe('plans definition', () => {
     for (const f of basic) expect(pro.has(f)).toBe(true);
     for (const f of pro) expect(flagship.has(f)).toBe(true);
   });
+
+  it('only advertises honest beta billing states', () => {
+    const [free, ...unavailable] = listPlans();
+    expect(free).toMatchObject({
+      name: '内测版',
+      billingStatus: 'internal_beta',
+      billingLabel: '邀请内测 · ¥0 / 内测期',
+    });
+    for (const plan of unavailable) {
+      expect(plan).toMatchObject({ billingStatus: 'unavailable', billingLabel: '暂未开放' });
+    }
+  });
+
+  it('describes only implemented capabilities', () => {
+    expect(listPlans().map((plan) => plan.highlight)).toEqual([
+      '基础选品、AI 标题与单店铺货',
+      'AI 详情优化与单商品多店铺货',
+      '主图处理（需图片服务就绪）、目标毛利与竞品区间定价、经营看板',
+      '更高 AI 调用、店铺与铺货额度',
+      'AI 调用、店铺与铺货额度不设上限',
+    ]);
+  });
 });
 
 describe('canUseFeature', () => {
@@ -40,16 +62,16 @@ describe('canUseFeature', () => {
     expect(canUseFeature('free', 'analytics.dashboard')).toBe(false);
   });
 
-  it('pro unlocks image + analytics, flagship unlocks customer service', () => {
+  it('pro unlocks image + analytics and higher plans preserve those features', () => {
     expect(canUseFeature('pro', 'ai.image.watermark')).toBe(true);
     expect(canUseFeature('pro', 'analytics.dashboard')).toBe(true);
-    expect(canUseFeature('pro', 'ai.customer_service')).toBe(false);
-    expect(canUseFeature('flagship', 'ai.customer_service')).toBe(true);
+    expect(canUseFeature('flagship', 'ai.image.watermark')).toBe(true);
   });
 
-  it('enterprise can use everything', () => {
-    expect(canUseFeature('enterprise', 'ai.customer_service')).toBe(true);
-    expect(canUseFeature('enterprise', 'crawler.custom')).toBe(true);
+  it('enterprise can use every implemented feature', () => {
+    for (const feature of getPlan('pro').features) {
+      expect(canUseFeature('enterprise', feature)).toBe(true);
+    }
   });
 });
 
@@ -58,7 +80,7 @@ describe('isPremiumFeature', () => {
     expect(isPremiumFeature('ai.title')).toBe(false);
     expect(isPremiumFeature('product.browse')).toBe(false);
     expect(isPremiumFeature('ai.detail')).toBe(true);
-    expect(isPremiumFeature('ai.customer_service')).toBe(true);
+    expect(isPremiumFeature('publish.batch')).toBe(true);
   });
 });
 
@@ -66,8 +88,8 @@ describe('requiredPlanFor', () => {
   it('returns the cheapest plan that grants the feature', () => {
     expect(requiredPlanFor('ai.title')).toBe('free');
     expect(requiredPlanFor('ai.detail')).toBe('basic');
+    expect(requiredPlanFor('publish.batch')).toBe('basic');
     expect(requiredPlanFor('ai.image.watermark')).toBe('pro');
-    expect(requiredPlanFor('ai.customer_service')).toBe('flagship');
   });
 });
 

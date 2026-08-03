@@ -565,11 +565,13 @@ function DashboardError({ error }: { error: Error }) {
   const locked = error instanceof ApiError && error.code === 'FEATURE_LOCKED';
   return (
     <div className="ledger-panel p-8 text-center">
-      <p className="text-xl font-semibold">{locked ? '专业版功能' : '经营数据暂时不可用'}</p>
+      <p className="text-xl font-semibold">
+        {locked ? '当前内测权限未开放经营分析' : '经营数据暂时不可用'}
+      </p>
       <p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-[var(--muted)]">{error.message}</p>
       {locked ? (
-        <a href="/settings" className="secondary-button mt-5">
-          查看套餐 →
+        <a href="/settings#capacity-options" className="secondary-button mt-5">
+          申请内测扩容 →
         </a>
       ) : null}
     </div>

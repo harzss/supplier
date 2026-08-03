@@ -25,7 +25,7 @@
     "dev": "turbo run dev --parallel",
     "lint": "turbo run lint",
     "test": "turbo run test",
-    "typecheck": "turbo run typecheck",
+    "typecheck": "pnpm --filter @supplier/db prisma:generate && turbo run typecheck",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
     "clean": "turbo run clean && rm -rf node_modules",
     "llm:test": "node scripts/test-llm.mjs",

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { AuthStatus } from '@/components/auth-provider';
+import { ActivationGuide } from '@/components/activation-guide';
 import { isDemoAuthMode } from '@/lib/environment';
 
 const NAV_ITEMS = [
@@ -243,6 +244,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </header>
         <div id="main-content" className="app-content" tabIndex={-1}>
+          <div className="activation-guide-wrap">
+            <ActivationGuide />
+          </div>
           {children}
         </div>
       </section>

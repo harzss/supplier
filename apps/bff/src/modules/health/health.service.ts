@@ -7,7 +7,7 @@ import { AlertService } from '../observability/alert.service';
 
 type DependencyStatus = { status: 'up' } | { status: 'down' };
 
-export const LATEST_REQUIRED_MIGRATION = '20260803173000_secure_supabase_public_schema';
+export const LATEST_REQUIRED_MIGRATION = '20260803200000_add_publish_request_idempotency';
 
 export interface ReadinessResult {
   status: 'ready' | 'unavailable';

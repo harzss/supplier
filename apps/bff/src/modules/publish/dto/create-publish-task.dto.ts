@@ -10,6 +10,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   Max,
   MaxLength,
@@ -86,6 +87,15 @@ export class PublishAiOptionsDto {
 }
 
 export class CreatePublishTaskDto {
+  @IsOptional()
+  @IsUUID()
+  clientRequestId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(4096)
+  pricingPreviewToken?: string;
+
   @IsString()
   sourceProductId!: string;
 

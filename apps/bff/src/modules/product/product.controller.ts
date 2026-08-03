@@ -2,6 +2,7 @@ import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { ProductService, type ProductDto, type RecommendationListDto } from './product.service';
 import { ProductQueryDto } from './dto/product-query.dto';
+import { AuditAction } from '../observability/audit.decorator';
 
 @ApiTags('product')
 @Controller('products')
@@ -21,6 +22,7 @@ export class ProductController {
   }
 
   /** 按 1688 商品 ID 查询详情 */
+  @AuditAction('product.detail.view', 'source_product')
   @Get(':id')
   detail(@Param('id') id: string): Promise<ProductDto> {
     return this.productService.getDetail(id);

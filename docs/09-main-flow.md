@@ -39,6 +39,7 @@ flowchart LR
 | 一键铺货         | ✅ 已通（Mock + 抖店 adapter）  | 演示店走 Mock；OAuth 抖店走 `product.addV2`，真实发布待类目映射与测试店铺联调               |
 | 铺货任务队列     | ✅ 已通                         | PostgreSQL 持久化队列、自动 worker、指数退避、死信、超时恢复与人工重新入队                  |
 | 智能定价         | ✅ 已通                         | 固定加价、目标毛利与竞品对标；试算保本价/利润，结果快照随队列任务持久化                     |
+| 首次铺货向导     | 🔄 应用侧进行中                 | 权威业务事实恢复四步进度；利润试算必经；客户端请求 ID 防重复建任务；待草稿、预检和真实验收  |
 | SKU 属性映射     | ✅ 已通                         | 1688 多 SKU 归一化、用户确认、源变更失效、逐 SKU 定价与抖店多维规格发布                     |
 | 经营数据看板     | ✅ 已通                         | 净 GMV、销售退款核对、采购净成本核销、预计毛利、店铺拆分与热销/滞销动销雷达                 |
 | 收藏 / 选款对比  | ✅ 已通                         | 幂等收藏 API、最多 5 款对比、真实 Supabase 与响应式页面验收完成                             |
@@ -49,7 +50,9 @@ flowchart LR
 | AI 详情 / 主图   | 🔄 开发中                       | 详情链路已完成；主图权益、远程 GPU 流水线编排、托管与铺货接入已完成，待真实 worker 联调     |
 | 真实平台 OAuth   | 🔄 开发中                       | M3-1～5 已完成；M3-6 已增加联调准备度检查，当前环境 0/6 待配置                              |
 
-**2026-08-03 当前结论**：代码门禁已通过 525 项测试、51 项运维脚本测试、lint、typecheck、production build、Prisma、Prettier 与依赖安全审计；BFF、migration 和 Web 三类非 root 镜像已重新构建。staging 已完成 33/33 migration、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF、告警基础 smoke，以及 Redis / 数据库队列非空重启持久性实测。Cloudflare Web 已从超出 CPU 门禁的 OpenNext 方案改为 59 个纯静态 Assets；固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 再验收均通过，Cloudflare API 明确该部署只有 assets、没有可执行 Worker。新旧 Supabase Key 请求头兼容、安全轮换、受控邀请、真实会话和密码转换验收器均已完成；固定读取 owner-only `0600` 环境文件，并对结果未知的 Storage/Auth 会话执行可证明的补偿清理。尚未创建新 Key、重部署或停用 legacy Key，也未发送真实邀请。R0-03 仍缺真实邀请账号生命周期和已授权安装的长期进程守护验收，因此不能宣称生产可用。
+**2026-08-03 当前结论**：当前代码门禁已通过全仓 557 项测试、51 项运维脚本测试、lint 2/2、typecheck 14/14、production build 9/9、Prisma、Prettier 与差异检查；最近一次依赖安全审计为 0 已知漏洞。BFF、migration 和 Web 三类非 root 镜像属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用第 34 个 migration。staging 的 33/33、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF、告警与重启持久性证据也都是新增 migration 前的快照。Cloudflare Web 已从超出 CPU 门禁的 OpenNext 方案改为 59 个纯静态 Assets；固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 再验收均通过，Cloudflare API 明确该部署只有 assets、没有可执行 Worker。新旧 Supabase Key 请求头兼容、安全轮换、受控邀请、真实会话和密码转换验收器均已完成；尚未创建新 Key、重部署或停用 legacy Key，也未发送真实邀请。R0-02/R0-03 仍未关闭，因此不能宣称生产可用。
+
+**2026-08-03 R2-01 增量**：新增 `GET /api/me/activation`，只用当前租户的真实店铺、商品详情审计、利润试算审计和平台商品结果派生四步进度；Web 在所有业务页提供“连接店铺 → 选择货源 → 预览利润 → 完成铺货”的继续入口，已完成桌面与 390×844 响应式检查且无横向溢出，引导链接会定位并自动展开铺货面板。利润试算由服务端签发 30 分钟加密凭证，绑定当前用户、商品、定价策略、SKU 结构与逐 SKU 采购成本；创建任务时固化确认成本和最终售价，Worker 在任何外部发布前再次核对货源定价指纹，变化则 fail-closed，不能静默重算；已全部发布的任务优先按既有平台结果收敛，不受后来缺货或下架影响。`publish_tasks.client_request_id` 在用户内唯一，同键同参恢复原任务、同键异参 409，并提供按请求 ID 查询任务的恢复接口；客户端请求意图包含定价指纹，同一试算重试复用 UUID，成本变化后重新试算会生成新 UUID。新 migration 尚未应用到 staging，完整服务端草稿、OAuth 安全回跳、统一风险预检和真实 5 人无指导验收仍未完成，R2-01 保持进行中。
 
 <details>
 <summary>M1～M67 历史增量台账（其中“当前”均指记录当时，不代表 2026-08-03 状态）</summary>

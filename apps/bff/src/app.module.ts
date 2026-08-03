@@ -19,6 +19,7 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { FavoriteModule } from './modules/favorite/favorite.module';
 import { validateEnvironment } from './config/environment';
 import { ObservabilityModule } from './modules/observability/observability.module';
+import { ActivationModule } from './modules/activation/activation.module';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { ObservabilityModule } from './modules/observability/observability.modul
     SkuModule,
     AnalyticsModule,
     FavoriteModule,
+    ActivationModule,
     AiModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

@@ -15,6 +15,7 @@ import { InventorySyncWorker } from './inventory-sync.worker';
 import { CategoryModule } from '../category/category.module';
 import { PublishedProductController } from './published-product.controller';
 import { PlatformProductLockService } from './platform-product-lock.service';
+import { PricingPreviewReceiptService } from './pricing-preview-receipt.service';
 
 @Module({
   imports: [AiModule, ShopModule, CategoryModule],
@@ -34,6 +35,7 @@ import { PlatformProductLockService } from './platform-product-lock.service';
     InventorySyncService,
     InventorySyncWorker,
     PlatformProductLockService,
+    PricingPreviewReceiptService,
   ],
   exports: [PublishService],
 })

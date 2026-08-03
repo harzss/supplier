@@ -35,6 +35,7 @@ export function ShopsSection() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['shops'] });
       qc.invalidateQueries({ queryKey: ['entitlements'] });
+      qc.invalidateQueries({ queryKey: ['activation'] });
     },
   });
   const authorize = useMutation({
@@ -54,6 +55,7 @@ export function ShopsSection() {
         qc.invalidateQueries({ queryKey: ['entitlements'] }),
         qc.invalidateQueries({ queryKey: ['douyinReadiness'] }),
         qc.invalidateQueries({ queryKey: ['alibaba1688Readiness'] }),
+        qc.invalidateQueries({ queryKey: ['activation'] }),
       ]);
     },
   });
@@ -85,6 +87,7 @@ export function ShopsSection() {
       void qc.invalidateQueries({ queryKey: ['entitlements'] });
       void qc.invalidateQueries({ queryKey: ['douyinReadiness'] });
       void qc.invalidateQueries({ queryKey: ['alibaba1688Readiness'] });
+      void qc.invalidateQueries({ queryKey: ['activation'] });
     } else {
       setFeedback({
         type: 'error',
@@ -99,7 +102,7 @@ export function ShopsSection() {
   }, [qc]);
 
   return (
-    <section className="ledger-panel mt-8 p-5 sm:p-6">
+    <section id="shops" className="ledger-panel mt-8 scroll-mt-24 p-5 sm:p-6">
       <div className="mb-5 flex items-start justify-between gap-4 border-b border-[var(--line)] pb-5">
         <div>
           <div className="mb-1 flex items-center gap-2">

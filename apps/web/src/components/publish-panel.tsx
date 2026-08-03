@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useMutation, useQueries, useQuery } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api, type PricingStrategy } from '@/lib/api';
 
 interface Props {
@@ -22,6 +22,8 @@ export function PublishPanel({
   titlePlatformLabel,
   onClearTitle,
 }: Props) {
+  const queryClient = useQueryClient();
+  const publishRequestIds = useRef(new Map<string, string>());
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [pricingMode, setPricingMode] = useState<PricingStrategy['mode']>('fixed_markup');
@@ -64,8 +66,19 @@ export function PublishPanel({
       (Number(competitorLow) > 0 && Number(competitorHigh) >= Number(competitorLow)));
   const pricingPreview = useMutation({
     mutationFn: () => api.pricingPreview({ sourceProductId, pricingStrategy }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['activation'] }),
   });
-  const sellerShops = shops.data?.filter((shop) => shop.role === 'seller') ?? [];
+
+  useEffect(() => {
+    const openFromHash = () => {
+      if (window.location.hash === '#publish') setOpen(true);
+    };
+    openFromHash();
+    window.addEventListener('hashchange', openFromHash);
+    return () => window.removeEventListener('hashchange', openFromHash);
+  }, [sourceProductId]);
+  const sellerShops =
+    shops.data?.filter((shop) => shop.role === 'seller' && shop.status === 'active') ?? [];
   const skuReady = skuMapping.data?.confirmed === true;
   const selectedRealDouyinShops = sellerShops.filter(
     (shop) =>
@@ -86,10 +99,10 @@ export function PublishPanel({
     (query) => query.isError || (query.data && !query.data.confirmed),
   );
   const publish = useMutation({
-    mutationFn: () =>
-      api.publish({
+    mutationFn: () => {
+      const payload = {
         sourceProductId,
-        targetShopIds: selected,
+        targetShopIds: [...selected].sort(),
         pricingStrategy,
         aiOptions: {
           ...(titleOverride ? { titleOverride } : {}),
@@ -99,7 +112,36 @@ export function PublishPanel({
           relightImages,
           ...(backgroundStyle ? { backgroundStyle } : {}),
         },
-      }),
+      };
+      const requestIdentity = {
+        ...payload,
+        pricingConfirmation: pricingPreview.data
+          ? {
+              costPrice: pricingPreview.data.costPrice,
+              suggestedPrice: pricingPreview.data.suggestedPrice,
+              sourcePricingFingerprint: pricingPreview.data.sourcePricingFingerprint,
+            }
+          : null,
+      };
+      return api.publish({
+        ...payload,
+        pricingPreviewToken: pricingPreview.data?.pricingPreviewToken,
+        clientRequestId: getPublishClientRequestId(
+          sourceProductId,
+          requestIdentity,
+          publishRequestIds.current,
+        ),
+      });
+    },
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['activation'] }),
+        queryClient.invalidateQueries({ queryKey: ['publishTasks'] }),
+      ]),
+    onError: (error) => {
+      const code = (error as ApiError).code;
+      if (code?.startsWith('PRICING_PREVIEW_')) pricingPreview.reset();
+    },
   });
 
   const toggle = (id: string) =>
@@ -109,19 +151,21 @@ export function PublishPanel({
 
   if (!open) {
     return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        disabled={!!unavailableMessage}
-        className="primary-button mt-4 w-full"
-      >
-        {unavailableMessage ?? `一键铺货 · 可售库存 ${totalStock}`}
-      </button>
+      <div id="publish" className="scroll-mt-24">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          disabled={!!unavailableMessage}
+          className="primary-button mt-4 w-full"
+        >
+          {unavailableMessage ?? `一键铺货 · 可售库存 ${totalStock}`}
+        </button>
+      </div>
     );
   }
 
   return (
-    <div className="ledger-panel mt-4 p-6">
+    <div id="publish" className="ledger-panel mt-4 scroll-mt-24 p-6">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-base font-semibold">一键铺货</h2>
         <button
@@ -402,6 +446,7 @@ export function PublishPanel({
               publish.isPending ||
               selected.length === 0 ||
               !pricingInputValid ||
+              !pricingPreview.isSuccess ||
               !skuReady ||
               !qualificationsReady
             }
@@ -409,6 +454,11 @@ export function PublishPanel({
           >
             {publish.isPending ? '铺货中…' : `发布到 ${selected.length} 个店铺`}
           </button>
+          {!pricingPreview.isSuccess ? (
+            <p className="mt-2 text-xs text-amber-600">
+              请先完成售价与利润试算；任何定价策略变化都会要求重新确认。
+            </p>
+          ) : null}
           {skuMapping.isLoading ? (
             <p className="mt-2 text-xs text-zinc-400">正在检查 SKU 映射…</p>
           ) : null}
@@ -448,7 +498,12 @@ export function PublishPanel({
 
       {publish.data && (
         <div className="mt-4 space-y-2">
-          {'queued' in publish.data ? (
+          {'reused' in publish.data ? (
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+              已恢复原铺货任务，没有重复创建。当前状态：{publish.data.status} · 任务 ID：
+              {publish.data.taskId}
+            </div>
+          ) : 'queued' in publish.data ? (
             <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
               铺货任务已进入持久化队列，失败店铺会自动重试。任务 ID：{publish.data.taskId}
             </div>
@@ -542,6 +597,38 @@ function sourceUnavailableMessage(availability: Props['availability']): string |
   if (availability === 'out_of_stock') return '1688 货源已缺货';
   if (availability === 'offline') return '1688 货源已下架';
   return '1688 货源库存不可验证';
+}
+
+function getPublishClientRequestId(
+  sourceProductId: string,
+  payload: unknown,
+  memory: Map<string, string>,
+): string {
+  const fingerprint = JSON.stringify(payload);
+  const remembered = memory.get(fingerprint);
+  if (remembered) return remembered;
+  const storageKey = `supplier.publish.request.${encodeURIComponent(sourceProductId)}`;
+  try {
+    const stored = window.sessionStorage.getItem(storageKey);
+    if (stored) {
+      const parsed = JSON.parse(stored) as { fingerprint?: unknown; id?: unknown };
+      if (parsed.fingerprint === fingerprint && typeof parsed.id === 'string') {
+        memory.set(fingerprint, parsed.id);
+        return parsed.id;
+      }
+    }
+  } catch {
+    // 会话缓存不可用时仍由服务端幂等约束保护当前请求。
+  }
+
+  const id = crypto.randomUUID();
+  memory.set(fingerprint, id);
+  try {
+    window.sessionStorage.setItem(storageKey, JSON.stringify({ fingerprint, id }));
+  } catch {
+    // 隐私模式可能禁用会话缓存；保留本次请求 ID 即可。
+  }
+  return id;
 }
 
 function NumberField({

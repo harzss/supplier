@@ -82,7 +82,8 @@ erDiagram
     }
     PUBLISH_TASK {
         bigint id PK
-        bigint shop_id FK
+        bigint user_id FK
+        string client_request_id UK
         bigint source_product_id FK
         enum status
         json ai_optimized
@@ -252,6 +253,7 @@ CREATE TABLE user_favorites (
 CREATE TABLE publish_tasks (
   id                BIGINT PRIMARY KEY AUTO_INCREMENT,
   user_id           BIGINT NOT NULL,
+  client_request_id CHAR(36), -- 当前 PostgreSQL 为 UUID；同一用户内唯一，用于结果未知时恢复原任务
   source_product_id BIGINT NOT NULL,
   target_shop_ids   JSON,  -- [shop_id1, shop_id2]
   status            ENUM('pending','optimizing','publishing','partial','success','failed') DEFAULT 'pending',
@@ -263,6 +265,7 @@ CREATE TABLE publish_tasks (
   error_msg         TEXT,
   created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
   finished_at       DATETIME,
+  UNIQUE KEY uk_user_client_request (user_id, client_request_id),
   INDEX idx_user_status (user_id, status)
 );
 

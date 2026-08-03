@@ -670,6 +670,261 @@ button:not(:disabled),
   line-height: 1.65;
 }
 
+.activation-guide-wrap {
+  width: min(100%, 90rem);
+  margin: 0 auto;
+  padding: 1.25rem 1rem 0;
+}
+
+.activation-guide-wrap:empty {
+  display: none;
+}
+
+.activation-guide {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 1.25rem;
+  background:
+    radial-gradient(42rem 18rem at 82% -28%, rgb(101 119 255 / 27%), transparent 67%),
+    linear-gradient(145deg, rgb(31 34 43 / 98%), rgb(17 19 25 / 99%));
+  color: #f8f9fb;
+  box-shadow:
+    inset 0 1px rgb(255 255 255 / 8%),
+    0 24px 60px -42px rgb(15 23 42 / 72%);
+}
+
+.activation-guide::after {
+  position: absolute;
+  inset: -8rem -10rem auto auto;
+  width: 20rem;
+  height: 20rem;
+  border-radius: 50%;
+  background: rgb(117 137 255 / 9%);
+  content: '';
+  filter: blur(18px);
+  pointer-events: none;
+}
+
+.activation-guide.is-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-color: var(--material-stroke);
+  background: var(--material-panel);
+  color: var(--ink);
+  padding: 1rem 1.1rem;
+}
+
+.activation-guide-error-copy {
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.activation-guide-summary {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.15rem 1.25rem;
+}
+
+.activation-guide-progress {
+  --activation-progress: 0%;
+  position: relative;
+  display: flex;
+  width: 3.35rem;
+  height: 3.35rem;
+  flex: 0 0 auto;
+  align-items: baseline;
+  justify-content: center;
+  border-radius: 50%;
+  background: conic-gradient(#7386ff var(--activation-progress), rgb(255 255 255 / 12%) 0);
+  padding-top: 1.05rem;
+  color: white;
+  font-variant-numeric: tabular-nums;
+}
+
+.activation-guide-progress::before {
+  position: absolute;
+  inset: 0.2rem;
+  border-radius: 50%;
+  background: #1b1e26;
+  content: '';
+}
+
+.activation-guide-progress span,
+.activation-guide-progress small {
+  position: relative;
+  z-index: 1;
+}
+
+.activation-guide-progress span {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.activation-guide-progress small {
+  color: #9299a8;
+  font-size: 0.62rem;
+  font-weight: 650;
+}
+
+.activation-guide-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.activation-guide-kicker {
+  color: #aeb8ff;
+  font-size: 0.62rem;
+  font-weight: 720;
+  letter-spacing: 0.09em;
+}
+
+.activation-guide-save-state {
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 5%);
+  padding: 0.2rem 0.45rem;
+  color: #8f97a6;
+  font-size: 0.6rem;
+  font-weight: 580;
+}
+
+.activation-guide-title {
+  margin-top: 0.35rem;
+  font-family: var(--font-display);
+  font-size: clamp(1rem, 2vw, 1.25rem);
+  font-weight: 680;
+  letter-spacing: -0.018em;
+}
+
+.activation-guide-description {
+  max-width: 50rem;
+  margin-top: 0.3rem;
+  color: #a3aab8;
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+.activation-guide-action {
+  min-height: 2.75rem;
+  flex: 0 0 auto;
+  gap: 0.55rem;
+  border-color: rgb(255 255 255 / 12%);
+  background: #f7f8fb;
+  color: #151821;
+  box-shadow: 0 10px 24px -16px rgb(0 0 0 / 80%);
+}
+
+.activation-guide-action:hover {
+  background: white;
+  color: #111319;
+}
+
+.activation-guide-steps {
+  position: relative;
+  z-index: 1;
+  border-top: 1px solid rgb(255 255 255 / 7%);
+  background: rgb(0 0 0 / 10%);
+  padding: 0.7rem 1.25rem 0.8rem;
+}
+
+.activation-guide-steps ol {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.activation-guide-steps li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.55rem;
+  border-radius: 0.65rem;
+  padding: 0.4rem 0.45rem;
+  color: #686f7d;
+}
+
+.activation-guide-steps li.is-current {
+  background: rgb(255 255 255 / 6%);
+  color: #f4f5f8;
+}
+
+.activation-guide-steps li.is-complete {
+  color: #adb4c2;
+}
+
+.activation-guide-step-index {
+  display: grid;
+  width: 1.35rem;
+  height: 1.35rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 50%;
+  font-size: 0.58rem;
+  font-weight: 720;
+}
+
+.activation-guide-steps li.is-current .activation-guide-step-index {
+  border-color: #8393ff;
+  background: #6678ed;
+  color: white;
+  box-shadow: 0 0 0 0.2rem rgb(102 120 237 / 14%);
+}
+
+.activation-guide-steps li.is-complete .activation-guide-step-index {
+  border-color: rgb(111 219 177 / 26%);
+  background: rgb(65 170 130 / 16%);
+  color: #7de0b9;
+}
+
+.activation-guide-step-copy {
+  display: block;
+  min-width: 0;
+}
+
+.activation-guide-step-copy strong,
+.activation-guide-step-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activation-guide-step-copy strong {
+  font-size: 0.68rem;
+  font-weight: 640;
+}
+
+.activation-guide-step-copy small {
+  margin-top: 0.1rem;
+  color: #686f7d;
+  font-size: 0.57rem;
+}
+
+.activation-guide-steps li.is-current small,
+.activation-guide-steps li.is-complete small {
+  color: #9198a6;
+}
+
+.activation-guide-recovery {
+  position: relative;
+  z-index: 1;
+  border-top: 1px solid rgb(255 255 255 / 7%);
+  background: rgb(120 88 24 / 12%);
+  padding: 0.65rem 1.25rem;
+  color: #dec88f;
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
 .ledger-panel {
   border: 1px solid var(--material-stroke);
   border-radius: 1rem;
@@ -1125,12 +1380,29 @@ button:not(:disabled),
     padding: 2.25rem 1.75rem 5rem;
   }
 
+  .activation-guide-wrap {
+    padding-inline: 1.75rem;
+  }
+
   .home-intelligence {
     padding: 2rem;
   }
 }
 
 @media (max-width: 1023px) {
+  .activation-guide-summary {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .activation-guide-action {
+    margin-left: 4.35rem;
+  }
+
+  .activation-guide-steps ol {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .app-content button,
   .app-content [role='button'] {
     min-height: 2.75rem;
@@ -1144,6 +1416,38 @@ button:not(:disabled),
 }
 
 @media (max-width: 639px) {
+  .activation-guide-summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 1rem;
+  }
+
+  .activation-guide-save-state {
+    display: none;
+  }
+
+  .activation-guide-action {
+    grid-column: 1 / -1;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .activation-guide-steps {
+    padding: 0.65rem 0.75rem 0.75rem;
+  }
+
+  .activation-guide-steps ol {
+    gap: 0.3rem;
+  }
+
+  .activation-guide-steps li {
+    padding: 0.4rem 0.35rem;
+  }
+
+  .activation-guide-recovery {
+    padding-inline: 1rem;
+  }
+
   input,
   select,
   textarea {
@@ -1174,6 +1478,10 @@ button:not(:disabled),
 
   .app-page {
     padding: 2.75rem 2rem 6rem;
+  }
+
+  .activation-guide-wrap {
+    padding: 1.5rem 2rem 0;
   }
 }
 

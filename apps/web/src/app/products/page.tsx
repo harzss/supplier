@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type Product } from '@/lib/api';
 import { ScoreRadar } from '@/components/score-radar';
 import { ScoreBadge } from '@/components/score-badge';
@@ -22,6 +22,7 @@ export default function ProductDetailPage() {
 }
 
 function ProductDetailContent() {
+  const queryClient = useQueryClient();
   const id = useSearchParams().get('id')?.trim() ?? '';
   const [selectedTitle, setSelectedTitle] = useState<{
     title: string;
@@ -33,6 +34,10 @@ function ProductDetailContent() {
     queryFn: () => api.productDetail(id),
     enabled: Boolean(id),
   });
+  useEffect(() => {
+    if (!data) return;
+    void queryClient.invalidateQueries({ queryKey: ['activation'] });
+  }, [data, queryClient]);
 
   return (
     <main className="app-page app-page-narrow">

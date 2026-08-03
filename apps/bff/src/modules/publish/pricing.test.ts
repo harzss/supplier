@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { describe, expect, it } from 'vitest';
-import { calculatePricing } from './pricing';
+import { calculatePricing, pricingSnapshot } from './pricing';
 
 describe('calculatePricing', () => {
   it('keeps fixed markup behavior and exposes the real break-even price', () => {
@@ -66,5 +66,14 @@ describe('calculatePricing', () => {
     } as never);
 
     expect(quote.suggestedPrice).toBe(19.99);
+  });
+
+  it('persists the confirmed cost and final price in the queue snapshot', () => {
+    const quote = calculatePricing(10, { mode: 'fixed_markup', markupRatio: 0.5 });
+
+    expect(pricingSnapshot({ mode: 'fixed_markup', markupRatio: 0.5 }, quote)).toMatchObject({
+      costPrice: 10,
+      finalPrice: 15,
+    });
   });
 });

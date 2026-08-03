@@ -319,8 +319,38 @@ export interface PublishTaskResult {
 
 export interface PublishTaskAccepted {
   taskId: string;
-  status: 'pending';
+  status: string;
   queued: true;
+}
+
+export interface PublishTaskReplay {
+  taskId: string;
+  status: string;
+  queued: boolean;
+  reused: true;
+}
+
+export type ActivationStepKey =
+  | 'connect_shop'
+  | 'select_product'
+  | 'preview_pricing'
+  | 'publish_product';
+
+export interface ActivationStep {
+  key: ActivationStepKey;
+  title: string;
+  description: string;
+  href: string;
+  completedAt: string | null;
+  readyNow: boolean;
+}
+
+export interface ActivationProgress {
+  currentStep: ActivationStepKey | null;
+  nextHref: string;
+  completedSteps: number;
+  totalSteps: number;
+  steps: ActivationStep[];
 }
 
 export interface PublishedItem {
@@ -410,6 +440,12 @@ export interface PricingQuote {
   estimatedMargin: number;
   competitorPriceRange: [number, number] | null;
   warning: string | null;
+}
+
+export interface PricingPreviewResult extends PricingQuote {
+  pricingPreviewToken: string;
+  pricingPreviewExpiresAt: string;
+  sourcePricingFingerprint: string;
 }
 
 export interface OrderPurchase {
@@ -589,6 +625,10 @@ export const api = {
 
   entitlements(): Promise<EntitlementView> {
     return request('/me/entitlements');
+  },
+
+  activation(): Promise<ActivationProgress> {
+    return request('/me/activation');
   },
 
   getLlmKey(): Promise<LlmKeyView> {
@@ -785,6 +825,8 @@ export const api = {
   },
 
   publish(body: {
+    clientRequestId?: string;
+    pricingPreviewToken?: string;
     sourceProductId: string;
     targetShopIds: string[];
     pricingStrategy?: PricingStrategy;
@@ -796,14 +838,14 @@ export const api = {
       relightImages?: boolean;
       backgroundStyle?: 'white_studio' | 'warm_lifestyle' | 'cool_minimal';
     };
-  }): Promise<PublishTaskResult | PublishTaskAccepted> {
+  }): Promise<PublishTaskResult | PublishTaskAccepted | PublishTaskReplay> {
     return request('/publish-tasks', { method: 'POST', body: JSON.stringify(body) });
   },
 
   pricingPreview(body: {
     sourceProductId: string;
     pricingStrategy: PricingStrategy;
-  }): Promise<PricingQuote> {
+  }): Promise<PricingPreviewResult> {
     return request('/publish-tasks/pricing-preview', {
       method: 'POST',
       body: JSON.stringify(body),

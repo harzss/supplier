@@ -105,6 +105,7 @@ export function pricingSnapshot(
   return {
     mode: quote.mode,
     ...(strategy ?? {}),
+    costPrice: quote.costPrice,
     finalPrice: quote.suggestedPrice,
     breakEvenPrice: quote.breakEvenPrice,
     estimatedProfit: quote.estimatedProfit,

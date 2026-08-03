@@ -332,6 +332,7 @@ enum PublishJobStatus {
 model PublishTask {
   id                            BigInt            @id @default(autoincrement())
   userId                        BigInt            @map("user_id")
+  clientRequestId               String?           @map("client_request_id") @db.Uuid
   sourceProductId               BigInt            @map("source_product_id")
   targetShopIds                 Json              @map("target_shop_ids") @db.JsonB
   status                        PublishTaskStatus @default(pending)
@@ -351,6 +352,7 @@ model PublishTask {
   publishedProducts PublishedProduct[]
   job               PublishJob?
 
+  @@unique([userId, clientRequestId], map: "uk_publish_tasks_user_client_request")
   @@index([userId, status])
   @@map("publish_tasks")
 }

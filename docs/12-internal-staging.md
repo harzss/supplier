@@ -114,7 +114,7 @@ pnpm audit:supabase-boundary
 
 完成标准：仓库 migration 全部 applied，0 unfinished、0 rolled back、checksum 全匹配，live schema diff 为空。BFF/Redis readiness 属于下一节环境 smoke，不作为数据库审计的循环前置条件。
 
-2026-08-03 当前证据：PostgreSQL 17.6，33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。
+2026-08-03 审计快照：PostgreSQL 17.6，当时仓库 33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。此后 R2-01 新增第 34 个 `20260803200000_add_publish_request_idempotency`；尚未执行 staging migration，因此部署新代码前必须重新完成本节备份、预检、应用和 34/34 审计。
 
 ## 4. 部署 Cloudflare staging gateway
 

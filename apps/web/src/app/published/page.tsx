@@ -55,12 +55,18 @@ export default function PublishedPage() {
     },
   });
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / PUBLISH_PAGE_SIZE));
+  const hasPublishedProduct =
+    data?.items.some((task) => task.items.some((item) => Boolean(item.platformProductId))) ?? false;
 
   useEffect(() => {
     if (data?.total === undefined) return;
     const lastPage = Math.max(1, Math.ceil(data.total / PUBLISH_PAGE_SIZE));
     setPage((current) => Math.min(current, lastPage));
   }, [data?.total]);
+  useEffect(() => {
+    if (!hasPublishedProduct) return;
+    void qc.invalidateQueries({ queryKey: ['activation'] });
+  }, [hasPublishedProduct, qc]);
   const simulate = useMutation({
     mutationFn: (publishedProductId: string) => api.simulateOrder(publishedProductId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['orders'] }),

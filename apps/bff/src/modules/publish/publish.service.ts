@@ -46,6 +46,11 @@ import { isPublishJobLeaseError, type PublishExecutionLease } from './publish-jo
 import { publishMaxAttempts } from './publish-queue.config';
 import { PlatformProductLockService } from './platform-product-lock.service';
 import {
+  PricingPreviewReceiptService,
+  type PricingPreviewReceipt,
+} from './pricing-preview-receipt.service';
+import { pricingSourceFingerprint } from './pricing-source-fingerprint';
+import {
   buildSkuSuggestion,
   materializeConfirmedSkus,
   parseConfirmedSkuMapping,
@@ -81,6 +86,15 @@ export interface PublishTaskAccepted {
   taskId: string;
   status: 'pending';
   queued: true;
+}
+
+export type PricingPreviewResult = PricingQuote & PricingPreviewReceipt;
+
+export interface PublishTaskReplay {
+  taskId: string;
+  status: string;
+  queued: boolean;
+  reused: true;
 }
 
 export interface PublishedItem {
@@ -154,6 +168,12 @@ type SourceProductForPublish = Prisma.SourceProductGetPayload<{ include: { score
 type ShopForPublish = Prisma.ShopGetPayload<Record<string, never>>;
 type PublishTaskRecord = Prisma.PublishTaskGetPayload<Record<string, never>>;
 type SkuMappingForPublish = Prisma.ProductSkuMappingGetPayload<Record<string, never>>;
+type IdempotentPublishTask = Prisma.PublishTaskGetPayload<{
+  include: {
+    sourceProduct: { select: { productId1688: true; price: true } };
+    job: { select: { id: true } };
+  };
+}>;
 type QueuedTask = Prisma.PublishTaskGetPayload<{
   include: {
     user: true;
@@ -171,6 +191,10 @@ interface PreparedPublish {
   existingSuccessCount: number;
   totalTargetShopCount: number;
 }
+
+type PreparePublishResult =
+  | { kind: 'prepared'; value: PreparedPublish }
+  | { kind: 'replayed'; value: PublishTaskReplay };
 
 @Injectable()
 export class PublishService {
@@ -190,6 +214,7 @@ export class PublishService {
     private readonly assetStorage: AssetStorageService,
     private readonly imagePipeline: ImagePipelineService,
     private readonly platformProductLocks: PlatformProductLockService,
+    private readonly pricingPreviewReceipts: PricingPreviewReceiptService,
     config: ConfigService,
   ) {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
@@ -197,15 +222,23 @@ export class PublishService {
   }
 
   /** 主流程：选品 → AI 优化 → 定价 → 按店铺选择平台 adapter 发布 → 落库 */
-  async create(user: CurrentUser, dto: CreatePublishTaskDto): Promise<PublishTaskResult> {
-    const prepared = await this.prepare(user, dto, 'optimizing');
-    return this.executePrepared(user, dto, prepared);
+  async create(
+    user: CurrentUser,
+    dto: CreatePublishTaskDto,
+  ): Promise<PublishTaskResult | PublishTaskReplay> {
+    const result = await this.prepare(user, dto, 'optimizing');
+    if (result.kind === 'replayed') return result.value;
+    return this.executePrepared(user, dto, result.value);
   }
 
   /** 数据库队列模式：先完成权限、资源和额度校验，再持久化待执行任务。 */
-  async enqueue(user: CurrentUser, dto: CreatePublishTaskDto): Promise<PublishTaskAccepted> {
-    const prepared = await this.prepare(user, dto, 'pending');
-    return { taskId: prepared.task.id.toString(), status: 'pending', queued: true };
+  async enqueue(
+    user: CurrentUser,
+    dto: CreatePublishTaskDto,
+  ): Promise<PublishTaskAccepted | PublishTaskReplay> {
+    const result = await this.prepare(user, dto, 'pending');
+    if (result.kind === 'replayed') return result.value;
+    return { taskId: result.value.task.id.toString(), status: 'pending', queued: true };
   }
 
   /** 队列 worker 执行或续跑任务；已成功店铺不会重复发布。 */
@@ -221,7 +254,6 @@ export class PublishService {
     });
     await assertPublishExecutionOwned(lease);
     if (!queuedTask) throw new NotFoundException('铺货任务不存在');
-    assertSourceAvailable(queuedTask.sourceProduct);
 
     const targetShopIds = jsonStringArray(queuedTask.targetShopIds);
     if (!targetShopIds.length) throw new BadRequestException('铺货任务缺少目标店铺');
@@ -238,6 +270,11 @@ export class PublishService {
       await assertPublishExecutionOwned(lease);
       return completedResult(queuedTask);
     }
+    assertSourceAvailable(queuedTask.sourceProduct);
+    assertPreviewPricingUnchanged(
+      queuedTask.pricingStrategy ?? undefined,
+      queuedTask.sourceProduct,
+    );
 
     const shops = await this.prisma.shop.findMany({
       where: {
@@ -364,21 +401,35 @@ export class PublishService {
     );
   }
 
-  async previewPricing(user: CurrentUser, dto: PricingPreviewDto): Promise<PricingQuote> {
+  async previewPricing(user: CurrentUser, dto: PricingPreviewDto): Promise<PricingPreviewResult> {
     this.assertPricingFeature(user, dto.pricingStrategy);
     const product = await this.prisma.sourceProduct.findUnique({
       where: { productId1688: dto.sourceProductId },
     });
     if (!product) throw new NotFoundException('货源不存在');
     assertSourceAvailable(product);
-    return calculatePricing(Number(product.price), dto.pricingStrategy);
+    const costPrice = Number(product.price);
+    const sourcePricingFingerprint = pricingSourceFingerprint(product);
+    return {
+      ...calculatePricing(costPrice, dto.pricingStrategy),
+      ...this.pricingPreviewReceipts.issue({
+        userId: user.userId,
+        sourceProductId: dto.sourceProductId,
+        pricingStrategy: dto.pricingStrategy,
+        costPrice,
+        sourcePricingFingerprint,
+      }),
+    };
   }
 
   private async prepare(
     user: CurrentUser,
     dto: CreatePublishTaskDto,
     initialStatus: 'pending' | 'optimizing',
-  ): Promise<PreparedPublish> {
+  ): Promise<PreparePublishResult> {
+    const replay = await this.findIdempotentReplay(user.userId, dto);
+    if (replay) return { kind: 'replayed', value: replay };
+
     const multi = dto.targetShopIds.length > 1;
     this.entitlement.assertFeature(user.plan, multi ? 'publish.batch' : 'publish.single');
     this.assertPricingFeature(user, dto.pricingStrategy);
@@ -401,7 +452,16 @@ export class PublishService {
     });
     if (!product) throw new NotFoundException('货源不存在');
     assertSourceAvailable(product);
-    calculatePricing(Number(product.price), dto.pricingStrategy);
+    const costPrice = Number(product.price);
+    const sourcePricingFingerprint = pricingSourceFingerprint(product);
+    const previewedPricing = calculatePricing(costPrice, dto.pricingStrategy);
+    this.pricingPreviewReceipts.assertValid(dto.pricingPreviewToken, {
+      userId: user.userId,
+      sourceProductId: dto.sourceProductId,
+      pricingStrategy: dto.pricingStrategy,
+      costPrice,
+      sourcePricingFingerprint,
+    });
 
     const shopIds = dto.targetShopIds.map((s) => BigInt(s));
     const shops = await this.prisma.shop.findMany({
@@ -462,36 +522,91 @@ export class PublishService {
 
     const taskData: Prisma.PublishTaskUncheckedCreateInput = {
       userId: user.userId,
+      clientRequestId: dto.clientRequestId,
       sourceProductId: product.id,
       targetShopIds: dto.targetShopIds,
       status: initialStatus,
       aiOptions: (dto.aiOptions ?? undefined) as Prisma.InputJsonValue,
-      pricingStrategy: (dto.pricingStrategy ?? undefined) as unknown as Prisma.InputJsonValue,
+      pricingStrategy: confirmedPricingSnapshot(
+        dto.pricingStrategy,
+        previewedPricing,
+        sourcePricingFingerprint,
+      ) as Prisma.InputJsonValue,
       skuSnapshot: skuSnapshot as unknown as Prisma.InputJsonValue,
       categoryPropertySnapshot: categoryPropertySnapshot as unknown as Prisma.InputJsonValue,
       categoryQualificationSnapshot:
         categoryQualificationSnapshot as unknown as Prisma.InputJsonValue,
       publishExternalIds: createPublishExternalIds(shops) as Prisma.InputJsonValue,
     };
-    const task =
-      initialStatus === 'pending'
-        ? await this.prisma.$transaction(async (tx) => {
-            const created = await tx.publishTask.create({ data: taskData });
-            await tx.publishJob.create({
-              data: { taskId: created.id, maxAttempts: this.queueMaxAttempts },
-            });
-            return created;
-          })
-        : await this.prisma.publishTask.create({ data: taskData });
+    let task: PublishTaskRecord;
+    try {
+      task =
+        initialStatus === 'pending'
+          ? await this.prisma.$transaction(async (tx) => {
+              const created = await tx.publishTask.create({ data: taskData });
+              await tx.publishJob.create({
+                data: { taskId: created.id, maxAttempts: this.queueMaxAttempts },
+              });
+              return created;
+            })
+          : await this.prisma.publishTask.create({ data: taskData });
+    } catch (error) {
+      if (dto.clientRequestId && isPrismaUniqueConstraintError(error)) {
+        const concurrentReplay = await this.findIdempotentReplay(user.userId, dto);
+        if (concurrentReplay) return { kind: 'replayed', value: concurrentReplay };
+      }
+      throw error;
+    }
 
     return {
-      product,
-      shops,
-      categoryIdByPlatform,
-      skuMappingByPlatform,
-      task,
-      existingSuccessCount: 0,
-      totalTargetShopCount: shops.length,
+      kind: 'prepared',
+      value: {
+        product,
+        shops,
+        categoryIdByPlatform,
+        skuMappingByPlatform,
+        task,
+        existingSuccessCount: 0,
+        totalTargetShopCount: shops.length,
+      },
+    };
+  }
+
+  private async findIdempotentReplay(
+    userId: bigint,
+    dto: CreatePublishTaskDto,
+  ): Promise<PublishTaskReplay | null> {
+    if (!dto.clientRequestId) return null;
+    const task = await this.prisma.publishTask.findFirst({
+      where: { userId, clientRequestId: dto.clientRequestId },
+      include: {
+        sourceProduct: { select: { productId1688: true, price: true } },
+        job: { select: { id: true } },
+      },
+    });
+    if (!task) return null;
+
+    if (!this.demoMode) {
+      const targetShopIds = jsonStringArray(task.targetShopIds).map((id) => BigInt(id));
+      const visibleShopCount = targetShopIds.length
+        ? await this.prisma.shop.count({
+            where: {
+              id: { in: targetShopIds },
+              userId,
+              role: 'seller',
+              ...runtimeShopWhere(this.demoMode),
+            },
+          })
+        : 0;
+      if (visibleShopCount === 0) throw new NotFoundException('任务不存在');
+    }
+
+    assertSameIdempotentRequest(task, dto);
+    return {
+      taskId: task.id.toString(),
+      status: task.status,
+      queued: task.job !== null,
+      reused: true,
     };
   }
 
@@ -543,6 +658,7 @@ export class PublishService {
     const categoryPropertySnapshot = jsonRecord(task.categoryPropertySnapshot) ?? {};
     const categoryQualificationSnapshot = jsonRecord(task.categoryQualificationSnapshot) ?? {};
     assertSourceAvailable(product);
+    assertPreviewPricingUnchanged(task.pricingStrategy ?? undefined, product);
     const wantDetail = dto.aiOptions?.rewriteDetail === true;
     const imageOperations = resolveMainImageOperations(dto);
     const wantMainImage = wantsMainImageProcessing(imageOperations);
@@ -698,8 +814,16 @@ export class PublishService {
       await this.checkpointAi(task.id, aiCheckpoint, lease);
     }
 
-    // 10. 定价
-    const costPrice = Number(product.price);
+    // 10. 发布前再次核对采购价；排队或 AI 处理期间变化时禁止静默重算。
+    await assertPublishExecutionOwned(lease);
+    const currentProduct = await this.prisma.sourceProduct.findUnique({
+      where: { id: product.id },
+      select: { price: true, skuList: true },
+    });
+    await assertPublishExecutionOwned(lease);
+    if (!currentProduct) throw new NotFoundException('货源不存在');
+    const costPrice = Number(currentProduct.price);
+    assertPreviewPricingUnchanged(task.pricingStrategy ?? undefined, currentProduct);
     const pricing = calculatePricing(costPrice, dto.pricingStrategy);
     const salePrice = pricing.suggestedPrice;
     const skuSnapshot = refreshSkuSnapshotStocks(
@@ -710,7 +834,7 @@ export class PublishService {
         dto.pricingStrategy,
         task.skuSnapshot,
       ),
-      product.skuList,
+      currentProduct.skuList,
     );
     const mockCategoryId = `mock-cat-${product.categoryL1 ?? 'general'}`;
     const detailImages = jsonStringArray(product.detailImages);
@@ -722,7 +846,11 @@ export class PublishService {
       where: { id: task.id },
       data: {
         status: 'publishing',
-        pricingStrategy: pricingSnapshot(dto.pricingStrategy, pricing) as Prisma.InputJsonValue,
+        pricingStrategy: confirmedPricingSnapshot(
+          dto.pricingStrategy,
+          pricing,
+          previewSourcePricingFingerprint(task.pricingStrategy),
+        ) as Prisma.InputJsonValue,
         skuSnapshot: skuSnapshot as unknown as Prisma.InputJsonValue,
       },
     });
@@ -1244,6 +1372,28 @@ export class PublishService {
     return toSummary(task);
   }
 
+  /** 通过客户端请求标识恢复当前用户的铺货任务。 */
+  async detailByClientRequestId(
+    user: CurrentUser,
+    clientRequestId: string,
+  ): Promise<PublishTaskSummary> {
+    const visibilityWhere = await this.publishTaskVisibilityWhere(user.userId);
+    if (!visibilityWhere) throw new NotFoundException('任务不存在');
+    const task = await this.prisma.publishTask.findFirst({
+      where: { clientRequestId, ...visibilityWhere },
+      include: {
+        publishedProducts: {
+          ...(this.demoMode ? {} : { where: { shop: runtimeShopWhere(this.demoMode) } }),
+          include: { shop: true },
+        },
+        sourceProduct: true,
+        job: true,
+      },
+    });
+    if (!task) throw new NotFoundException('任务不存在');
+    return toSummary(task);
+  }
+
   /** 当前用户的铺货记录（完整分页；生产身份模式排除历史演示目标店铺）。 */
   async list(user: CurrentUser, page: number, pageSize: number): Promise<PublishTaskPage> {
     const where = await this.publishTaskVisibilityWhere(user.userId);
@@ -1288,6 +1438,85 @@ export class PublishService {
       })),
     };
   }
+}
+
+function assertSameIdempotentRequest(task: IdempotentPublishTask, dto: CreatePublishTaskDto): void {
+  const sameSource = task.sourceProduct.productId1688 === dto.sourceProductId;
+  const storedTargets = [...jsonStringArray(task.targetShopIds)].sort();
+  const requestedTargets = [...dto.targetShopIds].sort();
+  const sameTargets =
+    storedTargets.length === requestedTargets.length &&
+    storedTargets.every((target, index) => target === requestedTargets[index]);
+  const storedPricing = pricingInput(
+    (task.pricingStrategy ?? undefined) as CreatePublishTaskDto['pricingStrategy'],
+  );
+  const samePricing = equivalentJson(
+    calculatePricing(Number(task.sourceProduct.price), storedPricing),
+    calculatePricing(Number(task.sourceProduct.price), dto.pricingStrategy),
+  );
+  const sameAiOptions = equivalentJson(task.aiOptions, dto.aiOptions);
+  if (sameSource && sameTargets && samePricing && sameAiOptions) return;
+  throw new ConflictException('该请求标识已用于不同的铺货参数，请生成新的请求标识后重试');
+}
+
+function assertPreviewPricingUnchanged(
+  snapshot: Prisma.JsonValue | undefined,
+  source: { price: unknown; skuList: unknown },
+): void {
+  const value = previewCostPrice(snapshot);
+  const expectedFingerprint = previewSourcePricingFingerprint(snapshot);
+  if (value === null || !expectedFingerprint) {
+    throw new ConflictException({
+      code: 'PRICING_PREVIEW_MISSING',
+      message: '铺货任务缺少已确认的成本快照，请重新完成利润试算并创建新任务',
+    });
+  }
+  const currentCost = Number(source.price);
+  const costMatches = Math.round(value * 100) === Math.round(currentCost * 100);
+  const fingerprintMatches = expectedFingerprint === pricingSourceFingerprint(source);
+  if (costMatches && fingerprintMatches) return;
+  throw new ConflictException({
+    code: 'PRICING_PREVIEW_STALE',
+    message: '1688 采购价已变化，请返回商品重新完成利润试算并创建新任务',
+  });
+}
+
+function confirmedPricingSnapshot(
+  strategy: PricingStrategyDto | undefined,
+  quote: PricingQuote,
+  sourcePricingFingerprint: string,
+): Record<string, unknown> {
+  return { ...pricingSnapshot(strategy, quote), sourcePricingFingerprint };
+}
+
+function previewCostPrice(snapshot: Prisma.JsonValue | null | undefined): number | null {
+  const value = jsonRecord(snapshot ?? undefined)?.costPrice;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function previewSourcePricingFingerprint(snapshot: Prisma.JsonValue | null | undefined): string {
+  const value = jsonRecord(snapshot ?? undefined)?.sourcePricingFingerprint;
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : '';
+}
+
+function equivalentJson(left: unknown, right: unknown): boolean {
+  if (left == null && right == null) return true;
+  return JSON.stringify(normalizeJson(left)) === JSON.stringify(normalizeJson(right));
+}
+
+function normalizeJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeJson);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, normalizeJson(entry)]),
+  );
+}
+
+function isPrismaUniqueConstraintError(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error && error.code === 'P2002';
 }
 
 function realDouyinCategoryTargets(
@@ -1546,7 +1775,7 @@ function assertSourceAvailable(
 function storedPricingQuote(task: TaskWithRelations): PricingQuote | null {
   try {
     return calculatePricing(
-      Number(task.sourceProduct.price),
+      previewCostPrice(task.pricingStrategy) ?? Number(task.sourceProduct.price),
       (task.pricingStrategy ?? undefined) as unknown as PricingStrategyDto | undefined,
     );
   } catch {
@@ -1763,7 +1992,10 @@ function taskDto(task: QueuedTask): CreatePublishTaskDto {
 
 function completedResult(task: QueuedTask): PublishTaskResult {
   const dto = taskDto(task);
-  const pricing = calculatePricing(Number(task.sourceProduct.price), dto.pricingStrategy);
+  const pricing = calculatePricing(
+    previewCostPrice(task.pricingStrategy) ?? Number(task.sourceProduct.price),
+    dto.pricingStrategy,
+  );
   const aiOptimized = jsonRecord(task.aiOptimized ?? undefined);
   const mainImageUrl = stringOrNull(aiOptimized?.mainImageUrl);
   const detailHtml = stringOrNull(aiOptimized?.detailHtml);

@@ -51,6 +51,7 @@ import {
   type PricingPreviewReceipt,
 } from './pricing-preview-receipt.service';
 import { pricingSourceFingerprint } from './pricing-source-fingerprint';
+import { PublishDraftService } from './publish-draft.service';
 import {
   buildSkuSuggestion,
   materializeConfirmedSkus,
@@ -233,6 +234,7 @@ export class PublishService {
     private readonly imagePipeline: ImagePipelineService,
     private readonly platformProductLocks: PlatformProductLockService,
     private readonly pricingPreviewReceipts: PricingPreviewReceiptService,
+    private readonly publishDrafts: PublishDraftService,
     config: ConfigService,
   ) {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
@@ -857,12 +859,17 @@ export class PublishService {
     let task: PublishTaskRecord;
     try {
       task =
-        initialStatus === 'pending'
+        initialStatus === 'pending' || dto.draftRevision !== undefined
           ? await this.prisma.$transaction(async (tx) => {
               const created = await tx.publishTask.create({ data: taskData });
-              await tx.publishJob.create({
-                data: { taskId: created.id, maxAttempts: this.queueMaxAttempts },
-              });
+              if (dto.draftRevision !== undefined) {
+                await this.publishDrafts.consumeForPublish(tx, user.userId, dto);
+              }
+              if (initialStatus === 'pending') {
+                await tx.publishJob.create({
+                  data: { taskId: created.id, maxAttempts: this.queueMaxAttempts },
+                });
+              }
               return created;
             })
           : await this.prisma.publishTask.create({ data: taskData });

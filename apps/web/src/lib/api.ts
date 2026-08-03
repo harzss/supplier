@@ -352,6 +352,27 @@ export interface PublishPreflightRequest {
 
 export interface PublishRequest extends PublishPreflightRequest {
   clientRequestId?: string;
+  draftRevision?: number;
+}
+
+export interface PublishDraftView {
+  clientRequestId: string;
+  sourceProductId: string;
+  targetShopIds: string[];
+  pricingStrategy: PricingStrategy | null;
+  aiOptions: PublishAiOptions | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SavePublishDraftRequest {
+  expectedRevision: number;
+  expectedClientRequestId?: string;
+  sourceProductId: string;
+  targetShopIds: string[];
+  pricingStrategy?: PricingStrategy;
+  aiOptions?: PublishAiOptions;
 }
 
 export interface PublishPreflightCheck {
@@ -869,6 +890,29 @@ export const api = {
     body: PublishRequest,
   ): Promise<PublishTaskResult | PublishTaskAccepted | PublishTaskReplay> {
     return request('/publish-tasks', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  publishTaskByClientRequestId(clientRequestId: string): Promise<PublishTaskSummary> {
+    return request(`/publish-tasks/by-client-request/${encodeURIComponent(clientRequestId)}`);
+  },
+
+  publishDraft(): Promise<PublishDraftView | null> {
+    return request('/publish-drafts/current');
+  },
+
+  savePublishDraft(body: SavePublishDraftRequest): Promise<PublishDraftView> {
+    return request('/publish-drafts/current', { method: 'PUT', body: JSON.stringify(body) });
+  },
+
+  deletePublishDraft(
+    expectedRevision: number,
+    expectedClientRequestId: string,
+  ): Promise<{ deleted: true }> {
+    const params = new URLSearchParams({
+      expectedRevision: String(expectedRevision),
+      expectedClientRequestId,
+    });
+    return request(`/publish-drafts/current?${params.toString()}`, { method: 'DELETE' });
   },
 
   publishPreflight(body: PublishPreflightRequest): Promise<PublishPreflightResult> {

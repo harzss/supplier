@@ -20,6 +20,7 @@ interface HttpRequest {
   ip?: string;
   headers: Record<string, string | string[] | undefined>;
   params?: Record<string, unknown>;
+  body?: unknown;
   routeOptions?: { url?: string };
   routerPath?: string;
   currentUser?: CurrentUser;
@@ -106,12 +107,22 @@ function auditBase(
     method,
     route,
     resourceType: metadata?.resourceType ?? resourceType(route),
-    resourceId: resourceId(params),
+    resourceId:
+      resourceIdFromBody(request.body, metadata?.resourceIdBodyField) ?? resourceId(params),
     requestId,
     ip: request.ip,
     userAgent: header(request.headers['user-agent']),
     metadata: Object.keys(params).length ? { params } : undefined,
   };
+}
+
+function resourceIdFromBody(body: unknown, field: string | undefined): string | undefined {
+  if (!field || !body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const value = (body as Record<string, unknown>)[field];
+  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'bigint') {
+    return undefined;
+  }
+  return truncate(String(value), 128);
 }
 
 function defaultAction(method: string, route: string): string {

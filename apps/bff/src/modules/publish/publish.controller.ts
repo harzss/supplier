@@ -28,7 +28,7 @@ export class PublishController {
   }
 
   @Post('pricing-preview')
-  @AuditAction('publish.pricing.preview', 'source_product')
+  @AuditAction('publish.pricing.preview', 'source_product', 'sourceProductId')
   pricingPreview(@CurrentUser() user: CurrentUserType, @Body() dto: PricingPreviewDto) {
     return this.publishService.previewPricing(user, dto);
   }

@@ -7,6 +7,7 @@ import {
   IsArray,
   IsBoolean,
   IsIn,
+  IsInt,
   IsNumber,
   IsOptional,
   IsString,
@@ -16,6 +17,7 @@ import {
   Min,
   registerDecorator,
   type ValidationOptions,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { MAIN_IMAGE_BACKGROUND_STYLES, type MainImageBackgroundStyle } from '../main-image.types';
@@ -91,9 +93,18 @@ export class PublishAiOptionsDto {
 }
 
 export class CreatePublishTaskDto {
-  @IsOptional()
+  @ValidateIf(
+    (dto: CreatePublishTaskDto, value: unknown) =>
+      value !== undefined || dto.draftRevision !== undefined,
+  )
   @IsUUID()
   clientRequestId?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(2_147_483_647)
+  draftRevision?: number;
 
   @IsOptional()
   @IsString()
@@ -133,7 +144,7 @@ export class PricingPreviewDto {
   pricingStrategy!: PricingStrategyDto;
 }
 
-function IsPositiveInt64String(validationOptions?: ValidationOptions): PropertyDecorator {
+export function IsPositiveInt64String(validationOptions?: ValidationOptions): PropertyDecorator {
   return (target, propertyKey) => {
     registerDecorator({
       name: 'isPositiveInt64String',

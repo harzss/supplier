@@ -162,9 +162,13 @@ function ProductDetailContent() {
             <SkuMappingCard sourceProductId={data.productId1688} />
 
             <PublishPanel
+              key={data.productId1688}
               sourceProductId={data.productId1688}
               titleOverride={selectedTitle?.title}
               titlePlatformLabel={selectedTitle?.platformLabel}
+              onRestoreTitle={(title) =>
+                setSelectedTitle(title ? { title, platformLabel: '草稿' } : null)
+              }
               onClearTitle={() => setSelectedTitle(null)}
               availability={data.availability}
               totalStock={data.totalStock}

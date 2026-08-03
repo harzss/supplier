@@ -26,15 +26,7 @@ describe('ActivationService', () => {
       orderBy: { createdAt: 'asc' },
       select: { id: true, status: true, createdAt: true },
     });
-    expect(mocks.pricingFindFirst).toHaveBeenCalledWith({
-      where: {
-        userId: 42n,
-        action: 'publish.pricing.preview',
-        outcome: 'success',
-      },
-      orderBy: { createdAt: 'asc' },
-      select: { createdAt: true },
-    });
+    expect(mocks.pricingFindFirst).not.toHaveBeenCalled();
     expect(mocks.publishedFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
@@ -51,7 +43,7 @@ describe('ActivationService', () => {
   });
 
   it('prefers a successful product view over a favorite for the selected product', async () => {
-    const { prisma } = fixture({
+    const { prisma, mocks } = fixture({
       shops: [{ id: 9n, status: 'active', createdAt: date('2026-08-01T08:00:00.000Z') }],
       productView: {
         resourceId: 'viewed-1002',
@@ -73,6 +65,36 @@ describe('ActivationService', () => {
       readyNow: true,
     });
     expect(result.steps[2]?.href).toBe('/products?id=viewed-1002#publish');
+    expect(mocks.pricingFindFirst).toHaveBeenCalledWith({
+      where: {
+        userId: 42n,
+        action: 'publish.pricing.preview',
+        outcome: 'success',
+        resourceId: 'viewed-1002',
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
+  });
+
+  it('prefers the current server draft over historical product activity', async () => {
+    const { prisma } = fixture({
+      shops: [{ id: 9n, status: 'active', createdAt: date('2026-08-01T08:00:00.000Z') }],
+      draft: {
+        createdAt: date('2026-08-02T09:00:00.000Z'),
+        sourceProduct: { productId1688: 'draft/2002' },
+      },
+      productView: {
+        resourceId: 'viewed-1002',
+        createdAt: date('2026-08-01T09:00:00.000Z'),
+      },
+    });
+    const service = new ActivationService(prisma, config('supabase'));
+
+    const result = await service.get(42n);
+
+    expect(result.steps[1]?.completedAt).toBe('2026-08-02T09:00:00.000Z');
+    expect(result.steps[2]?.href).toBe('/products?id=draft%2F2002#publish');
   });
 
   it('uses the favorite as a durable-data fallback when no view audit exists', async () => {
@@ -169,6 +191,10 @@ describe('ActivationService', () => {
 
 interface FixtureValues {
   shops: Array<{ id: bigint; status: string; createdAt: Date }>;
+  draft: {
+    createdAt: Date;
+    sourceProduct: { productId1688: string };
+  } | null;
   productView: { resourceId: string | null; createdAt: Date } | null;
   favorite: {
     createdAt: Date;
@@ -181,6 +207,7 @@ interface FixtureValues {
 
 function fixture(values: Partial<FixtureValues> = {}) {
   const shopFindMany = vi.fn().mockResolvedValue(values.shops ?? []);
+  const draftFindUnique = vi.fn().mockResolvedValue(values.draft ?? null);
   const productViewFindFirst = vi.fn().mockResolvedValue(values.productView ?? null);
   const pricingFindFirst = vi.fn().mockResolvedValue(values.pricingPreview ?? null);
   const favoriteFindFirst = vi.fn().mockResolvedValue(values.favorite ?? null);
@@ -188,6 +215,7 @@ function fixture(values: Partial<FixtureValues> = {}) {
   const publishedFindFirst = vi.fn().mockResolvedValue(values.publishedProduct ?? null);
   const prisma = {
     shop: { findMany: shopFindMany },
+    publishDraft: { findUnique: draftFindUnique },
     auditLog: {
       findFirst: vi
         .fn()
@@ -202,6 +230,7 @@ function fixture(values: Partial<FixtureValues> = {}) {
     prisma,
     mocks: {
       shopFindMany,
+      draftFindUnique,
       productViewFindFirst,
       pricingFindFirst,
       favoriteFindFirst,

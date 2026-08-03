@@ -36,8 +36,45 @@ jobs:
       - run: pnpm exec prettier --check "**/*.{ts,tsx,md,json,yml,yaml}"
       - run: git diff --check
 
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/supplier
+      DIRECT_URL: postgresql://postgres:postgres@127.0.0.1:5432/supplier
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:dev:up
+      - run: pnpm --filter @supplier/bff... build
+      - run: pnpm db:migrate:deploy
+      - run: pnpm db:seed
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - name: Upload browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Stop browser test infrastructure
+        if: always()
+        run: docker compose -f infra/docker-compose.dev.yml down -v
+
   images:
-    needs: verify
+    needs: [verify, browser]
     runs-on: ubuntu-latest
     env:
       IMAGE_TAG: ${{ github.sha }}

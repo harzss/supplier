@@ -16,11 +16,14 @@ import { CategoryModule } from '../category/category.module';
 import { PublishedProductController } from './published-product.controller';
 import { PlatformProductLockService } from './platform-product-lock.service';
 import { PricingPreviewReceiptService } from './pricing-preview-receipt.service';
+import { PublishDraftController } from './publish-draft.controller';
+import { PublishDraftService } from './publish-draft.service';
 
 @Module({
   imports: [AiModule, ShopModule, CategoryModule],
   controllers: [
     PublishController,
+    PublishDraftController,
     PublishedProductController,
     MediaController,
     InventorySyncController,
@@ -36,6 +39,7 @@ import { PricingPreviewReceiptService } from './pricing-preview-receipt.service'
     InventorySyncWorker,
     PlatformProductLockService,
     PricingPreviewReceiptService,
+    PublishDraftService,
   ],
   exports: [PublishService],
 })

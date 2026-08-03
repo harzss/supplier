@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { corsOrigins, swaggerEnabled } from './config/environment';
+import { applicationCorsOptions } from './config/cors';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -19,7 +20,7 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   const allowedOrigins = corsOrigins(environment.get('CORS_ORIGINS'), nodeEnv === 'production');
-  app.enableCors({ origin: allowedOrigins, credentials: true });
+  app.enableCors(applicationCorsOptions(allowedOrigins));
 
   if (swaggerEnabled(nodeEnv, environment.get('SWAGGER_ENABLED'))) {
     const config = new DocumentBuilder()

@@ -25,6 +25,7 @@
     "dev": "turbo run dev --parallel",
     "lint": "turbo run lint",
     "test": "turbo run test",
+    "test:e2e": "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/supplier DIRECT_URL=postgresql://postgres:postgres@127.0.0.1:5432/supplier REDIS_URL=redis://127.0.0.1:6379 playwright test",
     "test:ops": "node --test scripts/*.test.mjs",
     "typecheck": "pnpm --filter @supplier/db prisma:generate && turbo run typecheck",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
@@ -49,6 +50,7 @@
     "crawl": "node scripts/crawl-products.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.51.1",
     "@types/node": "^20.14.0",
     "prettier": "^3.3.0",
     "turbo": "^2.3.0",

@@ -45,6 +45,7 @@ describe('PublishController', () => {
     expect(Reflect.getMetadata(AUDIT_ACTION, PublishController.prototype.pricingPreview)).toEqual({
       action: 'publish.pricing.preview',
       resourceType: 'source_product',
+      resourceIdBodyField: 'sourceProductId',
     });
   });
 });

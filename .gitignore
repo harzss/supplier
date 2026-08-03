@@ -40,6 +40,8 @@ Thumbs.db
 # Test
 coverage/
 .nyc_output/
+playwright-report/
+test-results/
 
 # Python
 __pycache__/

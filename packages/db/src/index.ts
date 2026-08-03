@@ -5,6 +5,7 @@ export type {
   ShopCategory,
   SourceProduct,
   ProductScore,
+  PublishDraft,
   PublishTask,
   PublishJob,
   PublishedProduct,

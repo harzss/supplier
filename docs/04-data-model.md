@@ -152,11 +152,22 @@ erDiagram
     }
 ```
 
-## 2. 核心表 Schema（历史 MySQL 设计草案）
+## 2. 当前铺货草稿契约
+
+`publish_drafts` 是当前 PostgreSQL/Prisma 模型的一部分，每个用户最多一条，用于保存可恢复的铺货意图：货源、目标店铺、定价策略和 AI 选项。它不保存利润试算凭证、预检结果、平台规则快照或发布结果；恢复后必须重新试算和预检。
+
+- `revision` 与 `client_request_id` 共同构成写入 generation；更新、删除都必须同时匹配，避免草稿删除重建后 revision 回到 1 造成 ABA 覆盖。
+- 内容不变的保存会锁定并返回原 generation；内容变化时 revision 递增且轮换 `client_request_id`。
+- 正式创建铺货任务时，任务、队列 job 与草稿消费处于同一事务；请求必须精确匹配草稿 generation 和 payload。
+- 表启用 RLS，并撤销 `anon` / `authenticated` 直接权限；业务读写只经过已认证 BFF。
+
+权威定义见 `packages/db/prisma/schema.prisma` 的 `PublishDraft` 和 migration `20260804023000_add_publish_drafts`。
+
+## 3. 核心表 Schema（历史 MySQL 设计草案）
 
 本节仅保留早期字段和容量规划背景。当前应用使用 PostgreSQL、Prisma snake_case 映射和正式 migration；字段、enum、索引、外键与默认值必须从权威 schema 读取。
 
-### 2.1 用户与店铺
+### 3.1 用户与店铺
 
 ```sql
 -- 用户表
@@ -191,7 +202,7 @@ CREATE TABLE shops (
 );
 ```
 
-### 2.2 选品与货源
+### 3.2 选品与货源
 
 ```sql
 -- 1688 货源池（TiDB，亿级，分区按 category_l1）
@@ -246,7 +257,7 @@ CREATE TABLE user_favorites (
 );
 ```
 
-### 2.3 铺货与商品
+### 3.3 铺货与商品
 
 ```sql
 -- 铺货任务（一个货源 → 多个目标店铺）
@@ -292,7 +303,7 @@ CREATE TABLE published_products (
 );
 ```
 
-### 2.4 订单与代发
+### 3.4 订单与代发
 
 ```sql
 -- 销售订单
@@ -368,7 +379,7 @@ CREATE TABLE purchase_order_recoveries (
 );
 ```
 
-### 2.5 AI 使用与计费
+### 3.5 AI 使用与计费
 
 ```sql
 -- AI 调用流水（成本核算 + 风控）
@@ -402,9 +413,9 @@ CREATE TABLE subscriptions (
 );
 ```
 
-## 3. 当前审计与告警模型（PostgreSQL / Prisma）
+## 4. 当前审计与告警模型（PostgreSQL / Prisma）
 
-### 3.1 `audit_logs`
+### 4.1 `audit_logs`
 
 | 字段组       | 当前定义                                                                                    |
 | ------------ | ------------------------------------------------------------------------------------------- |
@@ -415,7 +426,7 @@ CREATE TABLE subscriptions (
 
 审计覆盖写操作、失败鉴权和 OAuth 流程。禁止写入请求 body、Authorization、Cookie、明文 token、密钥或原始 IP。租户审计 API 只能读取当前用户的数据；运维汇总只暴露必要计数。`AuditRetentionService` 默认删除 180 天前记录，可通过 `AUDIT_RETENTION_DAYS` 调整。
 
-### 3.2 `operational_alerts`
+### 4.2 `operational_alerts`
 
 | 字段组     | 当前定义                                                                  |
 | ---------- | ------------------------------------------------------------------------- |
@@ -426,7 +437,7 @@ CREATE TABLE subscriptions (
 
 告警记录支持同 key 去重、严重度升级、重通知窗口和条件消失后的自动 resolved。通知 Webhook 使用 timestamp + HMAC-SHA256；数据库记录是状态源，外部通知失败不能导致告警状态丢失。
 
-## 4. 向量库（Milvus）
+## 5. 向量库（Milvus）
 
 | Collection            | 维度          | 用途                 |
 | --------------------- | ------------- | -------------------- |
@@ -449,7 +460,7 @@ CREATE TABLE subscriptions (
 }
 ```
 
-## 5. 数据流（关键事件）
+## 6. 数据流（关键事件）
 
 | 事件                    | 来源         | 消费方                                  |
 | ----------------------- | ------------ | --------------------------------------- |
@@ -461,7 +472,7 @@ CREATE TABLE subscriptions (
 | `purchase.placed`       | order 服务   | 1688 代发                               |
 | `ai.usage.recorded`     | ai-gateway   | 计费 + 限流                             |
 
-## 6. 缓存策略
+## 7. 缓存策略
 
 | Key 模式                       | 用途         | TTL                |
 | ------------------------------ | ------------ | ------------------ |
@@ -471,7 +482,7 @@ CREATE TABLE subscriptions (
 | `ratelimit:user:{id}:{module}` | AI 限流      | 滑动窗口           |
 | `compliance:words`             | 敏感词库     | 24h                |
 
-## 7. 数据合规
+## 8. 数据合规
 
 - **手机号、地址**：当前使用 AES-256-GCM；生产密钥必须由 Secret Manager/KMS 注入和轮换
 - **OAuth Token**：当前加密落库、仅在调用时解密；生产环境须完成密钥轮换演练

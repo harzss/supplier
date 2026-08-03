@@ -15,6 +15,7 @@ function setup() {
     headers: { 'user-agent': 'vitest' },
     routeOptions: { url: '/publish-tasks' },
     params: {},
+    body: undefined as unknown,
     currentUser: { userId: 42n, plan: 'pro' },
   };
   const reply = { statusCode: 201, header: vi.fn() };
@@ -26,7 +27,14 @@ function setup() {
   const audit = { record: vi.fn().mockResolvedValue(undefined) } as unknown as AuditService;
   const metrics = { record: vi.fn() } as unknown as RuntimeMetricsService;
   const reflector = { getAllAndOverride: vi.fn() } as unknown as Reflector;
-  return { interceptor: new AuditInterceptor(reflector, audit, metrics), context, audit, metrics };
+  return {
+    interceptor: new AuditInterceptor(reflector, audit, metrics),
+    context,
+    audit,
+    metrics,
+    reflector,
+    request,
+  };
 }
 
 describe('AuditInterceptor', () => {
@@ -55,6 +63,29 @@ describe('AuditInterceptor', () => {
     ).rejects.toBe(error);
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: 'failure', statusCode: 400 }),
+    );
+  });
+
+  it('records only an explicitly allowed resource id field from the request body', async () => {
+    const { interceptor, context, audit, reflector, request } = setup();
+    request.body = { sourceProductId: 'mock-1001', apiKey: 'must-not-be-recorded' };
+    vi.mocked(reflector.getAllAndOverride).mockReturnValue({
+      action: 'publish.pricing.preview',
+      resourceType: 'source_product',
+      resourceIdBodyField: 'sourceProductId',
+    });
+
+    await lastValueFrom(interceptor.intercept(context, { handle: () => of({ ok: true }) }));
+
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'publish.pricing.preview',
+        resourceType: 'source_product',
+        resourceId: 'mock-1001',
+      }),
+    );
+    expect(audit.record).not.toHaveBeenCalledWith(
+      expect.objectContaining({ metadata: expect.objectContaining({ apiKey: expect.anything() }) }),
     );
   });
 });

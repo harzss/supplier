@@ -18,6 +18,7 @@ import type { PlatformProductLockService } from './platform-product-lock.service
 import { PublishJobLeaseError, type PublishExecutionLease } from './publish-job-lease';
 import type { PricingPreviewReceiptService } from './pricing-preview-receipt.service';
 import { pricingSourceFingerprint } from './pricing-source-fingerprint';
+import type { PublishDraftService } from './publish-draft.service';
 
 const USER: CurrentUser = { userId: 1n, plan: 'pro' };
 const CLIENT_REQUEST_ID = '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1';
@@ -606,6 +607,50 @@ describe('PublishService', () => {
       costPrice: 10,
       sourcePricingFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    expect(fixture.publishDrafts.consumeForPublish).not.toHaveBeenCalled();
+  });
+
+  it('validates and consumes an exact draft revision inside the task transaction', async () => {
+    const fixture = createFixture();
+
+    await expect(
+      fixture.service.enqueue(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        draftRevision: 4,
+        pricingPreviewToken: 'preview-token',
+        sourceProductId: '1688-1',
+        targetShopIds: ['9'],
+      }),
+    ).resolves.toEqual({ taskId: '3', status: 'pending', queued: true });
+
+    expect(fixture.publishDrafts.consumeForPublish).toHaveBeenCalledWith(
+      fixture.prisma,
+      1n,
+      expect.objectContaining({
+        clientRequestId: CLIENT_REQUEST_ID,
+        draftRevision: 4,
+      }),
+    );
+    expect(fixture.prisma.publishJob.create).toHaveBeenCalled();
+  });
+
+  it('does not create a queue job when exact draft consumption fails', async () => {
+    const fixture = createFixture();
+    fixture.publishDrafts.consumeForPublish.mockRejectedValueOnce(
+      new BadRequestException('draft changed'),
+    );
+
+    await expect(
+      fixture.service.enqueue(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        draftRevision: 4,
+        pricingPreviewToken: 'preview-token',
+        sourceProductId: '1688-1',
+        targetShopIds: ['9'],
+      }),
+    ).rejects.toThrow('draft changed');
+
+    expect(fixture.prisma.publishJob.create).not.toHaveBeenCalled();
   });
 
   it('returns a server receipt bound to the previewed pricing inputs', async () => {
@@ -1775,6 +1820,9 @@ function createFixture(
     }),
     assertValid: vi.fn(),
   };
+  const publishDrafts = {
+    consumeForPublish: vi.fn().mockResolvedValue(undefined),
+  };
   const service = new PublishService(
     prisma as unknown as PrismaService,
     entitlement as unknown as EntitlementService,
@@ -1788,6 +1836,7 @@ function createFixture(
     imagePipeline as unknown as ImagePipelineService,
     platformProductLocks as unknown as PlatformProductLockService,
     pricingPreviewReceipts as unknown as PricingPreviewReceiptService,
+    publishDrafts as unknown as PublishDraftService,
     {
       get: (key: string) => (key === 'AUTH_MODE' ? (options.authMode ?? 'demo') : undefined),
     } as ConfigService,
@@ -1811,5 +1860,6 @@ function createFixture(
     imagePipeline,
     platformProductLocks,
     pricingPreviewReceipts,
+    publishDrafts,
   };
 }

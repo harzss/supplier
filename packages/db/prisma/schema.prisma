@@ -44,6 +44,7 @@ model User {
   updatedAt     DateTime   @updatedAt @map("updated_at")
 
   shops                         Shop[]
+  publishDraft                  PublishDraft?
   publishTasks                  PublishTask[]
   favorites                     UserFavorite[]
   aiUsageLogs                   AiUsageLog[]
@@ -174,6 +175,7 @@ model SourceProduct {
   syncedAt              DateTime                  @default(now()) @map("synced_at")
 
   score                         ProductScore?
+  publishDrafts                 PublishDraft[]
   publishTasks                  PublishTask[]
   publishedProducts             PublishedProduct[]
   favorites                     UserFavorite[]
@@ -311,6 +313,25 @@ model ProductSkuMapping {
 }
 
 // ----- 铺货 -----
+
+// 用户当前可编辑的铺货意图；不保存试算凭证、预检结果或平台发布快照。
+model PublishDraft {
+  userId          BigInt   @id @map("user_id")
+  clientRequestId String   @map("client_request_id") @db.Uuid
+  sourceProductId BigInt   @map("source_product_id")
+  targetShopIds   Json     @default("[]") @map("target_shop_ids") @db.JsonB
+  pricingStrategy Json?    @map("pricing_strategy") @db.JsonB
+  aiOptions       Json?    @map("ai_options") @db.JsonB
+  revision        Int      @default(1)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+
+  @@index([sourceProductId])
+  @@map("publish_drafts")
+}
 
 enum PublishTaskStatus {
   pending

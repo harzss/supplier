@@ -5,17 +5,17 @@
 > [00-roadmap.md](./00-roadmap.md) 为准，工程实现证据见
 > [09-main-flow.md](./09-main-flow.md)。
 >
-> **时效说明（2026-08-03）**：现有 Supabase 项目已明确按 staging 管理。最近一次实时审计确认 PostgreSQL 17.6、当时仓库 33/33 migration applied、0 unfinished/rolled back、checksum 全匹配且 live schema diff 为空；28/28 public 表启用 RLS，anon/authenticated 对业务表和 sequence 均无权限。R2-01 现已新增第 34 个 `20260803200000_add_publish_request_idempotency`，尚未应用到 staging，因此该旧快照不能证明当前候选版本 schema 就绪；生产数据库仍必须独立核验。
+> **时效说明（2026-08-04）**：现有 Supabase 项目已明确按 staging 管理。最近一次实时审计仍是 2026-08-03 的 PostgreSQL 17.6、当时仓库 33/33 applied、0 unfinished/rolled back、checksum 全匹配且 live schema diff 为空；28/28 public 表启用 RLS，anon/authenticated 对业务表和 sequence 均无权限。候选版本随后新增第 34 个 `20260803200000_add_publish_request_idempotency` 和第 35 个 `20260804023000_add_publish_drafts`，均未应用到 staging，因此当前证据为 33/35；生产数据库仍必须独立核验。
 
-## 1. 当前结论（治理与技术证据截至 2026-08-03）
+## 1. 当前结论（治理与技术证据截至 2026-08-04）
 
 **结论不变：当前不能宣称生产可用或直接正式上架。** 真实抖店与 1688 小额订单 E2E、生产数据库、生产 Redis、目标云部署、监控告警、恢复演练、服务市场商业生命周期和法务合规仍需关闭 P0 门禁。以下内容保留为 M13～M67 的工程历史证据，不能替代新的目标环境验收。
 
 当前 staging 已完成数据库备份恢复、RLS、Storage、关闭公开注册、匿名访问拒绝、Cloudflare Worker、Redis AOF、BFF readiness、告警 firing/resolved 基础 smoke，以及 Redis / 数据库队列非空重启持久性实测；Web 已部署为 59 个纯静态 Cloudflare Assets，固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 验收均通过，且没有可执行 Worker CPU 路径。新旧 Supabase Key 兼容和安全轮换/Auth 验收器已有代码证据，但尚未在 Dashboard 创建新 Key、重部署 Web/BFF、停用 legacy Key 或完成真实邀请账号生命周期；已授权安装的长期进程守护也仍未验收，因此 R0-03 保持进行中。当前 staging 证据和临时 Quick Tunnel 都不能当作生产部署证据。
 
-R2-01 当前新增了跨页首次铺货进度、稳定交互事件、利润试算必经门禁和用户内请求幂等键。重复点击、响应丢失和并发同键请求会恢复原任务；同键异参返回 409。该能力在新 migration 应用前不能部署，且尚缺服务端草稿、OAuth 回跳、统一风险预检、真实店 E2E 和 5 人无指导可用性验收，因此只属于应用侧进行中。
+R2-01 当前已有跨页首次铺货进度、利润试算、统一风险预检、服务端草稿和用户内请求幂等键。草稿恢复后强制重新试算/预检，多标签旧 generation 不能覆盖新草稿；重复点击和响应丢失恢复原任务。该能力在两条新 migration 应用并重部署前不能进入 staging，且尚缺 OAuth 安全回跳、真实店 E2E 和 5 人无指导可用性验收，因此仍只属于应用侧进行中。
 
-当前代码门禁已通过 lint 2/2、typecheck 14/14、全仓 557 项测试、51 项运维脚本测试、production build 9/9、Prisma、Prettier 和差异检查；最近一次依赖安全审计为 0 已知漏洞。BFF、migration、Web 三个非 root Linux 镜像属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用第 34 个 migration。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
+候选版本已通过全仓 602 项测试（其中 BFF 413、Web 13）、51 项运维脚本、隔离 Chromium 1/1，以及 lint 2/2、typecheck 14/14、production build 9/9、Prisma、Prettier 和差异检查。BFF、migration、Web 三个非 root Linux 镜像仍属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用第 34、35 个 migration。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
 
 ### M13～M67 历史账本（按记录当时理解）
 

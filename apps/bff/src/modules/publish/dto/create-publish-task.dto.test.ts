@@ -12,12 +12,33 @@ describe('CreatePublishTaskDto', () => {
   it('accepts an optional UUID client request id', async () => {
     const dto = plainToInstance(CreatePublishTaskDto, {
       clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      draftRevision: 3,
       pricingPreviewToken: 'preview-token',
       sourceProductId: '1688-1',
       targetShopIds: ['9'],
     });
 
     await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
+  it('rejects a non-positive draft revision', async () => {
+    const dto = plainToInstance(CreatePublishTaskDto, {
+      draftRevision: 0,
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
+  });
+
+  it('requires the draft request generation when a draft revision is submitted', async () => {
+    const dto = plainToInstance(CreatePublishTaskDto, {
+      draftRevision: 1,
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
   });
 
   it('rejects a non-UUID client request id', async () => {

@@ -49,7 +49,7 @@ flowchart LR
 | AI 详情 / 主图   | 🔄 开发中                       | 详情链路已完成；主图权益、远程 GPU 流水线编排、托管与铺货接入已完成，待真实 worker 联调     |
 | 真实平台 OAuth   | 🔄 开发中                       | M3-1～5 已完成；M3-6 已增加联调准备度检查，当前环境 0/6 待配置                              |
 
-**2026-08-03 当前结论**：代码门禁已通过 522 项测试、lint、typecheck、production build、Prisma、Prettier 与依赖安全审计；BFF、migration 和 Web 三类非 root 镜像已重新构建。staging 已完成 33/33 migration、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF、告警基础 smoke，以及 Redis / 数据库队列非空重启持久性实测。Cloudflare Web 已从超出 CPU 门禁的 OpenNext 方案改为 59 个纯静态 Assets；固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 再验收均通过，Cloudflare API 明确该部署只有 assets、没有可执行 Worker。受控 Supabase 管理员邀请工具已完成，固定读取 owner-only `0600` 环境文件，覆盖目标邮箱二次确认、受支持管理员 Key 格式、精确 HTTPS 回跳、禁止重定向、单次请求和敏感信息脱敏；尚未发送真实邀请。现有 service-role Key 因审查过程暴露而必须先轮换。R0-03 仍缺真实邀请账号生命周期和已授权安装的长期进程守护验收，因此不能宣称生产可用。
+**2026-08-03 当前结论**：代码门禁已通过 525 项测试、51 项运维脚本测试、lint、typecheck、production build、Prisma、Prettier 与依赖安全审计；BFF、migration 和 Web 三类非 root 镜像已重新构建。staging 已完成 33/33 migration、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF、告警基础 smoke，以及 Redis / 数据库队列非空重启持久性实测。Cloudflare Web 已从超出 CPU 门禁的 OpenNext 方案改为 59 个纯静态 Assets；固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 再验收均通过，Cloudflare API 明确该部署只有 assets、没有可执行 Worker。新旧 Supabase Key 请求头兼容、安全轮换、受控邀请、真实会话和密码转换验收器均已完成；固定读取 owner-only `0600` 环境文件，并对结果未知的 Storage/Auth 会话执行可证明的补偿清理。尚未创建新 Key、重部署或停用 legacy Key，也未发送真实邀请。R0-03 仍缺真实邀请账号生命周期和已授权安装的长期进程守护验收，因此不能宣称生产可用。
 
 <details>
 <summary>M1～M67 历史增量台账（其中“当前”均指记录当时，不代表 2026-08-03 状态）</summary>
@@ -1345,6 +1345,8 @@ M67 已补齐已发货物流修复的长任务执行权：修复服务每 60 秒
 - [x] 全仓 lint/typecheck/test、Prisma 与格式门禁通过
 
 ## 54. 变更记录
+
+- 2026-08-03：完成 Supabase 新式 Key 迁移与 Auth 验收工具收口。BFF、邀请器、边界验证和会话验证同时支持 legacy JWT 与新式 `sb_secret_*` / `sb_publishable_*`，并严格区分管理员/公开 Key；新式 Key 只发送 `apikey`，legacy JWT 才兼容 Bearer。新增固定读取 `0600` 私有环境文件的 Key 轮换 smoke，验证 Auth admin、随机 Storage 上传、公开读取、删除及结果未知时的补偿清理；Auth smoke 增加旧密码拒绝、新密码登录、refresh、logout、refresh 撤销和清理状态证明。生产图片存储只接受精确 Supabase 项目 HTTPS host。独立安全复审发现的上传结果未知、logout 清理和非规范 JWT 格式问题均已关闭；全仓 525 项测试、51 项运维脚本测试、BFF Storage 定向 6 项、lint 2/2 与 typecheck 14/14 通过。真实 Dashboard Key 创建、Web/BFF 重部署、legacy Key 停用、邀请邮件及密码恢复仍未执行。
 
 - 2026-08-03：关闭 Cloudflare Workers Free Web CPU 缺口。商品详情从运行时 `/products/[id]` 改为静态 `/products?id=<id>` 壳，浏览器仍按同一 Bearer API 加载商品；`public/_redirects` 把旧 `/products/<id>` 以 301 兼容到新地址。Next 默认继续输出 standalone 供 Docker 使用，仅 `WEB_BUILD_TARGET=static` 导出静态站。Wrangler 改为 assets-only，部署 59 个 `out` 资源，当前版本 `7d15e88a-20bc-40c8-a255-4dae8dcd7e52`；Cloudflare tail API 返回“Cannot tail a Worker which only has assets”，证明请求不再进入 Worker CPU 路径。Web 测试 10/10、typecheck、静态构建、dry-run、固定 URL 路由和 15/15 HTTPS 部署验证通过。
 

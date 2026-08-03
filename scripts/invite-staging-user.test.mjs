@@ -88,6 +88,7 @@ test('accepts only complete and exact invitation configuration', () => {
     ['SUPABASE_SERVICE_ROLE_KEY', jwtWithRole('anon')],
     ['SUPABASE_SERVICE_ROLE_KEY', jwtWithRole('service_role', { iss: 'attacker' })],
     ['SUPABASE_SERVICE_ROLE_KEY', jwtWithRole('service_role', { exp: 1 })],
+    ['SUPABASE_SERVICE_ROLE_KEY', jwtWithRole('service_role').replace('.', '!.')],
     ['STAGING_INVITE_EMAIL', 'not-an-email'],
     ['STAGING_INVITE_TIMEOUT_MS', '99'],
     ['STAGING_INVITE_TIMEOUT_MS', '30001'],
@@ -153,14 +154,34 @@ test('sends one exact admin invitation request and accepts a complete user respo
   assert.equal(requests[0].init.method, 'POST');
   assert.deepEqual(requests[0].init.headers, {
     apikey: ADMIN_KEY,
-    Authorization: `Bearer ${ADMIN_KEY}`,
     'Content-Type': 'application/json;charset=UTF-8',
     'X-Supabase-Api-Version': '2024-01-01',
   });
+  assert.equal(Object.hasOwn(requests[0].init.headers, 'authorization'), false);
+  assert.equal(Object.hasOwn(requests[0].init.headers, 'Authorization'), false);
   assert.deepEqual(JSON.parse(requests[0].init.body), { email: EMAIL });
   assert.equal(requests[0].init.body.includes('redirect_to'), false);
   assert.equal(requests[0].init.redirect, 'error');
   assert.ok(requests[0].init.signal instanceof AbortSignal);
+});
+
+test('uses the legacy service-role JWT as both apikey and bearer authorization', async () => {
+  const legacyKey = jwtWithRole('service_role');
+  const requests = [];
+  const fetcher = async (url, init) => {
+    requests.push({ url, init });
+    return jsonResponse({
+      id: 'user-id-must-not-be-logged',
+      email: EMAIL,
+      invited_at: '2026-08-03T12:00:00.000Z',
+    });
+  };
+
+  await inviteStagingUser(configuration({ adminKey: legacyKey }), EMAIL, fetcher);
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].init.headers.apikey, legacyKey);
+  assert.equal(requests[0].init.headers.authorization, `Bearer ${legacyKey}`);
 });
 
 test('does not read or expose non-success response bodies', async () => {
@@ -273,7 +294,7 @@ function jwtWithRole(role, overrides = {}) {
   const payload = Buffer.from(
     JSON.stringify({ role, iss: 'supabase', exp: 4_102_444_800, ...overrides }),
   ).toString('base64url');
-  return `${header}.${payload}.signature`;
+  return `${header}.${payload}.${'s'.repeat(43)}`;
 }
 
 function jsonResponse(body, status = 200) {

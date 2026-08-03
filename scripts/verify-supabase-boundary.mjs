@@ -1,11 +1,43 @@
 #!/usr/bin/env node
 
+import { lstat, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
+
+import { requireSupabasePublicApiKey, supabasePublicApiKeyHeaders } from './supabase-api-keys.mjs';
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const STAGING_ENV_FILE = resolve('apps/web/.env.staging.local');
 
-export function readSupabaseBoundaryConfiguration(environment = process.env) {
+export async function readSupabaseBoundaryEnvironmentFile(path = STAGING_ENV_FILE) {
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch {
+    throw new Error('The staging boundary environment file is missing or unreadable.');
+  }
+  if (
+    !metadata.isFile() ||
+    (metadata.mode & 0o777) !== 0o600 ||
+    (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+  ) {
+    throw new Error(
+      'The staging boundary environment file must be an owner-only regular file with mode 0600.',
+    );
+  }
+
+  try {
+    return parseEnv(await readFile(path, 'utf8'));
+  } catch {
+    throw new Error('The staging boundary environment file could not be parsed.');
+  }
+}
+
+export function readSupabaseBoundaryConfiguration(
+  environment,
+  { requirePublishableKey = false } = {},
+) {
   const rawUrl = environment.SUPABASE_URL ?? environment.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = environment.SUPABASE_ANON_KEY ?? environment.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!rawUrl || !anonKey) {
@@ -28,8 +60,11 @@ export function readSupabaseBoundaryConfiguration(environment = process.env) {
   ) {
     throw new Error('SUPABASE_URL must be an exact https://<project-ref>.supabase.co origin.');
   }
-  if (anonKey.trim().length < 20) throw new Error('SUPABASE_ANON_KEY is invalid.');
-  return { origin: url.origin, anonKey: anonKey.trim() };
+  const validatedAnonKey = requireSupabasePublicApiKey(anonKey, 'SUPABASE_ANON_KEY');
+  if (requirePublishableKey && !validatedAnonKey.startsWith('sb_publishable_')) {
+    throw new Error('SUPABASE_ANON_KEY must be a publishable key for this verification.');
+  }
+  return { origin: url.origin, anonKey: validatedAnonKey };
 }
 
 export function assertSignupDisabled(settings) {
@@ -45,7 +80,7 @@ export function assertAnonymousBusinessAccessDenied(status) {
 }
 
 export async function verifySupabaseBoundary({ origin, anonKey }, fetcher = fetch) {
-  const headers = { apikey: anonKey, Authorization: `Bearer ${anonKey}` };
+  const headers = supabasePublicApiKeyHeaders(anonKey);
   const settingsResponse = await fetcher(`${origin}/auth/v1/settings`, {
     headers,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -70,7 +105,15 @@ export async function verifySupabaseBoundary({ origin, anonKey }, fetcher = fetc
 }
 
 async function main() {
-  const result = await verifySupabaseBoundary(readSupabaseBoundaryConfiguration());
+  const args = process.argv.slice(2);
+  if (args.some((arg) => arg !== '--require-publishable-key')) {
+    throw new Error('Unsupported command-line argument.');
+  }
+  const result = await verifySupabaseBoundary(
+    readSupabaseBoundaryConfiguration(await readSupabaseBoundaryEnvironmentFile(), {
+      requirePublishableKey: args.includes('--require-publishable-key'),
+    }),
+  );
   console.log(
     `Supabase boundary verified: signup disabled; anonymous business access denied (HTTP ${result.anonymousBusinessAccessStatus}).`,
   );

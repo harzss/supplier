@@ -11,9 +11,9 @@
 
 **结论不变：当前不能宣称生产可用或直接正式上架。** 真实抖店与 1688 小额订单 E2E、生产数据库、生产 Redis、目标云部署、监控告警、恢复演练、服务市场商业生命周期和法务合规仍需关闭 P0 门禁。以下内容保留为 M13～M67 的工程历史证据，不能替代新的目标环境验收。
 
-当前 staging 已完成数据库备份恢复、RLS、Storage、关闭公开注册、匿名访问拒绝、Cloudflare Worker、Redis AOF、BFF readiness、告警 firing/resolved 基础 smoke，以及 Redis / 数据库队列非空重启持久性实测；Web 已部署为 59 个纯静态 Cloudflare Assets，固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 验收均通过，且没有可执行 Worker CPU 路径。真实邀请账号生命周期和已授权安装的长期进程守护仍未验收，因此 R0-03 保持进行中；当前 staging 证据和临时 Quick Tunnel 都不能当作生产部署证据。
+当前 staging 已完成数据库备份恢复、RLS、Storage、关闭公开注册、匿名访问拒绝、Cloudflare Worker、Redis AOF、BFF readiness、告警 firing/resolved 基础 smoke，以及 Redis / 数据库队列非空重启持久性实测；Web 已部署为 59 个纯静态 Cloudflare Assets，固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 验收均通过，且没有可执行 Worker CPU 路径。新旧 Supabase Key 兼容和安全轮换/Auth 验收器已有代码证据，但尚未在 Dashboard 创建新 Key、重部署 Web/BFF、停用 legacy Key 或完成真实邀请账号生命周期；已授权安装的长期进程守护也仍未验收，因此 R0-03 保持进行中。当前 staging 证据和临时 Quick Tunnel 都不能当作生产部署证据。
 
-当前代码门禁已通过 lint 2/2、typecheck 14/14、全仓 522 项测试、production build 9/9、Prisma、Prettier 和依赖安全审计；BFF、migration、Web 三个 Linux 镜像已重新构建并保持非 root。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，其中“未应用”“不部署”或旧测试数量不能覆盖本节和文末 2026-08-03 的最新证据。
+当前代码门禁已通过 lint 2/2、typecheck 14/14、全仓 525 项测试、51 项运维脚本测试、production build 9/9、Prisma、Prettier 和依赖安全审计；BFF、migration、Web 三个 Linux 镜像已重新构建并保持非 root。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，其中“未应用”“不部署”或旧测试数量不能覆盖本节和文末 2026-08-03 的最新证据。
 
 ### M13～M67 历史账本（按记录当时理解）
 

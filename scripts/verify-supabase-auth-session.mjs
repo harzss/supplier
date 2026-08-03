@@ -1,24 +1,61 @@
 #!/usr/bin/env node
 
+import { lstat, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
+
+import { requireSupabasePublicApiKey, supabasePublicApiKeyHeaders } from './supabase-api-keys.mjs';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 30_000;
+const STAGING_ENV_FILE = resolve('apps/web/.env.staging.local');
 
-export function readAuthSessionConfiguration(environment = process.env) {
+export async function readAuthSessionEnvironmentFile(path = STAGING_ENV_FILE) {
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch {
+    throw new Error('The staging Auth environment file is missing or unreadable.');
+  }
+  if (
+    !metadata.isFile() ||
+    (metadata.mode & 0o777) !== 0o600 ||
+    (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+  ) {
+    throw new Error(
+      'The staging Auth environment file must be an owner-only regular file with mode 0600.',
+    );
+  }
+
+  try {
+    return parseEnv(await readFile(path, 'utf8'));
+  } catch {
+    throw new Error('The staging Auth environment file could not be parsed.');
+  }
+}
+
+export function readAuthSessionConfiguration(
+  environment,
+  { expectPreviousPasswordRejected = false } = {},
+) {
+  if (environment.NEXT_PUBLIC_AUTH_MODE !== 'supabase') {
+    throw new Error('NEXT_PUBLIC_AUTH_MODE must be supabase.');
+  }
+  if (environment.NEXT_PUBLIC_SIGNUP_ENABLED !== 'false') {
+    throw new Error('NEXT_PUBLIC_SIGNUP_ENABLED must be false.');
+  }
   const supabaseOrigin = requiredOrigin(
     environment.NEXT_PUBLIC_SUPABASE_URL,
     'NEXT_PUBLIC_SUPABASE_URL',
     true,
   );
-  const bffOrigin = requiredOrigin(environment.BFF_URL, 'BFF_URL');
-  const anonKey = requiredValue(
+  const bffOrigin = requiredOrigin(environment.NEXT_PUBLIC_BFF_URL, 'NEXT_PUBLIC_BFF_URL');
+  const anonKey = requireSupabasePublicApiKey(
     environment.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     'NEXT_PUBLIC_SUPABASE_ANON_KEY',
-  ).trim();
-  if (anonKey.length < 20) throw new Error('NEXT_PUBLIC_SUPABASE_ANON_KEY is invalid.');
+  );
 
   const email = requiredValue(environment.AUTH_TEST_EMAIL, 'AUTH_TEST_EMAIL').trim();
   if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -28,22 +65,84 @@ export function readAuthSessionConfiguration(environment = process.env) {
   if (password.length < 8)
     throw new Error('AUTH_TEST_PASSWORD must contain at least 8 characters.');
 
+  let previousPassword;
+  if (expectPreviousPasswordRejected) {
+    previousPassword = requiredValue(
+      environment.AUTH_TEST_PREVIOUS_PASSWORD,
+      'AUTH_TEST_PREVIOUS_PASSWORD',
+    );
+    if (previousPassword.length < 8) {
+      throw new Error('AUTH_TEST_PREVIOUS_PASSWORD must contain at least 8 characters.');
+    }
+    if (previousPassword === password) {
+      throw new Error('AUTH_TEST_PREVIOUS_PASSWORD must differ from AUTH_TEST_PASSWORD.');
+    }
+  }
+
   const timeoutMs = parseTimeout(environment.AUTH_TEST_TIMEOUT_MS);
-  return { supabaseOrigin, bffOrigin, anonKey, email, password, timeoutMs };
+  return {
+    supabaseOrigin,
+    bffOrigin,
+    anonKey,
+    email,
+    password,
+    timeoutMs,
+    ...(previousPassword ? { previousPassword } : {}),
+  };
 }
 
 export async function verifySupabaseAuthSession(configuration, fetcher = fetch) {
-  const { supabaseOrigin, bffOrigin, anonKey, email, password, timeoutMs } = configuration;
+  const { supabaseOrigin, bffOrigin, anonKey, email, password, previousPassword, timeoutMs } =
+    configuration;
+  const publicApiHeaders = supabasePublicApiKeyHeaders(anonKey);
   let logoutAccessToken;
-  let logoutAttempted = false;
+  let logoutCompleted = false;
+  let previousPasswordStatus;
 
   try {
+    if (previousPassword) {
+      const previousPasswordGrant = await request(
+        fetcher,
+        `${supabaseOrigin}/auth/v1/token?grant_type=password`,
+        {
+          method: 'POST',
+          headers: { ...publicApiHeaders, 'content-type': 'application/json' },
+          body: JSON.stringify({ email, password: previousPassword }),
+        },
+        timeoutMs,
+        'Previous password grant',
+      );
+      previousPasswordStatus = previousPasswordGrant.status;
+      if (![400, 401].includes(previousPasswordStatus)) {
+        if (previousPasswordStatus === 200) {
+          const unexpectedAccessToken = await readAccessTokenForCleanup(previousPasswordGrant);
+          if (
+            !unexpectedAccessToken ||
+            !(await cleanupLogout(
+              fetcher,
+              supabaseOrigin,
+              anonKey,
+              unexpectedAccessToken,
+              timeoutMs,
+            ))
+          ) {
+            throw new Error(
+              'Previous password grant unexpectedly created a session. Cleanup logout could not be proven.',
+            );
+          }
+        }
+        throw new Error(
+          `Previous password grant: expected HTTP 400 or 401, got ${previousPasswordStatus}.`,
+        );
+      }
+    }
+
     const passwordGrant = await request(
       fetcher,
       `${supabaseOrigin}/auth/v1/token?grant_type=password`,
       {
         method: 'POST',
-        headers: { apikey: anonKey, 'content-type': 'application/json' },
+        headers: { ...publicApiHeaders, 'content-type': 'application/json' },
         body: JSON.stringify({ email, password }),
       },
       timeoutMs,
@@ -67,7 +166,7 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
       `${supabaseOrigin}/auth/v1/token?grant_type=refresh_token`,
       {
         method: 'POST',
-        headers: { apikey: anonKey, 'content-type': 'application/json' },
+        headers: { ...publicApiHeaders, 'content-type': 'application/json' },
         body: JSON.stringify({ refresh_token: initialSession.refreshToken }),
       },
       timeoutMs,
@@ -86,14 +185,13 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
     );
     assertStatus(refreshedProtected, 200, 'Refreshed protected API');
 
-    logoutAttempted = true;
     const logout = await request(
       fetcher,
       `${supabaseOrigin}/auth/v1/logout`,
       {
         method: 'POST',
         headers: {
-          apikey: anonKey,
+          ...publicApiHeaders,
           authorization: `Bearer ${refreshedSession.accessToken}`,
         },
       },
@@ -101,13 +199,14 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
       'Logout',
     );
     assertStatus(logout, 204, 'Logout');
+    logoutCompleted = true;
 
     const revokedRefreshGrant = await request(
       fetcher,
       `${supabaseOrigin}/auth/v1/token?grant_type=refresh_token`,
       {
         method: 'POST',
-        headers: { apikey: anonKey, 'content-type': 'application/json' },
+        headers: { ...publicApiHeaders, 'content-type': 'application/json' },
         body: JSON.stringify({ refresh_token: refreshedSession.refreshToken }),
       },
       timeoutMs,
@@ -116,13 +215,12 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
     if (![400, 401].includes(revokedRefreshGrant.status)) {
       if (revokedRefreshGrant.status === 200) {
         const unexpectedAccessToken = await readAccessTokenForCleanup(revokedRefreshGrant);
-        if (unexpectedAccessToken) {
-          await bestEffortLogout(
-            fetcher,
-            supabaseOrigin,
-            anonKey,
-            unexpectedAccessToken,
-            timeoutMs,
+        if (
+          !unexpectedAccessToken ||
+          !(await cleanupLogout(fetcher, supabaseOrigin, anonKey, unexpectedAccessToken, timeoutMs))
+        ) {
+          throw new Error(
+            'Revoked refresh grant unexpectedly created a session. Cleanup logout could not be proven.',
           );
         }
       }
@@ -141,6 +239,7 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
     assertStatus(anonymousProtected, 401, 'Protected API without token after logout');
 
     return {
+      ...(previousPasswordStatus ? { previousPasswordStatus } : {}),
       passwordGrantStatus: passwordGrant.status,
       initialProtectedStatus: initialProtected.status,
       refreshGrantStatus: refreshGrant.status,
@@ -149,10 +248,15 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
       revokedRefreshStatus: revokedRefreshGrant.status,
       anonymousProtectedStatus: anonymousProtected.status,
     };
-  } finally {
-    if (logoutAccessToken && !logoutAttempted) {
-      await bestEffortLogout(fetcher, supabaseOrigin, anonKey, logoutAccessToken, timeoutMs);
+  } catch (error) {
+    if (
+      logoutAccessToken &&
+      !logoutCompleted &&
+      !(await cleanupLogout(fetcher, supabaseOrigin, anonKey, logoutAccessToken, timeoutMs))
+    ) {
+      throw new Error(`${safeMessage(error)} Cleanup logout could not be proven.`);
     }
+    throw error;
   }
 }
 
@@ -203,18 +307,29 @@ async function readAccessTokenForCleanup(response) {
   }
 }
 
-async function bestEffortLogout(fetcher, supabaseOrigin, anonKey, accessToken, timeoutMs) {
+async function cleanupLogout(fetcher, supabaseOrigin, anonKey, accessToken, timeoutMs) {
   try {
-    await request(
+    const response = await request(
       fetcher,
       `${supabaseOrigin}/auth/v1/logout`,
-      { method: 'POST', headers: { apikey: anonKey, authorization: `Bearer ${accessToken}` } },
+      {
+        method: 'POST',
+        headers: {
+          ...supabasePublicApiKeyHeaders(anonKey),
+          authorization: `Bearer ${accessToken}`,
+        },
+      },
       timeoutMs,
       'Cleanup logout',
     );
+    return response.status === 204;
   } catch {
-    // Preserve the original verification failure without exposing session data.
+    return false;
   }
+}
+
+function safeMessage(error) {
+  return error instanceof Error ? error.message : 'Supabase Auth session verification failed.';
 }
 
 function requiredOrigin(rawValue, name, requireSupabaseProject = false) {
@@ -255,9 +370,20 @@ function parseTimeout(value) {
 }
 
 async function main() {
-  const result = await verifySupabaseAuthSession(readAuthSessionConfiguration());
+  const args = process.argv.slice(2);
+  if (args.some((arg) => arg !== '--expect-previous-password-rejected')) {
+    throw new Error('Unsupported command-line argument.');
+  }
+  const result = await verifySupabaseAuthSession(
+    readAuthSessionConfiguration(await readAuthSessionEnvironmentFile(), {
+      expectPreviousPasswordRejected: args.includes('--expect-previous-password-rejected'),
+    }),
+  );
+  const previousPasswordSummary = result.previousPasswordStatus
+    ? `previous password rejected ${result.previousPasswordStatus}; `
+    : '';
   console.log(
-    `Supabase Auth session verified: password ${result.passwordGrantStatus}; protected ${result.initialProtectedStatus}; refresh ${result.refreshGrantStatus}; refreshed protected ${result.refreshedProtectedStatus}; logout ${result.logoutStatus}; revoked refresh ${result.revokedRefreshStatus}; no-token protected ${result.anonymousProtectedStatus}.`,
+    `Supabase Auth session verified: ${previousPasswordSummary}password ${result.passwordGrantStatus}; protected ${result.initialProtectedStatus}; refresh ${result.refreshGrantStatus}; refreshed protected ${result.refreshedProtectedStatus}; logout ${result.logoutStatus}; revoked refresh ${result.revokedRefreshStatus}; no-token protected ${result.anonymousProtectedStatus}.`,
   );
 }
 

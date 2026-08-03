@@ -44,6 +44,7 @@ BFF 至少需要：
 - `DATABASE_URL`、`REDIS_URL`
 - `ENCRYPTION_KEY`
 - `SUPABASE_URL`，旧 HS256 项目还需要 `SUPABASE_JWT_SECRET`
+- 使用 Supabase Storage 时配置仅限服务端的 `SUPABASE_SERVICE_ROLE_KEY=sb_secret_*`；禁止复制到 Web 或日志
 - `CORS_ORIGINS`
 - `PUBLISH_QUEUE_MODE=database`
 - `OPERATIONS_TOKEN`：至少 32 字符，必须与租户 Bearer token 分离
@@ -59,9 +60,9 @@ Web 的 `NEXT_PUBLIC_*` 会在构建时固化，必须为公开值：
 - `NEXT_PUBLIC_AUTH_MODE=supabase`
 - `NEXT_PUBLIC_BFF_URL`
 - `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY=sb_publishable_*`
 
-Secret rotation 应先让应用同时接受新旧凭证（若协议支持），再切换生产 Secret，确认就绪和业务验证后撤销旧凭证。
+Supabase 新式 `sb_secret_*` / `sb_publishable_*` 只作为 `apikey` 发送；legacy JWT 才能兼容 `apikey` + Bearer。Secret rotation 应先让应用兼容两种格式，再切换 BFF Secret 与 Web Publishable Key、重建前端，确认 Auth/Storage/readiness 和业务验证后撤销旧凭证。
 
 生产 Redis 还保存 `oauth:refresh-result:<shopId>` Token 轮换恢复记录：内容已由 `ENCRYPTION_KEY` 加密，TTL 24 小时。Redis 应启用持久化、监控和合适的内存/淘汰策略，发布或故障恢复时不得把该前缀当作普通缓存批量清除；否则平台已旋转 Token 而 PostgreSQL 尚未提交的极小窗口只能重新授权。
 
@@ -78,7 +79,7 @@ docker build --target web -t <registry>/supplier-web:<git-sha> \
   --build-arg NEXT_PUBLIC_AUTH_MODE=supabase \
   --build-arg NEXT_PUBLIC_BFF_URL=https://api.example.com \
   --build-arg NEXT_PUBLIC_SUPABASE_URL=https://project.supabase.co \
-  --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=<public-anon-key> .
+  --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=<sb_publishable-key> .
 ```
 
 推送后记录三个镜像 digest、Git SHA、构建时间和发布负责人。

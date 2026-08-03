@@ -34,6 +34,10 @@ pnpm exec turbo run build --force
 pnpm --filter @supplier/db exec prisma validate
 pnpm test:ops
 pnpm exec prettier --check "**/*.{ts,tsx,md,json,yml,yaml}"
+pnpm exec prettier --check scripts/supabase-api-keys.mjs \
+  scripts/invite-staging-user.mjs \
+  scripts/invite-staging-user.test.mjs \
+  scripts/verify-supabase-*.mjs
 git diff --check
 node --test deploy/cloudflare/staging-gateway/worker.test.mjs
 ```
@@ -43,7 +47,7 @@ node --test deploy/cloudflare/staging-gateway/worker.test.mjs
 ## 3. 创建 Supabase staging
 
 1. 新建 `supplier-staging` 免费项目，优先选择 Singapore 区域。
-2. 保存 Project URL、Anon Key、Service Role Key、数据库密码、Pooler URL 和 Direct URL；不要放入 Git、聊天或日志。
+2. 保存 Project URL、新式 Publishable Key（`sb_publishable_*`）、新式 Secret Key（`sb_secret_*`）、数据库密码、Pooler URL 和 Direct URL；不要放入 Git、聊天或日志。legacy anon / service-role JWT 只用于迁移期兼容，不能作为新环境默认值。
 3. 从模板创建本地文件 `packages/db/.env.staging.local`，权限设为仅当前用户可读写。
 4. 每次先运行只读审计；脚本会检查 migration 状态、live schema diff、远端 migration checksum、失败/回滚记录和关键数据前置条件：
 
@@ -103,9 +107,10 @@ node --env-file=packages/db/.env.staging.local \
 7. Auth 暂时关闭公开注册；稳定 Web URL 确定后再配置 Site URL、Redirect URLs 并邀请内部测试账号。使用公开 Web 配置重复验证服务端门禁：
 
 ```bash
-node --env-file=apps/web/.env.staging.local \
-  scripts/verify-supabase-boundary.mjs
+pnpm audit:supabase-boundary
 ```
+
+验证器固定读取当前用户所有、权限恰为 `0600` 的 `apps/web/.env.staging.local`，不接受 shell 中残留变量覆盖目标项目或 Key。legacy anon JWT 使用 `apikey` 与 Bearer；新式 Publishable Key 只发送 `apikey`。
 
 完成标准：仓库 migration 全部 applied，0 unfinished、0 rolled back、checksum 全匹配，live schema diff 为空。BFF/Redis readiness 属于下一节环境 smoke，不作为数据库审计的循环前置条件。
 
@@ -139,6 +144,8 @@ docker run -d \
 ```
 
 从 `apps/bff/.env.staging.example` 创建 `apps/bff/.env.staging.local`，填入 Supabase、随机密钥、Cloudflare gateway URL 和最终稳定 Web Origin。首轮保持以下开关关闭：
+
+`SUPABASE_SERVICE_ROLE_KEY` 优先使用 `sb_secret_*`；它只允许出现在 BFF 私有环境文件中，禁止复制到任何 `NEXT_PUBLIC_*` 变量、聊天、日志或浏览器。
 
 ```env
 DOUYIN_ORDER_SYNC_ENABLED=false
@@ -209,7 +216,7 @@ Quick Tunnel 仍不提供 SLA；此守护只关闭“前台进程退出即失联
 
 公司内部商业测试优先使用 Cloudflare Workers Free 的纯静态 Assets；Vercel Hobby 不适用，只有静态深链无法满足产品时才评估 Vercel Pro Trial。
 
-1. 从 `apps/web/.env.staging.example` 创建权限为 `0600`、不入 Git 的 `apps/web/.env.production.local`，填写六个公开构建变量；`NEXT_PUBLIC_BFF_URL` 使用固定 gateway URL，邀请制保持 `NEXT_PUBLIC_SIGNUP_ENABLED=false`。
+1. 从 `apps/web/.env.staging.example` 创建权限为 `0600`、不入 Git 的 `apps/web/.env.production.local`，填写六个公开构建变量；`NEXT_PUBLIC_BFF_URL` 使用固定 gateway URL，`NEXT_PUBLIC_SUPABASE_ANON_KEY` 使用 `sb_publishable_*`，邀请制保持 `NEXT_PUBLIC_SIGNUP_ENABLED=false`。同一组公开配置也写入权限为 `0600` 的 `apps/web/.env.staging.local`，供只读边界与 Auth 验收器固定读取。
 2. 从仓库根目录执行 `pnpm --filter @supplier/web cf:dry-run`。该脚本清理旧 `.next/out`，先构建 `@supplier/shared-types`，再以 `WEB_BUILD_TARGET=static` 导出 `out`；Wrangler 必须报告静态 assets 且没有 bindings。
 3. 执行 `pnpm --filter @supplier/web cf:preview`，检查登录页、设置页、订单页、`/products?id=<商品编号>`，并确认旧 `/products/<商品编号>` 经 `_redirects` 301 到新地址；确认后再执行 `pnpm --filter @supplier/web cf:deploy`。部署输出应为独立的 `supplier-staging-web` assets-only Worker，并记录稳定 `workers.dev` URL、部署版本 ID 和 `git rev-parse HEAD`。
 4. 用 `wrangler tail` 反向验证部署没有可执行 Worker；当前应返回 `Cannot tail a Worker which only has assets`。若未来重新引入 SSR / Worker 代码，必须重新执行 Free CPU 门禁，不能依赖平台对偶发超限的弹性。
@@ -222,7 +229,19 @@ Vercel Pro Trial 备选仍使用 `apps/web/vercel.json`：Root Directory 选 `ap
 
 1. Supabase Auth 的 Site URL 设置为稳定 Web URL。
 2. Redirect URLs 只加入需要的稳定 Web URL，不使用无界通配符。
-3. 关闭公开注册，通过操作员确认的单请求管理员邀请创建内部账号。邀请前在权限为 `0600` 且不入 Git 的 `apps/bff/.env.staging.local` 中确认已有 `SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY`，临时加入精确稳定 Web origin 和目标邮箱：
+3. 先完成已暴露 legacy 管理员 Key 的迁移，不得只替换本地变量后就声称旧 Key 已失效：
+   1. 在 Supabase Dashboard 创建新的 `sb_secret_*` 与 `sb_publishable_*`；创建和最终停用 legacy Key 都属于外部权限变更，执行前需当次确认。
+   2. 将 `sb_secret_*` 写入 `apps/bff/.env.staging.local`，将 `sb_publishable_*` 写入 Web staging/production 文件；重启 BFF，并重新构建、部署静态 Web。
+   3. 运行下列验证。Secret 验证器固定读取 BFF 私有文件，使用随机 Storage 路径执行 Auth admin、上传、公开读取和删除；Publishable 边界验证器固定读取 Web 私有文件。两者都禁止重定向，不输出 Key、对象路径或响应正文：
+
+      ```bash
+      pnpm audit:supabase-key-rotation
+      pnpm audit:supabase-boundary:publishable
+      ```
+
+   4. 再运行 `pnpm deploy:verify` 和真实 Auth 会话 smoke。只有新 Secret、Publishable、Web bundle、BFF、Auth 与 Storage 全部通过后，才能在 Dashboard 停用 legacy Key；停用后重复上述验证和部署 smoke。
+
+4. 关闭公开注册，通过操作员确认的单请求管理员邀请创建内部账号。邀请前在权限为 `0600` 且不入 Git 的 `apps/bff/.env.staging.local` 中确认已有 `SUPABASE_URL` 和新式 `SUPABASE_SERVICE_ROLE_KEY`，临时加入精确稳定 Web origin 和目标邮箱：
 
    ```env
    WEB_URL=https://supplier-staging-web.chenjie.workers.dev
@@ -235,27 +254,33 @@ Vercel Pro Trial 备选仍使用 `apps/web/vercel.json`：Root Directory 选 `ap
    pnpm staging:auth:invite
    ```
 
-   CLI 固定读取上述本地文件并要求它是当前用户所有、权限恰为 `0600` 的普通文件，不使用 shell 中残留的同名变量覆盖 Supabase 项目、Web 回跳或邮箱。脚本只接受受支持的 Supabase service-role / secret Key 格式，实际管理员权限仍由远端 Auth 校验；它通过 `POST /auth/v1/invite` 发送一条禁止跟随重定向的请求，不打印邮箱、用户 ID、响应正文或 Key，也不会自动重试。HTTP 200 后先立即从环境文件移除 `STAGING_INVITE_EMAIL`，再检查邮箱。若出现超时、网络错误、5xx、成功响应不完整或重复操作疑问，先在 Supabase Auth users 中核对，不能直接重跑；未确认邮箱重复邀请会再次发信并旋转邀请 token。邀请链接必须回到 `WEB_URL`，进入 Web 后设置至少 8 位登录密码。
+   CLI 固定读取上述本地文件并要求它是当前用户所有、权限恰为 `0600` 的普通文件，不使用 shell 中残留的同名变量覆盖 Supabase 项目、Web 回跳或邮箱。脚本只接受受支持的 Supabase service-role / secret Key 格式；legacy JWT 使用 `apikey` 与 Bearer，新式 `sb_secret_*` 只发送 `apikey`，实际管理员权限仍由远端 Auth 校验。它通过 `POST /auth/v1/invite` 发送一条禁止跟随重定向的请求，不打印邮箱、用户 ID、响应正文或 Key，也不会自动重试。HTTP 200 后先立即从环境文件移除 `STAGING_INVITE_EMAIL`，再检查邮箱。若出现超时、网络错误、5xx、成功响应不完整或重复操作疑问，先在 Supabase Auth users 中核对，不能直接重跑；未确认邮箱重复邀请会再次发信并旋转邀请 token。邀请链接必须回到 `WEB_URL`，进入 Web 后设置至少 8 位登录密码。
 
-4. 退出后使用新密码重新登录，再验证刷新页面、token 自动刷新和退出；忘记密码邮件必须回到同一稳定 Web origin。
-5. 运行以下命令加载 staging Web 公共配置，确认 `disable_signup=true` 且 anon 读取业务表返回 401/403：
-
-```bash
-node --env-file=apps/web/.env.staging.local \
-  scripts/verify-supabase-boundary.mjs
-```
-
-6. 邀请账号完成设置密码后，在权限为 `0600` 且不入 Git 的 `apps/web/.env.staging.local` 临时加入 `AUTH_TEST_EMAIL`、`AUTH_TEST_PASSWORD` 和固定 Worker `BFF_URL`，运行真实会话验证，完成后立即移除测试密码：
+5. 退出后使用当前密码重新登录，再验证刷新页面、token 自动刷新和退出；忘记密码邮件必须回到同一稳定 Web origin。
+6. 运行固定文件边界验证，确认当前为 Publishable Key、`disable_signup=true` 且匿名读取业务表返回 401/403：
 
 ```bash
-node --env-file=apps/web/.env.staging.local \
-  scripts/verify-supabase-auth-session.mjs
+pnpm audit:supabase-boundary:publishable
 ```
 
-验证器依次检查密码登录、有效 JWT 访问、refresh token 换新会话、刷新后 JWT 访问、GoTrue 登出、刚刷新得到的 refresh token 再换会话必须返回 400/401，以及无 Token 访问 401；全程不输出密码或 Token。它不假设客户端登出会使此前签发的 access JWT 立即失效，也不能替代邀请邮件、恢复邮件和浏览器回跳验收。
+7. 邀请账号完成设置密码后，在 `apps/web/.env.staging.local` 临时加入 `AUTH_TEST_EMAIL` 与当前 `AUTH_TEST_PASSWORD`；固定 Worker 已由 `NEXT_PUBLIC_BFF_URL` 提供。运行普通会话验证：
 
-7. 确认无 Token 请求业务 API 返回 401，伪造 `x-user-id` 不生效。
-8. `/api/operations/*` 只接受独立 `OPERATIONS_TOKEN`。
+```bash
+pnpm audit:supabase-auth-session
+```
+
+验证器依次检查密码登录、有效 JWT 访问、refresh token 换新会话、刷新后 JWT 访问、GoTrue 登出、刚刷新得到的 refresh token 再换会话必须返回 400/401，以及无 Token 访问 401；全程不输出邮箱、密码、Token 或响应正文。
+
+8. 在浏览器触发忘记密码，核对邮件和稳定 Web 回跳，并设置一个不同的新密码。随后把旧密码写入 `AUTH_TEST_PREVIOUS_PASSWORD`，把 `AUTH_TEST_PASSWORD` 更新为新密码，执行：
+
+   ```bash
+   pnpm audit:supabase-auth-password-transition
+   ```
+
+   转换验收先要求旧密码返回 400/401，再完整验证新密码会话；429、5xx、超时或网络错误都不能当作“旧密码已失效”。旧密码若意外成功，脚本仅清理该会话并失败，不继续新密码链路。脚本不会发送恢复邮件、点击链接或修改密码，不能替代浏览器验收。完成后立即从文件移除 `AUTH_TEST_EMAIL`、`AUTH_TEST_PASSWORD` 和 `AUTH_TEST_PREVIOUS_PASSWORD`。
+
+9. 确认无 Token 请求业务 API 返回 401，伪造 `x-user-id` 不生效。
+10. `/api/operations/*` 只接受独立 `OPERATIONS_TOKEN`。
 
 ## 9. 验收与平台开关
 
@@ -286,10 +311,11 @@ pnpm deploy:verify
 
 截至 2026-08-03，Supabase、Storage、Auth 服务端边界、Worker、Redis、BFF readiness、告警状态机和非空重启持久性已有真实环境证据，但 R0-03 仍未完成：
 
-固定 Worker + 固定 Cloudflare Web 已通过 15 项部署验证，包括 live/ready、四个生产文档路由 404、三种鉴权拒绝、OAuth、运维状态/检查/指标和 Web 200。当前 Web URL 为 `https://supplier-staging-web.chenjie.workers.dev`，部署版本为 `2cfa19b5-0b44-4081-a240-8c0737563922`；BFF 精确 CORS/OAuth 结果地址及 Supabase Site/Redirect URL 已回填。
+固定 Worker + 固定 Cloudflare Web 已通过 15 项部署验证，包括 live/ready、四个生产文档路由 404、三种鉴权拒绝、OAuth、运维状态/检查/指标和 Web 200。当前 Web URL 为 `https://supplier-staging-web.chenjie.workers.dev`，BFF 精确 CORS/OAuth 结果地址及 Supabase Site/Redirect URL 已回填。
 
-- 初版 OpenNext 压缩上传为 953.71 KiB，但动态路由 CPU 实测 40ms，已被替换。当前版本 `7d15e88a-20bc-40c8-a255-4dae8dcd7e52` 部署 59 个纯静态 assets；Cloudflare 明确无可 tail 的 Worker，固定 URL 与 15/15 HTTPS 复验通过，稳定 Web 托管缺口已关闭。
-- 操作员二次确认的单请求管理员邀请脚本及安全测试已完成；尚无真实邀请邮箱完成收信、设置密码、登录、刷新、受保护 API、退出和密码恢复验收。
+- 初版 OpenNext 版本 `2cfa19b5-0b44-4081-a240-8c0737563922` 压缩上传为 953.71 KiB，但动态路由 CPU 实测 40ms，已被替换。当前版本 `7d15e88a-20bc-40c8-a255-4dae8dcd7e52` 部署 59 个纯静态 assets；Cloudflare 明确无可 tail 的 Worker，固定 URL 与 15/15 HTTPS 复验通过，稳定 Web 托管缺口已关闭。
+- 已增加新旧 Key 请求头兼容、强制新 Secret 的 Auth/Storage 轮换 smoke、固定私有 Web 配置的边界/会话验证，以及旧密码失效检查；这些仍是代码证据，尚未创建新 Key、重新部署 Web/BFF 或停用 legacy Key。
+- 操作员二次确认的单请求管理员邀请脚本及安全测试已完成；尚无真实邀请邮箱完成收信、设置密码、登录、刷新、受保护 API、退出、恢复邮件回跳和旧密码失效验收。
 - Redis AOF / 命名卷与数据库队列已分别通过非空探针重启演练；探针均已清理，重启后本机与固定 Worker readiness 为 200。
 - BFF / Quick Tunnel supervisor、LaunchAgent 安装器及 15 项测试已完成，Worker 更新只执行仓库锁定的 Wrangler 4.118.0；但持续后台暴露本机 BFF 并自动修改 Worker upstream 属于长期权限变更，尚未获得用户明确授权安装；当前仍是临时前台进程。Quick Tunnel 仍无 SLA。
 - Vercel Hobby 只允许非商业个人验证，不作为公司商业内测的回退方案。

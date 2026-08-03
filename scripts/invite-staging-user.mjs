@@ -6,6 +6,8 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 
+import { requireSupabaseAdminApiKey, supabaseAdminApiKeyHeaders } from './supabase-api-keys.mjs';
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 30_000;
@@ -38,7 +40,7 @@ export async function readInviteEnvironmentFile(path = STAGING_ENV_FILE) {
 export function readInviteConfiguration(environment = process.env) {
   const supabaseOrigin = requiredOrigin(environment.SUPABASE_URL, 'SUPABASE_URL', true);
   const webOrigin = requiredOrigin(environment.WEB_URL, 'WEB_URL');
-  const adminKey = requiredAdminKey(environment.SUPABASE_SERVICE_ROLE_KEY);
+  const adminKey = requireSupabaseAdminApiKey(environment.SUPABASE_SERVICE_ROLE_KEY);
   const email = requiredValue(environment.STAGING_INVITE_EMAIL, 'STAGING_INVITE_EMAIL').trim();
   if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new Error('STAGING_INVITE_EMAIL is invalid.');
@@ -67,8 +69,7 @@ export async function inviteStagingUser(configuration, confirmedEmail, fetcher =
     response = await fetcher(url, {
       method: 'POST',
       headers: {
-        apikey: adminKey,
-        Authorization: `Bearer ${adminKey}`,
+        ...supabaseAdminApiKeyHeaders(adminKey),
         'Content-Type': 'application/json;charset=UTF-8',
         'X-Supabase-Api-Version': '2024-01-01',
       },
@@ -122,37 +123,6 @@ export async function inviteStagingUser(configuration, confirmedEmail, fetcher =
   }
 
   return { status: response.status };
-}
-
-function requiredAdminKey(rawValue) {
-  const value = requiredValue(rawValue, 'SUPABASE_SERVICE_ROLE_KEY').trim();
-  if (/^sb_secret_[A-Za-z0-9_-]{20,}$/.test(value)) return value;
-
-  const parts = value.split('.');
-  if (parts.length === 3) {
-    try {
-      const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
-      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-      if (
-        header &&
-        typeof header === 'object' &&
-        header.alg === 'HS256' &&
-        payload &&
-        typeof payload === 'object' &&
-        payload.role === 'service_role' &&
-        payload.iss === 'supabase' &&
-        Number.isInteger(payload.exp) &&
-        payload.exp > Math.floor(Date.now() / 1000)
-      ) {
-        return value;
-      }
-    } catch {
-      // Fall through to a generic error that does not expose key material.
-    }
-  }
-  throw new Error(
-    'SUPABASE_SERVICE_ROLE_KEY must have a supported service-role or secret key format.',
-  );
 }
 
 function requiredOrigin(rawValue, name, requireSupabaseProject = false) {

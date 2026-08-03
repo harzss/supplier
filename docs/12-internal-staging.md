@@ -29,12 +29,12 @@ Web Worker 只托管 Next 静态导出产物；staging gateway 为 BFF 和平台
 pnpm audit:prod
 pnpm lint
 pnpm typecheck
-pnpm exec turbo run test --force -- --api.host=127.0.0.1
+pnpm exec turbo run test --force
 pnpm exec turbo run build --force
 pnpm --filter @supplier/db exec prisma validate
+pnpm test:ops
 pnpm exec prettier --check "**/*.{ts,tsx,md,json,yml,yaml}"
 git diff --check
-node --test scripts/verify-supabase-boundary.test.mjs
 node --test deploy/cloudflare/staging-gateway/worker.test.mjs
 ```
 
@@ -222,7 +222,21 @@ Vercel Pro Trial 备选仍使用 `apps/web/vercel.json`：Root Directory 选 `ap
 
 1. Supabase Auth 的 Site URL 设置为稳定 Web URL。
 2. Redirect URLs 只加入需要的稳定 Web URL，不使用无界通配符。
-3. 关闭公开注册，通过邀请创建内部账号；邀请链接进入 Web 后必须设置至少 8 位登录密码。
+3. 关闭公开注册，通过操作员确认的单请求管理员邀请创建内部账号。邀请前在权限为 `0600` 且不入 Git 的 `apps/bff/.env.staging.local` 中确认已有 `SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY`，临时加入精确稳定 Web origin 和目标邮箱：
+
+   ```env
+   WEB_URL=https://supplier-staging-web.chenjie.workers.dev
+   STAGING_INVITE_EMAIL=replace-with-target-inbox
+   ```
+
+   随后执行命令，并在终端提示后再次手工输入本次目标邮箱：
+
+   ```bash
+   pnpm staging:auth:invite
+   ```
+
+   CLI 固定读取上述本地文件并要求它是当前用户所有、权限恰为 `0600` 的普通文件，不使用 shell 中残留的同名变量覆盖 Supabase 项目、Web 回跳或邮箱。脚本只接受受支持的 Supabase service-role / secret Key 格式，实际管理员权限仍由远端 Auth 校验；它通过 `POST /auth/v1/invite` 发送一条禁止跟随重定向的请求，不打印邮箱、用户 ID、响应正文或 Key，也不会自动重试。HTTP 200 后先立即从环境文件移除 `STAGING_INVITE_EMAIL`，再检查邮箱。若出现超时、网络错误、5xx、成功响应不完整或重复操作疑问，先在 Supabase Auth users 中核对，不能直接重跑；未确认邮箱重复邀请会再次发信并旋转邀请 token。邀请链接必须回到 `WEB_URL`，进入 Web 后设置至少 8 位登录密码。
+
 4. 退出后使用新密码重新登录，再验证刷新页面、token 自动刷新和退出；忘记密码邮件必须回到同一稳定 Web origin。
 5. 运行以下命令加载 staging Web 公共配置，确认 `disable_signup=true` 且 anon 读取业务表返回 401/403：
 
@@ -275,7 +289,7 @@ pnpm deploy:verify
 固定 Worker + 固定 Cloudflare Web 已通过 15 项部署验证，包括 live/ready、四个生产文档路由 404、三种鉴权拒绝、OAuth、运维状态/检查/指标和 Web 200。当前 Web URL 为 `https://supplier-staging-web.chenjie.workers.dev`，部署版本为 `2cfa19b5-0b44-4081-a240-8c0737563922`；BFF 精确 CORS/OAuth 结果地址及 Supabase Site/Redirect URL 已回填。
 
 - 初版 OpenNext 压缩上传为 953.71 KiB，但动态路由 CPU 实测 40ms，已被替换。当前版本 `7d15e88a-20bc-40c8-a255-4dae8dcd7e52` 部署 59 个纯静态 assets；Cloudflare 明确无可 tail 的 Worker，固定 URL 与 15/15 HTTPS 复验通过，稳定 Web 托管缺口已关闭。
-- 尚无真实邀请邮箱完成设置密码、登录、刷新、受保护 API、退出和密码恢复验收。
+- 操作员二次确认的单请求管理员邀请脚本及安全测试已完成；尚无真实邀请邮箱完成收信、设置密码、登录、刷新、受保护 API、退出和密码恢复验收。
 - Redis AOF / 命名卷与数据库队列已分别通过非空探针重启演练；探针均已清理，重启后本机与固定 Worker readiness 为 200。
 - BFF / Quick Tunnel supervisor、LaunchAgent 安装器及 15 项测试已完成，Worker 更新只执行仓库锁定的 Wrangler 4.118.0；但持续后台暴露本机 BFF 并自动修改 Worker upstream 属于长期权限变更，尚未获得用户明确授权安装；当前仍是临时前台进程。Quick Tunnel 仍无 SLA。
 - Vercel Hobby 只允许非商业个人验证，不作为公司商业内测的回退方案。

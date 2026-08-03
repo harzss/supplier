@@ -38,6 +38,7 @@
     "db:seed": "node scripts/seed.mjs",
     "audit:supabase-boundary": "node scripts/verify-supabase-boundary.mjs",
     "audit:supabase-auth-session": "node scripts/verify-supabase-auth-session.mjs",
+    "staging:auth:invite": "node scripts/invite-staging-user.mjs",
     "deploy:verify": "node scripts/verify-deployment.mjs",
     "staging:supervise": "node scripts/staging-local-supervisor.mjs",
     "staging:launchagent:install": "node scripts/install-staging-launchagent.mjs",

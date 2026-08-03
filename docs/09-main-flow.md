@@ -49,7 +49,7 @@ flowchart LR
 | AI 详情 / 主图   | 🔄 开发中                       | 详情链路已完成；主图权益、远程 GPU 流水线编排、托管与铺货接入已完成，待真实 worker 联调     |
 | 真实平台 OAuth   | 🔄 开发中                       | M3-1～5 已完成；M3-6 已增加联调准备度检查，当前环境 0/6 待配置                              |
 
-**2026-08-03 当前结论**：代码门禁已通过 522 项测试、lint、typecheck、production build、Prisma、Prettier 与依赖安全审计；BFF、migration 和 Web 三类非 root 镜像已重新构建。staging 已完成 33/33 migration、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF、告警基础 smoke，以及 Redis / 数据库队列非空重启持久性实测。Cloudflare Web 已从超出 CPU 门禁的 OpenNext 方案改为 59 个纯静态 Assets；固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 再验收均通过，Cloudflare API 明确该部署只有 assets、没有可执行 Worker。R0-03 仍缺真实邀请账号生命周期和已授权安装的长期进程守护验收，因此不能宣称生产可用。
+**2026-08-03 当前结论**：代码门禁已通过 522 项测试、lint、typecheck、production build、Prisma、Prettier 与依赖安全审计；BFF、migration 和 Web 三类非 root 镜像已重新构建。staging 已完成 33/33 migration、schema diff、RLS/权限边界、Storage、Worker、Redis、BFF、告警基础 smoke，以及 Redis / 数据库队列非空重启持久性实测。Cloudflare Web 已从超出 CPU 门禁的 OpenNext 方案改为 59 个纯静态 Assets；固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 再验收均通过，Cloudflare API 明确该部署只有 assets、没有可执行 Worker。受控 Supabase 管理员邀请工具已完成，固定读取 owner-only `0600` 环境文件，覆盖目标邮箱二次确认、受支持管理员 Key 格式、精确 HTTPS 回跳、禁止重定向、单次请求和敏感信息脱敏；尚未发送真实邀请。现有 service-role Key 因审查过程暴露而必须先轮换。R0-03 仍缺真实邀请账号生命周期和已授权安装的长期进程守护验收，因此不能宣称生产可用。
 
 <details>
 <summary>M1～M67 历史增量台账（其中“当前”均指记录当时，不代表 2026-08-03 状态）</summary>

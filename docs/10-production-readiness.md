@@ -15,7 +15,7 @@
 
 R2-01 当前已有跨页首次铺货进度、利润试算、统一风险预检、服务端草稿和用户内请求幂等键。草稿恢复后强制重新试算/预检，多标签旧 generation 不能覆盖新草稿；重复点击和响应丢失恢复原任务。该能力在两条新 migration 应用并重部署前不能进入 staging，且尚缺 OAuth 安全回跳、真实店 E2E 和 5 人无指导可用性验收，因此仍只属于应用侧进行中。
 
-候选版本已通过全仓 602 项测试（其中 BFF 413、Web 13）、51 项运维脚本、隔离 Chromium 1/1，以及 lint 2/2、typecheck 14/14、production build 9/9、Prisma、Prettier 和差异检查。BFF、migration、Web 三个非 root Linux 镜像仍属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用第 34、35 个 migration。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
+候选版本已通过全仓 607 项测试（其中 BFF 413、Web 18）、51 项运维脚本、隔离 Chromium 1/1，以及 lint 2/2、typecheck 14/14、production build 9/9、Prisma、Prettier 和差异检查。BFF、migration、Web 三个非 root Linux 镜像仍属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用第 34、35 个 migration。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
 
 ### M13～M67 历史账本（按记录当时理解）
 

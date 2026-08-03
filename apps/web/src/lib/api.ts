@@ -469,12 +469,42 @@ export interface ProductBatchCandidate {
   platformProductId: string;
   status: string;
   salePrice: number;
+  priceRange: [number, number] | null;
+  skuCount: number;
+  priceEditable: boolean;
+  priceEditReason: string | null;
   sourceProductId: string;
   sourceAvailability: string;
   inventorySyncStatus: string;
   mutationRevision: number;
   publishedAt: string;
 }
+
+export type ProductBatchAction = 'offline' | 'edit_price';
+
+export type ProductBatchPriceRule =
+  | {
+      mode: 'percentage';
+      direction: 'increase' | 'decrease';
+      basisPoints: number;
+    }
+  | {
+      mode: 'targets';
+      targets: Array<{ publishedProductId: string; targetStartPrice: string }>;
+    };
+
+export type ProductBatchPreviewRequest =
+  | {
+      clientRequestId: string;
+      action: 'offline';
+      publishedProductIds: string[];
+    }
+  | {
+      clientRequestId: string;
+      action: 'edit_price';
+      publishedProductIds: string[];
+      priceRule: ProductBatchPriceRule;
+    };
 
 export interface ProductBatchCandidatePage {
   items: ProductBatchCandidate[];
@@ -507,6 +537,12 @@ export interface ProductBatchItem {
   platformProductId: string | null;
   beforeStatus: string;
   desiredStatus: string;
+  beforePrice: number | null;
+  desiredPrice: number | null;
+  beforePriceRange: [number, number] | null;
+  desiredPriceRange: [number, number] | null;
+  actualPriceRange: [number, number] | null;
+  skuCount: number;
   status: string;
   attempts: number;
   maxAttempts: number;
@@ -520,7 +556,7 @@ export interface ProductBatchItem {
 export interface ProductBatchTask {
   taskId: string;
   clientRequestId: string;
-  action: string;
+  action: ProductBatchAction;
   status: string;
   previewRevision: number;
   cancelRequestedAt: string | null;
@@ -1071,11 +1107,7 @@ export const api = {
     return request(`/product-batches/candidates?${params.toString()}`);
   },
 
-  createProductBatchPreview(body: {
-    clientRequestId: string;
-    action: 'offline';
-    publishedProductIds: string[];
-  }): Promise<ProductBatchTask> {
+  createProductBatchPreview(body: ProductBatchPreviewRequest): Promise<ProductBatchTask> {
     return request('/product-batches/previews', {
       method: 'POST',
       body: JSON.stringify(body),

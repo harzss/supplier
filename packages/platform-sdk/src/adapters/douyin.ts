@@ -12,6 +12,7 @@ import type {
   OrderQuery,
   PlatformExecutionGuard,
   PlatformOrder,
+  PlatformProductPriceState,
   PlatformProductState,
   PlatformShipmentPackage,
   PublishProductDto,
@@ -22,6 +23,7 @@ import type {
   ShipPackagesDto,
   SyncInventoryDto,
   UpdateProductDto,
+  UpdateProductPriceDto,
 } from '../types';
 
 type HttpFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -92,6 +94,7 @@ interface DouyinProductDetailData {
   outer_product_id?: string;
   status?: number | string;
   check_status?: number | string;
+  spec_prices?: unknown[];
 }
 
 const PRODUCT_DETAIL_NOT_FOUND_SUB_CODES = [
@@ -203,6 +206,50 @@ export class DouyinAdapter extends BasePlatformAdapter {
       product_id: productId,
       quality_list: serializeQualifications(dto.qualifications ?? []),
     });
+  }
+
+  async updateProductPrice(token: string, dto: UpdateProductPriceDto): Promise<void> {
+    const productId = positiveNumericId(dto.platformProductId, 'product ID');
+    const sourceSkuId = strictExternalSkuId(dto.sourceSkuId);
+    const priceCents = positiveInteger(dto.priceCents, 'SKU price in cents');
+    await this.requestApi<undefined>(
+      '/sku/editPrice',
+      'sku.editPrice',
+      'product price update',
+      token,
+      {
+        price: priceCents,
+        out_sku_id: sourceSkuId,
+        product_id: productId,
+      },
+    );
+  }
+
+  async getProductPrices(
+    token: string,
+    productIdValue: string,
+  ): Promise<PlatformProductPriceState> {
+    const productId = positiveNumericId(productIdValue, 'product ID');
+    const data = await this.requestApi<DouyinProductDetailData>(
+      '/product/detail',
+      'product.detail',
+      'product detail',
+      token,
+      { product_id: productId },
+    );
+    if (!data) throw new Error('Douyin product detail returned an invalid response');
+    const returnedProductId = stringValue(data.product_id_str ?? data.product_id).trim();
+    if (returnedProductId && returnedProductId !== productId) {
+      throw new Error('Douyin product detail returned a mismatched product ID');
+    }
+    const status = optionalInteger(data.status);
+    const checkStatus = optionalInteger(data.check_status);
+    return {
+      state: mapProductState(status, checkStatus),
+      status,
+      checkStatus,
+      items: parseProductPrices(data.spec_prices),
+    };
   }
 
   async getProductState(token: string, productIdValue: string): Promise<PlatformProductState> {
@@ -716,6 +763,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | '/product/qualificationConfig'
       | '/product/setOffline'
       | '/shop/getShopCategory'
+      | '/sku/editPrice'
       | '/sku/syncStockBatchMultiProducts'
       | '/order/orderDetail'
       | '/order/searchList'
@@ -733,6 +781,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | 'product.qualificationConfig'
       | 'product.setOffline'
       | 'shop.getShopCategory'
+      | 'sku.editPrice'
       | 'sku.syncStockBatchMultiProducts'
       | 'order.orderDetail'
       | 'order.searchList'
@@ -750,6 +799,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | 'category qualifications'
       | 'category tree'
       | 'product offline'
+      | 'product price update'
       | 'inventory sync'
       | 'order detail'
       | 'order list'
@@ -1217,6 +1267,29 @@ function mapProductState(
   if (status === 1) return 'offline';
   if (status === 2) return 'deleted';
   return 'unknown';
+}
+
+function parseProductPrices(value: unknown): PlatformProductPriceState['items'] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('Douyin product detail returned no SKU prices');
+  }
+  const seen = new Set<string>();
+  const items = value.map((itemValue) => {
+    const item = recordValue(itemValue);
+    if (!item) throw new Error('Douyin product detail returned an invalid SKU price');
+    const sourceSkuId = strictExternalSkuId(item.outer_sku_id);
+    if (seen.has(sourceSkuId)) {
+      throw new Error(`Douyin product detail returned duplicate external SKU ID: ${sourceSkuId}`);
+    }
+    seen.add(sourceSkuId);
+    return {
+      sourceSkuId,
+      priceCents: positiveInteger(item.price, 'SKU price in cents'),
+    };
+  });
+  return items.sort((left, right) =>
+    left.sourceSkuId < right.sourceSkuId ? -1 : left.sourceSkuId > right.sourceSkuId ? 1 : 0,
+  );
 }
 
 function mapCategoryAttribute(value: unknown): CategoryAttr[] {
@@ -1817,6 +1890,14 @@ function boundedText(value: unknown, maxLength: number, label: string): string {
     throw new Error(`Douyin ${label} is invalid`);
   }
   return text;
+}
+
+function strictExternalSkuId(value: unknown): string {
+  const sourceSkuId = stringValue(value).trim();
+  if (!sourceSkuId || sourceSkuId.length > 128 || /[\u0000-\u001f\u007f]/.test(sourceSkuId)) {
+    throw new Error('Douyin external SKU ID is invalid');
+  }
+  return sourceSkuId;
 }
 
 function strictShipmentText(value: unknown, maxLength: number, label: string): string {

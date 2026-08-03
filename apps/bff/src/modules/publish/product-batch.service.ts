@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, type ProductBatchItem } from '@supplier/db';
+import type { PlatformAdapter, PlatformProductPriceState } from '@supplier/platform-sdk';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
 import { EntitlementService } from '../entitlement/entitlement.service';
@@ -20,6 +21,7 @@ import { ShopTokenService } from '../shop/shop-token.service';
 import type {
   CreateProductBatchPreviewDto,
   ExecuteProductBatchDto,
+  ProductBatchPriceRuleDto,
   ProductBatchCandidateQueryDto,
   ProductBatchTaskListQueryDto,
   RetryProductBatchDto,
@@ -28,6 +30,7 @@ import { PlatformProductLockService } from './platform-product-lock.service';
 
 const STALE_ITEM_MS = 5 * 60_000;
 const TASK_RECONCILE_INTERVAL_MS = 30_000;
+const MAX_PRICE_CENTS = 100_000_000;
 const TERMINAL_TASK_STATUSES = ['cancelled', 'partial', 'succeeded', 'failed'] as const;
 
 const TASK_INCLUDE = {
@@ -38,6 +41,7 @@ const TASK_INCLUDE = {
         include: {
           shop: true,
           sourceProduct: true,
+          task: { select: { skuSnapshot: true } },
         },
       },
     },
@@ -50,7 +54,7 @@ const EXECUTION_INCLUDE = {
     include: {
       shop: true,
       sourceProduct: true,
-      task: { select: { userId: true } },
+      task: { select: { userId: true, skuSnapshot: true } },
     },
   },
 } satisfies Prisma.ProductBatchItemInclude;
@@ -71,6 +75,10 @@ export interface ProductBatchCandidatePage {
     platformProductId: string;
     status: string;
     salePrice: number;
+    priceRange: [number, number] | null;
+    skuCount: number;
+    priceEditable: boolean;
+    priceEditReason: string | null;
     sourceProductId: string;
     sourceAvailability: string;
     inventorySyncStatus: string;
@@ -109,6 +117,12 @@ export interface ProductBatchItemView {
   platformProductId: string | null;
   beforeStatus: string;
   desiredStatus: string;
+  beforePrice: number | null;
+  desiredPrice: number | null;
+  beforePriceRange: [number, number] | null;
+  desiredPriceRange: [number, number] | null;
+  actualPriceRange: [number, number] | null;
+  skuCount: number;
   status: string;
   attempts: number;
   maxAttempts: number;
@@ -118,6 +132,27 @@ export interface ProductBatchItemView {
   startedAt: string | null;
   finishedAt: string | null;
 }
+
+interface SkuPriceItem {
+  sourceSkuId: string;
+  priceCents: number;
+}
+
+interface SkuPriceSnapshot {
+  version: 1;
+  items: SkuPriceItem[];
+}
+
+type NormalizedPriceRule =
+  | {
+      mode: 'percentage';
+      direction: 'increase' | 'decrease';
+      basisPoints: number;
+    }
+  | {
+      mode: 'targets';
+      targets: Array<{ publishedProductId: string; targetStartPriceCents: number }>;
+    };
 
 export interface ProductBatchSummary {
   total: number;
@@ -178,26 +213,44 @@ export class ProductBatchService {
         orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,
-        include: { shop: true, sourceProduct: true },
+        include: {
+          shop: true,
+          sourceProduct: true,
+          task: { select: { skuSnapshot: true } },
+        },
       }),
     ]);
     return {
-      items: records.map((record) => ({
-        publishedProductId: record.id.toString(),
-        title: record.title,
-        mainImage: record.mainImage ?? record.sourceProduct.mainImage,
-        shopId: record.shopId.toString(),
-        shopName: record.shop.shopName,
-        platform: record.shop.platform,
-        platformProductId: record.platformProductId!,
-        status: record.status,
-        salePrice: Number(record.salePrice),
-        sourceProductId: record.sourceProduct.productId1688,
-        sourceAvailability: record.sourceProduct.availability,
-        inventorySyncStatus: record.inventorySyncStatus,
-        mutationRevision: record.mutationRevision,
-        publishedAt: record.publishedAt.toISOString(),
-      })),
+      items: records.map((record) => {
+        const prices =
+          parseSkuPriceSnapshot(record.skuPriceSnapshot) ??
+          priceSnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
+        const priceEditable = record.status === 'online' && !!prices;
+        return {
+          publishedProductId: record.id.toString(),
+          title: record.title,
+          mainImage: record.mainImage ?? record.sourceProduct.mainImage,
+          shopId: record.shopId.toString(),
+          shopName: record.shop.shopName,
+          platform: record.shop.platform,
+          platformProductId: record.platformProductId!,
+          status: record.status,
+          salePrice: Number(record.salePrice),
+          priceRange: prices ? snapshotPriceRange(prices) : null,
+          skuCount: prices?.items.length ?? 0,
+          priceEditable,
+          priceEditReason: priceEditable
+            ? null
+            : record.status !== 'online'
+              ? '只有在线商品可以改价'
+              : '缺少可核对的 SKU 价格快照',
+          sourceProductId: record.sourceProduct.productId1688,
+          sourceAvailability: record.sourceProduct.availability,
+          inventorySyncStatus: record.inventorySyncStatus,
+          mutationRevision: record.mutationRevision,
+          publishedAt: record.publishedAt.toISOString(),
+        };
+      }),
       total,
       page: query.page,
       pageSize: query.pageSize,
@@ -209,7 +262,8 @@ export class ProductBatchService {
     dto: CreateProductBatchPreviewDto,
   ): Promise<ProductBatchTaskView> {
     this.entitlement.assertFeature(user.plan, 'catalog.batch');
-    const fingerprint = requestFingerprint(dto.action, dto.publishedProductIds);
+    const priceRule = normalizePriceRule(dto.action, dto.publishedProductIds, dto.priceRule);
+    const fingerprint = requestFingerprint(dto.action, dto.publishedProductIds, priceRule);
     const replay = await this.findByClientRequestId(user.userId, dto.clientRequestId);
     if (replay) {
       this.assertSameRequest(replay, dto.action, fingerprint);
@@ -227,7 +281,11 @@ export class ProductBatchService {
           ...runtimeShopWhere(this.demoMode),
         },
       },
-      include: { shop: true, sourceProduct: true },
+      include: {
+        shop: true,
+        sourceProduct: true,
+        task: { select: { skuSnapshot: true } },
+      },
     });
     if (records.length !== ids.length) {
       throw new NotFoundException('部分商品不存在、已失效或不属于当前账号');
@@ -244,14 +302,14 @@ export class ProductBatchService {
           items: {
             create: dto.publishedProductIds.map((id, ordinal) => {
               const record = byId.get(id)!;
-              const preview = previewStatus(record.status, record.platformProductId);
+              const preview = previewForAction(dto.action, record, priceRule);
               return {
                 publishedProductId: record.id,
                 ordinal,
                 status: preview.status,
                 expectedMutationRevision: record.mutationRevision,
-                beforeSnapshot: beforeSnapshot(record) as Prisma.InputJsonValue,
-                desiredSnapshot: { status: 'offline' } as Prisma.InputJsonValue,
+                beforeSnapshot: preview.beforeSnapshot as Prisma.InputJsonValue,
+                desiredSnapshot: preview.desiredSnapshot as Prisma.InputJsonValue,
                 result: preview.result as Prisma.InputJsonValue | undefined,
                 errorCode: preview.errorCode,
                 errorMessage: preview.errorMessage,
@@ -491,7 +549,7 @@ export class ProductBatchService {
   }
 
   async executeClaimed(item: ProductBatchExecutionRecord): Promise<'processed' | 'stale'> {
-    if (item.task.action !== 'offline') {
+    if (!['offline', 'edit_price'].includes(item.task.action)) {
       throw new ProductBatchItemError('ACTION_UNSUPPORTED', '当前批量动作尚未实现', false);
     }
     if (item.task.cancelRequestedAt) return this.cancelClaimedItem(item);
@@ -511,13 +569,13 @@ export class ProductBatchService {
       if (!product.platformProductId) {
         throw new ProductBatchItemError('PLATFORM_ID_MISSING', '商品缺少平台商品 ID', false);
       }
-      if (product.status === 'offline') {
+      if (current.task.action === 'offline' && product.status === 'offline') {
         return this.completeClaimedItem(current, { reason: 'already_offline' });
       }
       if (product.status !== 'online') {
         throw new ProductBatchItemError(
           'PRODUCT_NOT_ONLINE',
-          `商品当前状态为 ${product.status}，未执行下架`,
+          `商品当前状态为 ${product.status}，未执行${current.task.action === 'offline' ? '下架' : '改价'}`,
           false,
         );
       }
@@ -538,6 +596,11 @@ export class ProductBatchService {
         : await this.shopTokens.getAccessToken(product.shop.id, current.task.userId);
       await this.platformProductLocks.renew(product.id, lock);
       if (!(await this.assertItemOwned(current))) return 'stale';
+
+      if (current.task.action === 'edit_price') {
+        const result = await this.executePriceClaimed(current, adapter, token, lock);
+        return result;
+      }
 
       let recovered = false;
       let platformState: Record<string, unknown> | null = null;
@@ -628,6 +691,222 @@ export class ProductBatchService {
     } finally {
       await this.platformProductLocks.release(item.publishedProductId, lock);
     }
+  }
+
+  private async executePriceClaimed(
+    item: ProductBatchExecutionRecord,
+    adapter: PlatformAdapter,
+    token: string,
+    lock: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    const before = parseSkuPriceSnapshot(jsonRecord(item.beforeSnapshot)?.skuPrices);
+    const desired = parseSkuPriceSnapshot(jsonRecord(item.desiredSnapshot)?.skuPrices);
+    if (!before || !desired || !sameSkuIds(before, desired)) {
+      throw new ProductBatchItemError(
+        'PRICE_SNAPSHOT_INVALID',
+        '批量改价快照不完整，请重新生成预览',
+        false,
+      );
+    }
+    if (!adapter.updateProductPrice) {
+      throw new ProductBatchItemError('PRICE_UPDATE_UNSUPPORTED', '当前平台不支持安全改价', false);
+    }
+
+    if (isDemoShop(product.shop)) {
+      for (const target of desired.items) {
+        const previous = before.items.find((value) => value.sourceSkuId === target.sourceSkuId)!;
+        if (previous.priceCents === target.priceCents) continue;
+        await this.platformProductLocks.renew(product.id, lock);
+        if (!(await this.assertItemOwned(item))) return 'stale';
+        await adapter.updateProductPrice(token, {
+          platformProductId: product.platformProductId!,
+          sourceSkuId: target.sourceSkuId,
+          priceCents: target.priceCents,
+        });
+      }
+      return this.persistPriceResult(item, desired, null, false, lock);
+    }
+
+    if (!adapter.getProductPrices) {
+      throw new ProductBatchItemError(
+        'PRICE_READBACK_UNSUPPORTED',
+        '当前平台无法回读 SKU 价格，拒绝执行改价',
+        false,
+      );
+    }
+
+    let actualState = await this.readPlatformPrices(adapter, token, product.platformProductId!);
+    if (actualState.state !== 'online') {
+      throw new ProductBatchItemError(
+        'PRODUCT_NOT_ONLINE',
+        `平台商品当前状态为 ${actualState.state}，未执行改价`,
+        false,
+      );
+    }
+    let actual = platformSkuPriceSnapshot(actualState);
+    const initialState = classifyPriceTransition(actual, before, desired);
+    if (initialState === 'desired') {
+      return this.persistPriceResult(item, desired, actualState, true, lock);
+    }
+    if (initialState === 'drift') {
+      await this.persistPlatformPriceDrift(item, actual, actualState);
+      throw new ProductBatchItemError(
+        'PLATFORM_PRICE_CHANGED',
+        '平台 SKU 价格已在预览后变化，请重新生成预览',
+        false,
+      );
+    }
+
+    for (const target of desired.items) {
+      const current = actual.items.find((value) => value.sourceSkuId === target.sourceSkuId)!;
+      if (current.priceCents === target.priceCents) continue;
+      await this.platformProductLocks.renew(product.id, lock);
+      if (!(await this.assertItemOwned(item))) return 'stale';
+      try {
+        await adapter.updateProductPrice(token, {
+          platformProductId: product.platformProductId!,
+          sourceSkuId: target.sourceSkuId,
+          priceCents: target.priceCents,
+        });
+      } catch (error) {
+        try {
+          actualState = await this.readPlatformPrices(adapter, token, product.platformProductId!);
+          actual = platformSkuPriceSnapshot(actualState);
+          const recovered = classifyPriceTransition(actual, before, desired);
+          if (recovered === 'desired') {
+            return this.persistPriceResult(item, desired, actualState, true, lock);
+          }
+          if (recovered === 'drift') {
+            await this.persistPlatformPriceDrift(item, actual, actualState);
+            throw new ProductBatchItemError(
+              'PLATFORM_PRICE_CHANGED',
+              '平台 SKU 价格已在执行期间变化，请重新生成预览',
+              false,
+            );
+          }
+        } catch (readbackError) {
+          if (readbackError instanceof ProductBatchItemError) throw readbackError;
+        }
+        throw error;
+      }
+    }
+
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.assertItemOwned(item))) return 'stale';
+    actualState = await this.readPlatformPrices(adapter, token, product.platformProductId!);
+    actual = platformSkuPriceSnapshot(actualState);
+    const finalState = classifyPriceTransition(actual, before, desired);
+    if (finalState === 'desired') {
+      return this.persistPriceResult(item, desired, actualState, false, lock);
+    }
+    if (finalState === 'drift') {
+      await this.persistPlatformPriceDrift(item, actual, actualState);
+      throw new ProductBatchItemError(
+        'PLATFORM_PRICE_CHANGED',
+        '平台 SKU 价格已在执行期间变化，请重新生成预览',
+        false,
+      );
+    }
+    throw new ProductBatchItemError(
+      'PRICE_NOT_CONFIRMED',
+      '平台尚未确认全部 SKU 新价格，将稍后重试',
+      true,
+    );
+  }
+
+  private async readPlatformPrices(
+    adapter: PlatformAdapter,
+    token: string,
+    platformProductId: string,
+  ): Promise<PlatformProductPriceState> {
+    if (!adapter.getProductPrices) {
+      throw new ProductBatchItemError(
+        'PRICE_READBACK_UNSUPPORTED',
+        '当前平台无法回读 SKU 价格，拒绝执行改价',
+        false,
+      );
+    }
+    return adapter.getProductPrices(token, platformProductId);
+  }
+
+  private async persistPriceResult(
+    item: ProductBatchExecutionRecord,
+    desired: SkuPriceSnapshot,
+    platformState: PlatformProductPriceState | null,
+    recovered: boolean,
+    lock: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.assertItemOwned(item))) return 'stale';
+    const now = new Date();
+    const updated = await this.prisma.publishedProduct.updateMany({
+      where: {
+        id: product.id,
+        platformProductId: product.platformProductId,
+        mutationRevision: item.expectedMutationRevision,
+        status: 'online',
+      },
+      data: {
+        salePrice: snapshotStartPrice(desired),
+        skuPriceSnapshot: desired as unknown as Prisma.InputJsonValue,
+        priceSyncedAt: now,
+        lastEditedAt: now,
+        lastEditError: null,
+        mutationRevision: { increment: 1 },
+        ...(platformState
+          ? {
+              platformStatusRaw: platformState.status,
+              platformCheckStatusRaw: platformState.checkStatus,
+              platformStatusSyncedAt: now,
+              platformStatusError: null,
+            }
+          : {}),
+      },
+    });
+    if (updated.count !== 1) {
+      const latest = await this.prisma.publishedProduct.findUnique({ where: { id: product.id } });
+      const latestPrices = parseSkuPriceSnapshot(latest?.skuPriceSnapshot);
+      if (!latestPrices || !sameSkuPrices(latestPrices, desired)) {
+        throw new ProductBatchItemError(
+          'PRODUCT_CHANGED',
+          '商品已在改价期间发生变化，请重新生成预览',
+          false,
+        );
+      }
+    }
+    return this.completeClaimedItem(item, {
+      reason: recovered ? 'platform_price_recovered' : 'price_confirmed',
+      recovered,
+      actualPrices: desired,
+    });
+  }
+
+  private async persistPlatformPriceDrift(
+    item: ProductBatchExecutionRecord,
+    actual: SkuPriceSnapshot,
+    platformState: PlatformProductPriceState,
+  ): Promise<void> {
+    const now = new Date();
+    await this.prisma.publishedProduct.updateMany({
+      where: {
+        id: item.publishedProductId,
+        platformProductId: item.publishedProduct.platformProductId,
+        mutationRevision: item.expectedMutationRevision,
+      },
+      data: {
+        salePrice: snapshotStartPrice(actual),
+        skuPriceSnapshot: actual as unknown as Prisma.InputJsonValue,
+        priceSyncedAt: now,
+        lastEditError: '平台 SKU 价格已在批量预览后变化',
+        mutationRevision: { increment: 1 },
+        platformStatusRaw: platformState.status,
+        platformCheckStatusRaw: platformState.checkStatus,
+        platformStatusSyncedAt: now,
+        platformStatusError: null,
+      },
+    });
   }
 
   async failClaimedItem(
@@ -849,6 +1128,11 @@ function toTaskView(task: ProductBatchTaskRecord): ProductBatchTaskView {
     items: task.items.map((item) => {
       const before = jsonRecord(item.beforeSnapshot);
       const desired = jsonRecord(item.desiredSnapshot);
+      const result = jsonRecord(item.result);
+      const beforePrices = parseSkuPriceSnapshot(before?.skuPrices);
+      const desiredPrices = parseSkuPriceSnapshot(desired?.skuPrices);
+      const actualPrices = parseSkuPriceSnapshot(result?.actualPrices);
+      const beforeStatus = stringValue(before?.status) ?? item.publishedProduct.status;
       return {
         itemId: item.id.toString(),
         publishedProductId: item.publishedProductId.toString(),
@@ -858,14 +1142,20 @@ function toTaskView(task: ProductBatchTaskRecord): ProductBatchTaskView {
         shopName: item.publishedProduct.shop.shopName,
         platform: item.publishedProduct.shop.platform,
         platformProductId: item.publishedProduct.platformProductId,
-        beforeStatus: stringValue(before?.status) ?? item.publishedProduct.status,
-        desiredStatus: stringValue(desired?.status) ?? 'offline',
+        beforeStatus,
+        desiredStatus: stringValue(desired?.status) ?? beforeStatus,
+        beforePrice: beforePrices ? snapshotStartPrice(beforePrices) : null,
+        desiredPrice: desiredPrices ? snapshotStartPrice(desiredPrices) : null,
+        beforePriceRange: beforePrices ? snapshotPriceRange(beforePrices) : null,
+        desiredPriceRange: desiredPrices ? snapshotPriceRange(desiredPrices) : null,
+        actualPriceRange: actualPrices ? snapshotPriceRange(actualPrices) : null,
+        skuCount: beforePrices?.items.length ?? 0,
         status: item.status,
         attempts: item.attempts,
         maxAttempts: item.maxAttempts,
         errorCode: item.errorCode,
         errorMessage: item.errorMessage,
-        result: jsonRecord(item.result),
+        result,
         startedAt: item.startedAt?.toISOString() ?? null,
         finishedAt: item.finishedAt?.toISOString() ?? null,
       };
@@ -912,7 +1202,113 @@ function beforeSnapshot(record: {
   };
 }
 
-function previewStatus(status: string, platformProductId: string | null) {
+function previewForAction(
+  action: string,
+  record: {
+    id: bigint;
+    status: string;
+    title: string;
+    salePrice: Prisma.Decimal;
+    platformProductId: string | null;
+    shopId: bigint;
+    mutationRevision: number;
+    skuPriceSnapshot: Prisma.JsonValue | null;
+    shop: { platform: string };
+    task: { skuSnapshot: Prisma.JsonValue | null };
+  },
+  priceRule: NormalizedPriceRule | null,
+) {
+  const before = beforeSnapshot(record);
+  if (action === 'offline') {
+    const status = previewOfflineStatus(record.status, record.platformProductId);
+    return {
+      ...status,
+      beforeSnapshot: before,
+      desiredSnapshot: { status: 'offline' },
+    };
+  }
+  if (action !== 'edit_price' || !priceRule) {
+    throw new BadRequestException('当前批量动作尚未实现');
+  }
+  if (!record.platformProductId) {
+    return skippedPricePreview(before, record.status, 'PLATFORM_ID_MISSING', '商品缺少平台商品 ID');
+  }
+  if (record.status !== 'online') {
+    return skippedPricePreview(
+      before,
+      record.status,
+      'PRODUCT_NOT_ONLINE',
+      `商品当前状态为 ${record.status}，不能改价`,
+    );
+  }
+  const currentPrices =
+    parseSkuPriceSnapshot(record.skuPriceSnapshot) ??
+    priceSnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
+  if (!currentPrices) {
+    return skippedPricePreview(
+      before,
+      record.status,
+      'PRICE_SNAPSHOT_MISSING',
+      '商品缺少可核对的 SKU 价格快照，不能安全改价',
+    );
+  }
+  const desiredPrices = desiredPriceSnapshot(record.id.toString(), currentPrices, priceRule);
+  if (!desiredPrices) {
+    return skippedPricePreview(
+      { ...before, skuPrices: currentPrices },
+      record.status,
+      'PRICE_OUT_OF_RANGE',
+      '调整后的 SKU 价格超出 ¥0.01～¥1,000,000.00',
+    );
+  }
+  const beforeWithPrices = {
+    ...before,
+    salePrice: snapshotStartPrice(currentPrices),
+    skuPrices: currentPrices,
+  };
+  const desiredSnapshot = {
+    status: record.status,
+    salePrice: snapshotStartPrice(desiredPrices),
+    skuPrices: desiredPrices,
+    priceRule,
+  };
+  if (sameSkuPrices(currentPrices, desiredPrices)) {
+    return {
+      status: 'skipped' as const,
+      result: { reason: 'price_unchanged' },
+      errorCode: null,
+      errorMessage: null,
+      beforeSnapshot: beforeWithPrices,
+      desiredSnapshot,
+    };
+  }
+  return {
+    status: 'pending' as const,
+    result: undefined,
+    errorCode: null,
+    errorMessage: null,
+    beforeSnapshot: beforeWithPrices,
+    desiredSnapshot,
+  };
+}
+
+function skippedPricePreview(
+  beforeSnapshotValue: Record<string, unknown>,
+  status: string,
+  errorCode: string,
+  errorMessage: string,
+) {
+  return {
+    status: 'skipped' as const,
+    result: { reason: errorCode.toLowerCase(), status },
+    errorCode,
+    errorMessage,
+    beforeSnapshot: beforeSnapshotValue,
+    desiredSnapshot: { status },
+  };
+}
+
+function previewOfflineStatus(status: string, platformProductId: string | null) {
   if (!platformProductId) {
     return {
       status: 'skipped' as const,
@@ -945,10 +1341,236 @@ function previewStatus(status: string, platformProductId: string | null) {
   };
 }
 
-function requestFingerprint(action: string, ids: string[]): string {
+function normalizePriceRule(
+  action: string,
+  ids: string[],
+  value: ProductBatchPriceRuleDto | undefined,
+): NormalizedPriceRule | null {
+  if (action === 'offline') {
+    if (value) throw new BadRequestException('批量下架不能携带改价规则');
+    return null;
+  }
+  if (action !== 'edit_price' || !value) {
+    throw new BadRequestException('批量改价必须提供价格规则');
+  }
+  if (value.mode === 'percentage') {
+    const basisPoints = value.basisPoints;
+    if (
+      !value.direction ||
+      !Number.isInteger(basisPoints) ||
+      basisPoints! < 1 ||
+      basisPoints! > 100_000
+    ) {
+      throw new BadRequestException('百分比改价必须提供方向和基点');
+    }
+    if (value.targets?.length) {
+      throw new BadRequestException('百分比改价不能同时提供逐项目标价');
+    }
+    if (value.direction === 'decrease' && basisPoints! >= 10_000) {
+      throw new BadRequestException('降价比例必须小于 100%');
+    }
+    return {
+      mode: 'percentage',
+      direction: value.direction,
+      basisPoints: basisPoints!,
+    };
+  }
+  if (value.mode !== 'targets' || !value.targets?.length) {
+    throw new BadRequestException('逐项改价必须提供目标起售价');
+  }
+  if (value.direction || value.basisPoints !== undefined) {
+    throw new BadRequestException('逐项改价不能同时提供百分比规则');
+  }
+  const selected = new Set(ids);
+  const targetIds = new Set(value.targets.map((target) => target.publishedProductId));
+  if (
+    selected.size !== targetIds.size ||
+    [...selected].some((id) => !targetIds.has(id)) ||
+    [...targetIds].some((id) => !selected.has(id))
+  ) {
+    throw new BadRequestException('逐项目标价必须与所选商品完全一致');
+  }
+  return {
+    mode: 'targets',
+    targets: value.targets
+      .map((target) => ({
+        publishedProductId: target.publishedProductId,
+        targetStartPriceCents: parsePriceCents(target.targetStartPrice),
+      }))
+      .sort((left, right) => left.publishedProductId.localeCompare(right.publishedProductId)),
+  };
+}
+
+function requestFingerprint(
+  action: string,
+  ids: string[],
+  priceRule: NormalizedPriceRule | null,
+): string {
   return createHash('sha256')
-    .update(JSON.stringify({ action, publishedProductIds: [...ids].sort() }))
+    .update(
+      JSON.stringify({
+        action,
+        publishedProductIds: [...ids].sort(),
+        ...(priceRule ? { priceRule } : {}),
+      }),
+    )
     .digest('hex');
+}
+
+function parsePriceCents(value: string): number {
+  if (!/^\d{1,7}(?:\.\d{1,2})?$/.test(value)) {
+    throw new BadRequestException('目标起售价必须是最多两位小数的金额');
+  }
+  const [whole, fraction = ''] = value.split('.');
+  const cents = Number(BigInt(whole!) * 100n + BigInt(fraction.padEnd(2, '0')));
+  if (!Number.isSafeInteger(cents) || cents < 1 || cents > MAX_PRICE_CENTS) {
+    throw new BadRequestException('目标起售价必须在 ¥0.01～¥1,000,000.00 之间');
+  }
+  return cents;
+}
+
+function desiredPriceSnapshot(
+  publishedProductId: string,
+  current: SkuPriceSnapshot,
+  rule: NormalizedPriceRule,
+): SkuPriceSnapshot | null {
+  let numerator: number;
+  let denominator: number;
+  if (rule.mode === 'percentage') {
+    numerator = 10_000 + (rule.direction === 'increase' ? rule.basisPoints : -rule.basisPoints);
+    denominator = 10_000;
+  } else {
+    const target = rule.targets.find((value) => value.publishedProductId === publishedProductId);
+    if (!target) throw new BadRequestException('逐项目标价缺少所选商品');
+    numerator = target.targetStartPriceCents;
+    denominator = snapshotStartPriceCents(current);
+  }
+  const items = current.items.map((item) => ({
+    sourceSkuId: item.sourceSkuId,
+    priceCents: Math.round((item.priceCents * numerator) / denominator),
+  }));
+  if (
+    items.some(
+      (item) =>
+        !Number.isSafeInteger(item.priceCents) ||
+        item.priceCents < 1 ||
+        item.priceCents > MAX_PRICE_CENTS,
+    )
+  ) {
+    return null;
+  }
+  return normalizeSkuPriceSnapshot(items);
+}
+
+function priceSnapshotFromPublishTask(
+  value: Prisma.JsonValue | null,
+  platform: string,
+): SkuPriceSnapshot | null {
+  const root = jsonRecord(value);
+  const entry = jsonRecord(root?.[platform]);
+  if (!entry || !Array.isArray(entry.skus)) return null;
+  const items = entry.skus.map((skuValue) => {
+    const sku = jsonRecord(skuValue);
+    const sourceSkuId = stringValue(sku?.sourceSkuId)?.trim();
+    const price = typeof sku?.price === 'number' ? sku.price : Number(sku?.price);
+    const priceCents = Math.round(price * 100);
+    return sourceSkuId ? { sourceSkuId, priceCents } : null;
+  });
+  if (items.some((item) => !item)) return null;
+  return normalizeSkuPriceSnapshot(items as SkuPriceItem[]);
+}
+
+function parseSkuPriceSnapshot(value: unknown): SkuPriceSnapshot | null {
+  const snapshot = jsonRecord(value);
+  if (snapshot?.version !== 1 || !Array.isArray(snapshot.items)) return null;
+  const items = snapshot.items.map((itemValue) => {
+    const item = jsonRecord(itemValue);
+    const sourceSkuId = stringValue(item?.sourceSkuId)?.trim();
+    const priceCents = item?.priceCents;
+    return sourceSkuId && Number.isInteger(priceCents)
+      ? { sourceSkuId, priceCents: priceCents as number }
+      : null;
+  });
+  if (items.some((item) => !item)) return null;
+  return normalizeSkuPriceSnapshot(items as SkuPriceItem[]);
+}
+
+function normalizeSkuPriceSnapshot(items: SkuPriceItem[]): SkuPriceSnapshot | null {
+  if (!items.length || items.length > 100) return null;
+  const ids = new Set<string>();
+  const normalized: SkuPriceItem[] = [];
+  for (const item of items) {
+    const sourceSkuId = item.sourceSkuId.trim();
+    if (
+      !sourceSkuId ||
+      sourceSkuId.length > 128 ||
+      ids.has(sourceSkuId) ||
+      !Number.isSafeInteger(item.priceCents) ||
+      item.priceCents < 1 ||
+      item.priceCents > MAX_PRICE_CENTS
+    ) {
+      return null;
+    }
+    ids.add(sourceSkuId);
+    normalized.push({ sourceSkuId, priceCents: item.priceCents });
+  }
+  normalized.sort((left, right) => left.sourceSkuId.localeCompare(right.sourceSkuId));
+  return { version: 1, items: normalized };
+}
+
+function platformSkuPriceSnapshot(state: PlatformProductPriceState): SkuPriceSnapshot {
+  const snapshot = normalizeSkuPriceSnapshot(state.items);
+  if (!snapshot) {
+    throw new ProductBatchItemError(
+      'PRICE_READBACK_INVALID',
+      '平台返回的 SKU 价格不完整，已停止改价',
+      false,
+    );
+  }
+  return snapshot;
+}
+
+function sameSkuIds(left: SkuPriceSnapshot, right: SkuPriceSnapshot): boolean {
+  return (
+    left.items.length === right.items.length &&
+    left.items.every((item, index) => item.sourceSkuId === right.items[index]?.sourceSkuId)
+  );
+}
+
+function sameSkuPrices(left: SkuPriceSnapshot, right: SkuPriceSnapshot): boolean {
+  return (
+    sameSkuIds(left, right) &&
+    left.items.every((item, index) => item.priceCents === right.items[index]?.priceCents)
+  );
+}
+
+function classifyPriceTransition(
+  actual: SkuPriceSnapshot,
+  before: SkuPriceSnapshot,
+  desired: SkuPriceSnapshot,
+): 'before' | 'partial' | 'desired' | 'drift' {
+  if (!sameSkuIds(actual, before) || !sameSkuIds(actual, desired)) return 'drift';
+  if (sameSkuPrices(actual, desired)) return 'desired';
+  if (sameSkuPrices(actual, before)) return 'before';
+  const compatible = actual.items.every((item, index) => {
+    const beforePrice = before.items[index]!.priceCents;
+    const desiredPrice = desired.items[index]!.priceCents;
+    return item.priceCents === beforePrice || item.priceCents === desiredPrice;
+  });
+  return compatible ? 'partial' : 'drift';
+}
+
+function snapshotStartPriceCents(snapshot: SkuPriceSnapshot): number {
+  return Math.min(...snapshot.items.map((item) => item.priceCents));
+}
+
+function snapshotStartPrice(snapshot: SkuPriceSnapshot): number {
+  return snapshotStartPriceCents(snapshot) / 100;
+}
+
+function snapshotPriceRange(snapshot: SkuPriceSnapshot): [number, number] {
+  const prices = snapshot.items.map((item) => item.priceCents);
+  return [Math.min(...prices) / 100, Math.max(...prices) / 100];
 }
 
 function parsePositiveId(value: string, label: string): bigint {

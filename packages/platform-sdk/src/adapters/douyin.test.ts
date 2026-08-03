@@ -505,6 +505,107 @@ describe('DouyinAdapter', () => {
     });
   });
 
+  it('updates one SKU to an absolute integer-cent price through sku.editPrice', async () => {
+    const fetcher = vi.fn(
+      async () => new Response(JSON.stringify({ code: 10000, data: {} }), { status: 200 }),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await adapter.updateProductPrice('access-token', {
+      platformProductId: '998877',
+      sourceSkuId: '1688-spec-white-m',
+      priceCents: 2990,
+    });
+
+    const [input, init] = fetcher.mock.calls[0]!;
+    const url = new URL(String(input));
+    expect(url.pathname).toBe('/sku/editPrice');
+    expect(url.searchParams.get('method')).toBe('sku.editPrice');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      out_sku_id: '1688-spec-white-m',
+      price: 2990,
+      product_id: '998877',
+    });
+  });
+
+  it('rejects a non-integer SKU price before calling sku.editPrice', async () => {
+    const fetcher = vi.fn();
+    const adapter = new DouyinAdapter(CONFIG, fetcher);
+
+    await expect(
+      adapter.updateProductPrice('access-token', {
+        platformProductId: '998877',
+        sourceSkuId: '1688-spec-white-m',
+        priceCents: 2990.5,
+      }),
+    ).rejects.toThrow('SKU price in cents is invalid');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('reads, validates and stably sorts all product SKU prices', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: {
+              product_id: '998877',
+              status: 0,
+              check_status: 3,
+              spec_prices: [
+                { outer_sku_id: 'sku-z', price: 3290 },
+                { outer_sku_id: 'sku-a', price: 2990 },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await expect(adapter.getProductPrices('access-token', '998877')).resolves.toEqual({
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+      items: [
+        { sourceSkuId: 'sku-a', priceCents: 2990 },
+        { sourceSkuId: 'sku-z', priceCents: 3290 },
+      ],
+    });
+    const [input, init] = fetcher.mock.calls[0]!;
+    expect(new URL(String(input)).pathname).toBe('/product/detail');
+    expect(new URL(String(input)).searchParams.get('method')).toBe('product.detail');
+    expect(JSON.parse(String(init?.body))).toEqual({ product_id: '998877' });
+  });
+
+  it.each([
+    ['a missing price list', undefined],
+    ['an empty price list', []],
+    ['a missing external SKU ID', [{ price: 2990 }]],
+    ['a non-positive price', [{ outer_sku_id: 'sku-a', price: 0 }]],
+    [
+      'a duplicate external SKU ID',
+      [
+        { outer_sku_id: 'sku-a', price: 2990 },
+        { outer_sku_id: 'sku-a', price: 3290 },
+      ],
+    ],
+  ])('rejects product.detail with %s', async (_label, specPrices) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: { product_id: '998877', status: 0, check_status: 3, spec_prices: specPrices },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(adapter.getProductPrices('access-token', '998877')).rejects.toThrow();
+  });
+
   it('maps product.detail audit status before the shop online status', async () => {
     const fetcher = vi.fn(
       async () =>

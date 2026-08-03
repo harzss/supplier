@@ -29,6 +29,55 @@ describe('CreateProductBatchPreviewDto', () => {
     expect(await validate(dto)).not.toHaveLength(0);
   });
 
+  it('accepts a percentage price preview expressed in integer basis points', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'edit_price',
+      publishedProductIds: ['1', '2'],
+      priceRule: { mode: 'percentage', direction: 'increase', basisPoints: 1250 },
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
+  it('accepts exact per-product target start prices', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'edit_price',
+      publishedProductIds: ['1', '2'],
+      priceRule: {
+        mode: 'targets',
+        targets: [
+          { publishedProductId: '1', targetStartPrice: '19.90' },
+          { publishedProductId: '2', targetStartPrice: '29' },
+        ],
+      },
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
+  it.each([
+    ['a missing percentage direction', { mode: 'percentage', basisPoints: 100 }],
+    ['a fractional basis point', { mode: 'percentage', direction: 'increase', basisPoints: 10.5 }],
+    [
+      'a target with more than two decimals',
+      {
+        mode: 'targets',
+        targets: [{ publishedProductId: '1', targetStartPrice: '19.999' }],
+      },
+    ],
+  ])('rejects %s', async (_label, priceRule) => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'edit_price',
+      publishedProductIds: ['1'],
+      priceRule,
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
+  });
+
   it.each([
     ['a duplicate product ID', { action: 'offline', publishedProductIds: ['1', '1'] }],
     ['an unsupported action', { action: 'online', publishedProductIds: ['1'] }],

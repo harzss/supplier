@@ -1,20 +1,50 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+} from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { useAuthStorageIdentity } from './auth-provider';
+import {
+  clearProductBatchSessionForTask,
+  clearProductBatchWorkbenchSession,
+  productBatchWorkbenchStorageKey,
+  readProductBatchWorkbenchSession,
+  shouldRestoreProductBatchPreview,
+  writeProductBatchWorkbenchSession,
+  type ProductBatchComposerDraft,
+  type ProductBatchPreviewSession,
+  type ProductBatchSessionScope,
+} from './product-batch-session';
 import {
   ApiError,
   api,
+  type ProductBatchAction,
   type ProductBatchCandidate,
   type ProductBatchItem,
+  type ProductBatchPreviewRequest,
+  type ProductBatchPriceRule,
   type ProductBatchTask,
-} from '@/lib/api';
+} from '../lib/api';
 
 const PAGE_SIZE = 50;
 const MAX_SELECTION = 100;
+const TARGET_PAGE_SIZE = 20;
 const ACTIVE_TASK_STATUSES = new Set(['queued', 'running', 'cancelling']);
+const CURRENCY_FORMATTER = new Intl.NumberFormat('zh-CN', {
+  style: 'currency',
+  currency: 'CNY',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 const STATUS_FILTERS = [
   { value: 'online', label: '在线' },
   { value: 'draft', label: '待审核' },
@@ -31,10 +61,38 @@ const RESULT_FILTERS = [
   { value: 'cancelled', label: '已停止' },
 ] as const;
 
+type PriceMode = ProductBatchPriceRule['mode'];
+type PriceDirection = Extract<ProductBatchPriceRule, { mode: 'percentage' }>['direction'];
+type TargetPriceValidation = { value: string | null; error: string };
+type ProductBatchPreviewInput =
+  | Omit<Extract<ProductBatchPreviewRequest, { action: 'offline' }>, 'clientRequestId'>
+  | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_price' }>, 'clientRequestId'>;
+
+const EMPTY_COMPOSER_DRAFT: ProductBatchComposerDraft = {
+  page: 1,
+  status: 'online',
+  searchInput: '',
+  query: '',
+  action: 'offline',
+  priceMode: 'percentage',
+  priceDirection: 'increase',
+  percentageInput: '10',
+  targetInputs: {},
+  bulkTargetInput: '',
+  targetPage: 1,
+  selected: [],
+};
+
 export function ProductBatchWorkbench() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const accountId = useAuthStorageIdentity();
   const taskId = searchParams.get('task');
+  const sessionScope = useMemo<ProductBatchSessionScope | null>(
+    () => (accountId ? { accountId, pathname } : null),
+    [accountId, pathname],
+  );
 
   return (
     <main className="app-page batch-workbench">
@@ -51,57 +109,228 @@ export function ProductBatchWorkbench() {
         </Link>
       </header>
 
-      {taskId ? (
-        <BatchTask taskId={taskId} onStartNew={() => router.replace('/published/batch')} />
+      {!sessionScope ? (
+        <BatchLoading />
+      ) : taskId ? (
+        <BatchTask
+          taskId={taskId}
+          sessionScope={sessionScope}
+          onStartNew={() => router.replace('/published/batch')}
+        />
       ) : (
-        <BatchComposer />
+        <BatchComposer sessionScope={sessionScope} />
       )}
     </main>
   );
 }
 
-function BatchComposer() {
+function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScope }) {
   const router = useRouter();
   const qc = useQueryClient();
+  const storageScopeKey = productBatchWorkbenchStorageKey(sessionScope);
+  const [hydratedScopeKey, setHydratedScopeKey] = useState<string | null>(null);
+  const storageHydrated = hydratedScopeKey === storageScopeKey;
+  const [storedPreview, setStoredPreview] = useState<ProductBatchPreviewSession | null>(null);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState('online');
   const [searchInput, setSearchInput] = useState('');
   const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<string[]>([]);
+  const [action, setAction] = useState<ProductBatchAction>('offline');
+  const [priceMode, setPriceMode] = useState<PriceMode>('percentage');
+  const [priceDirection, setPriceDirection] = useState<PriceDirection>('increase');
+  const [percentageInput, setPercentageInput] = useState('10');
+  const [targetInputs, setTargetInputs] = useState<Record<string, string>>({});
+  const [bulkTargetInput, setBulkTargetInput] = useState('');
+  const [targetPage, setTargetPage] = useState(1);
+  const [validationAttempted, setValidationAttempted] = useState(false);
+  const [pendingTargetFocusId, setPendingTargetFocusId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Map<string, ProductBatchCandidate>>(() => new Map());
   const pageCheckboxRef = useRef<HTMLInputElement>(null);
-  const previewAttempt = useRef<{ fingerprint: string; clientRequestId: string } | null>(null);
+  const percentageInputRef = useRef<HTMLInputElement>(null);
+  const targetInputRefs = useRef(new Map<string, HTMLInputElement>());
+  const previewAttempt = useRef<ProductBatchPreviewSession | null>(null);
   const candidates = useQuery({
     queryKey: ['productBatchCandidates', page, PAGE_SIZE, status, query],
     queryFn: () =>
       api.productBatchCandidates({ page, pageSize: PAGE_SIZE, status, q: query || undefined }),
+    enabled: storageHydrated,
   });
   const recent = useQuery({
     queryKey: ['productBatchTasks', 1, 5],
     queryFn: () => api.productBatchTasks(1, 5),
+    enabled: storageHydrated,
   });
   const createPreview = useMutation({
-    mutationFn: (request: { clientRequestId: string; publishedProductIds: string[] }) =>
-      api.createProductBatchPreview({
-        clientRequestId: request.clientRequestId,
-        action: 'offline',
-        publishedProductIds: request.publishedProductIds,
-      }),
-    onSuccess: (task) => {
-      previewAttempt.current = null;
+    mutationFn: (request: ProductBatchPreviewRequest) => api.createProductBatchPreview(request),
+    onSuccess: (task, request) => {
+      if (
+        task.clientRequestId !== request.clientRequestId ||
+        !shouldAcceptProductBatchPreviewResponse(previewAttempt.current, request)
+      ) {
+        return;
+      }
+      const preview = { ...previewAttempt.current!, taskId: task.taskId };
+      previewAttempt.current = preview;
+      setStoredPreview(preview);
+      writeProductBatchWorkbenchSession(sessionScope, { draft: composerDraft, preview });
       qc.setQueryData(['productBatchTask', task.taskId], task);
       router.replace(`/published/batch?task=${encodeURIComponent(task.taskId)}`);
     },
   });
-  const pageIds =
-    candidates.data?.items
-      .filter((item) => item.status === 'online')
-      .map((item) => item.publishedProductId) ?? [];
-  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const previewRecovery = useQuery({
+    queryKey: ['productBatchTask', storedPreview?.taskId],
+    queryFn: () => api.productBatchTask(storedPreview!.taskId!),
+    enabled: storageHydrated && Boolean(storedPreview?.taskId),
+    retry: false,
+  });
+  const pageItems =
+    candidates.data?.items.filter((item) => isCandidateSelectable(item, action)) ?? [];
+  const pageIds = pageItems.map((item) => item.publishedProductId);
+  const selectedItems = useMemo(() => [...selected.values()], [selected]);
+  const selectedIds = useMemo(
+    () => selectedItems.map((item) => item.publishedProductId),
+    [selectedItems],
+  );
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedPageCount = pageIds.filter((id) => selectedSet.has(id)).length;
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selectedSet.has(id));
   const pageSelectionBlocked =
-    pageIds.length === 0 || (selected.length >= MAX_SELECTION && selectedPageCount === 0);
+    pageIds.length === 0 || (selected.size >= MAX_SELECTION && selectedPageCount === 0);
   const totalPages = Math.max(1, Math.ceil((candidates.data?.total ?? 0) / PAGE_SIZE));
+  const targetTotalPages = Math.max(1, Math.ceil(selected.size / TARGET_PAGE_SIZE));
+  const visibleTargetItems = selectedItems.slice(
+    (targetPage - 1) * TARGET_PAGE_SIZE,
+    targetPage * TARGET_PAGE_SIZE,
+  );
+  const percentageValidation = validatePercentageInput(percentageInput, priceDirection);
+  const targetValidations = useMemo(
+    () =>
+      new Map(
+        selectedItems.map((item) => [
+          item.publishedProductId,
+          normalizeTargetPrice(targetInputs[item.publishedProductId] ?? ''),
+        ]),
+      ),
+    [selectedItems, targetInputs],
+  );
+  const invalidTargetCount = [...targetValidations.values()].filter((value) => !value.value).length;
+  const composerDraft = useMemo<ProductBatchComposerDraft>(
+    () => ({
+      page,
+      status,
+      searchInput,
+      query,
+      action,
+      priceMode,
+      priceDirection,
+      percentageInput,
+      targetInputs,
+      bulkTargetInput,
+      targetPage,
+      selected: selectedItems,
+    }),
+    [
+      action,
+      bulkTargetInput,
+      page,
+      percentageInput,
+      priceDirection,
+      priceMode,
+      query,
+      searchInput,
+      selectedItems,
+      status,
+      targetInputs,
+      targetPage,
+    ],
+  );
+  const applyComposerDraft = useCallback((draft: ProductBatchComposerDraft) => {
+    setPage(draft.page);
+    setStatus(draft.status);
+    setSearchInput(draft.searchInput);
+    setQuery(draft.query);
+    setAction(draft.action);
+    setPriceMode(draft.priceMode);
+    setPriceDirection(draft.priceDirection);
+    setPercentageInput(draft.percentageInput);
+    setTargetInputs(draft.targetInputs);
+    setBulkTargetInput(draft.bulkTargetInput);
+    setTargetPage(draft.targetPage);
+    setSelected(new Map(draft.selected.map((item) => [item.publishedProductId, item] as const)));
+    setValidationAttempted(false);
+    setPendingTargetFocusId(null);
+  }, []);
+  const discardRecoveredSession = useCallback(() => {
+    clearProductBatchWorkbenchSession(sessionScope);
+    previewAttempt.current = null;
+    setStoredPreview(null);
+    applyComposerDraft(EMPTY_COMPOSER_DRAFT);
+  }, [applyComposerDraft, sessionScope]);
+
+  useEffect(() => {
+    const session = readProductBatchWorkbenchSession(sessionScope);
+    applyComposerDraft(session?.draft ?? EMPTY_COMPOSER_DRAFT);
+    previewAttempt.current = session?.preview ?? null;
+    setStoredPreview(session?.preview ?? null);
+    setHydratedScopeKey(storageScopeKey);
+  }, [applyComposerDraft, sessionScope, storageScopeKey]);
+
+  useEffect(() => {
+    if (!storageHydrated) return;
+    writeProductBatchWorkbenchSession(sessionScope, {
+      draft: composerDraft,
+      preview: storedPreview,
+    });
+  }, [composerDraft, sessionScope, storageHydrated, storedPreview]);
+
+  useEffect(() => {
+    if (!storedPreview?.taskId) return;
+    if (previewRecovery.data) {
+      if (shouldRestoreProductBatchPreview(storedPreview, previewRecovery.data)) {
+        qc.setQueryData(['productBatchTask', previewRecovery.data.taskId], previewRecovery.data);
+        router.replace(`/published/batch?task=${encodeURIComponent(previewRecovery.data.taskId)}`);
+      } else {
+        discardRecoveredSession();
+      }
+      return;
+    }
+    if (previewRecovery.error instanceof ApiError && previewRecovery.error.status === 404) {
+      discardRecoveredSession();
+    }
+  }, [
+    discardRecoveredSession,
+    previewRecovery.data,
+    previewRecovery.error,
+    qc,
+    router,
+    storedPreview,
+  ]);
+
+  useEffect(() => {
+    if (!storedPreview || storedPreview.taskId || !recent.data) return;
+    const recovered = recent.data.items.find(
+      (task) => task.clientRequestId === storedPreview.clientRequestId,
+    );
+    if (!recovered) return;
+    if (recovered.status !== 'preview') {
+      discardRecoveredSession();
+      return;
+    }
+    const preview = { ...storedPreview, taskId: recovered.taskId };
+    previewAttempt.current = preview;
+    setStoredPreview(preview);
+    writeProductBatchWorkbenchSession(sessionScope, { draft: composerDraft, preview });
+    qc.setQueryData(['productBatchTask', recovered.taskId], recovered);
+    router.replace(`/published/batch?task=${encodeURIComponent(recovered.taskId)}`);
+  }, [
+    composerDraft,
+    discardRecoveredSession,
+    qc,
+    recent.data,
+    router,
+    sessionScope,
+    storedPreview,
+  ]);
 
   useEffect(() => {
     if (pageCheckboxRef.current) {
@@ -109,45 +338,160 @@ function BatchComposer() {
     }
   }, [allPageSelected, selectedPageCount]);
 
+  useEffect(() => {
+    setTargetPage((current) => Math.min(current, targetTotalPages));
+  }, [targetTotalPages]);
+
+  useEffect(() => {
+    if (!pendingTargetFocusId) return;
+    const input = targetInputRefs.current.get(pendingTargetFocusId);
+    if (!input) return;
+    input.focus();
+    setPendingTargetFocusId(null);
+  }, [pendingTargetFocusId, targetPage]);
+
+  if (
+    !storageHydrated ||
+    (storedPreview && !storedPreview.taskId && recent.isPending) ||
+    (storedPreview &&
+      !storedPreview.taskId &&
+      recent.data?.items.some((task) => task.clientRequestId === storedPreview.clientRequestId)) ||
+    (storedPreview?.taskId &&
+      (!previewRecovery.isError ||
+        (previewRecovery.error instanceof ApiError && previewRecovery.error.status === 404)))
+  ) {
+    return <BatchLoading />;
+  }
+  if (storedPreview?.taskId && previewRecovery.isError) {
+    return <BatchError error={previewRecovery.error} />;
+  }
+
   const submitSearch = (event: FormEvent) => {
     event.preventDefault();
     setPage(1);
     setQuery(searchInput.trim());
   };
 
-  const toggle = (id: string) => {
+  const resetPreviewFeedback = () => {
+    previewAttempt.current = null;
+    setStoredPreview(null);
+    createPreview.reset();
+    setValidationAttempted(false);
+  };
+
+  const chooseAction = (nextAction: ProductBatchAction) => {
+    if (nextAction === action) return;
+    setAction(nextAction);
+    setStatus('online');
+    setPage(1);
+    setSelected(new Map());
+    setTargetInputs({});
+    setTargetPage(1);
+    resetPreviewFeedback();
+  };
+
+  const choosePriceMode = (nextMode: PriceMode) => {
+    if (nextMode === priceMode) return;
+    setPriceMode(nextMode);
+    resetPreviewFeedback();
+  };
+
+  const toggle = (item: ProductBatchCandidate) => {
+    const id = item.publishedProductId;
     setSelected((current) => {
-      if (current.includes(id)) return current.filter((value) => value !== id);
-      if (current.length >= MAX_SELECTION) return current;
-      return [...current, id];
+      const next = new Map(current);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < MAX_SELECTION) next.set(id, item);
+      return next;
     });
+    resetPreviewFeedback();
   };
 
   const togglePage = () => {
     setSelected((current) => {
-      const currentSet = new Set(current);
-      const selectedOnPage = pageIds.filter((id) => currentSet.has(id));
+      const next = new Map(current);
+      const selectedOnPage = pageIds.filter((id) => next.has(id));
       if (
         (pageIds.length && selectedOnPage.length === pageIds.length) ||
-        (current.length >= MAX_SELECTION && selectedOnPage.length > 0)
+        (current.size >= MAX_SELECTION && selectedOnPage.length > 0)
       ) {
-        return current.filter((id) => !pageIds.includes(id));
+        pageIds.forEach((id) => next.delete(id));
+        return next;
       }
-      const capacity = MAX_SELECTION - current.length;
-      const selectableIds = pageIds.filter((id) => !currentSet.has(id));
-      return [...current, ...selectableIds.slice(0, Math.max(0, capacity))];
+      const capacity = MAX_SELECTION - current.size;
+      pageItems
+        .filter((item) => !next.has(item.publishedProductId))
+        .slice(0, Math.max(0, capacity))
+        .forEach((item) => next.set(item.publishedProductId, item));
+      return next;
     });
+    resetPreviewFeedback();
+  };
+
+  const setTargetInput = (id: string, value: string) => {
+    setTargetInputs((current) => ({ ...current, [id]: value }));
+    resetPreviewFeedback();
+  };
+
+  const applyBulkTarget = () => {
+    const normalized = normalizeTargetPrice(bulkTargetInput);
+    if (!normalized.value) return;
+    setTargetInputs((current) => ({
+      ...current,
+      ...Object.fromEntries(selectedIds.map((id) => [id, normalized.value!])),
+    }));
+    setBulkTargetInput(normalized.value);
+    resetPreviewFeedback();
   };
 
   const requestPreview = () => {
-    const fingerprint = [...selected].sort().join(',');
+    setValidationAttempted(true);
+    let priceRule: ProductBatchPriceRule | null = null;
+    if (action === 'edit_price' && priceMode === 'percentage') {
+      if (!percentageValidation.value) {
+        percentageInputRef.current?.focus();
+        return;
+      }
+      priceRule = {
+        mode: 'percentage',
+        direction: priceDirection,
+        basisPoints: percentageValidation.value,
+      };
+    }
+    if (action === 'edit_price' && priceMode === 'targets') {
+      const firstInvalidIndex = selectedItems.findIndex(
+        (item) => !targetValidations.get(item.publishedProductId)?.value,
+      );
+      if (firstInvalidIndex >= 0) {
+        const item = selectedItems[firstInvalidIndex]!;
+        setTargetPage(Math.floor(firstInvalidIndex / TARGET_PAGE_SIZE) + 1);
+        setPendingTargetFocusId(item.publishedProductId);
+        return;
+      }
+      priceRule = {
+        mode: 'targets',
+        targets: selectedItems.map((item) => ({
+          publishedProductId: item.publishedProductId,
+          targetStartPrice: targetValidations.get(item.publishedProductId)!.value!,
+        })),
+      };
+    }
+    const requestWithoutId = {
+      action,
+      publishedProductIds: selectedIds,
+      ...(priceRule ? { priceRule } : {}),
+    } as ProductBatchPreviewInput;
+    const fingerprint = productBatchPreviewFingerprint(requestWithoutId);
     if (previewAttempt.current?.fingerprint !== fingerprint) {
       previewAttempt.current = { fingerprint, clientRequestId: crypto.randomUUID() };
     }
+    const preview = previewAttempt.current;
+    setStoredPreview(preview);
+    writeProductBatchWorkbenchSession(sessionScope, { draft: composerDraft, preview });
     createPreview.mutate({
-      clientRequestId: previewAttempt.current.clientRequestId,
-      publishedProductIds: [...selected],
-    });
+      ...requestWithoutId,
+      clientRequestId: preview.clientRequestId,
+    } as ProductBatchPreviewRequest);
   };
 
   return (
@@ -161,13 +505,20 @@ function BatchComposer() {
                 选择经营动作
               </h2>
               <p className="batch-section-description">
-                首个安全闭环开放批量下架；其他动作会沿用相同的预览与逐项恢复机制。
+                {action === 'edit_price'
+                  ? '先定义改价规则，再逐件核对 SKU 价格区间；平台回读后才记为成功。'
+                  : '先生成逐项预览，再安全下架；成功项不会因失败重试而重复执行。'}
               </p>
             </div>
             <span className="batch-safety-chip">平台回读确认</span>
           </div>
-          <div className="batch-action-grid">
-            <button type="button" className="batch-action-card is-active" aria-pressed="true">
+          <div className="batch-action-grid" role="group" aria-label="经营动作">
+            <button
+              type="button"
+              className={`batch-action-card ${action === 'offline' ? 'is-active' : ''}`}
+              aria-pressed={action === 'offline'}
+              onClick={() => chooseAction('offline')}
+            >
               <span className="batch-action-icon" aria-hidden="true">
                 ↓
               </span>
@@ -177,7 +528,22 @@ function BatchComposer() {
               </span>
               <em>已开放</em>
             </button>
-            {['改标题', '改价格', '同步库存', '换源与清理'].map((label) => (
+            <button
+              type="button"
+              className={`batch-action-card ${action === 'edit_price' ? 'is-active' : ''}`}
+              aria-pressed={action === 'edit_price'}
+              onClick={() => chooseAction('edit_price')}
+            >
+              <span className="batch-action-icon" aria-hidden="true">
+                ¥
+              </span>
+              <span>
+                <strong>批量改价</strong>
+                <small>按比例或设置目标起售价</small>
+              </span>
+              <em>已开放</em>
+            </button>
+            {['改标题', '同步库存', '换源与清理'].map((label) => (
               <button key={label} type="button" className="batch-action-card" disabled>
                 <span className="batch-action-icon" aria-hidden="true">
                   ·
@@ -190,6 +556,116 @@ function BatchComposer() {
               </button>
             ))}
           </div>
+
+          {action === 'edit_price' ? (
+            <fieldset className="batch-price-rule-panel">
+              <legend>改价方式</legend>
+              <div className="batch-price-mode-grid">
+                <label data-selected={priceMode === 'percentage'}>
+                  <input
+                    type="radio"
+                    name="batch-price-mode"
+                    value="percentage"
+                    checked={priceMode === 'percentage'}
+                    onChange={() => choosePriceMode('percentage')}
+                  />
+                  <span>
+                    <strong>按比例调整</strong>
+                    <small>所有 SKU 使用相同比例，保留商品间价差</small>
+                  </span>
+                  <em>推荐</em>
+                </label>
+                <label data-selected={priceMode === 'targets'}>
+                  <input
+                    type="radio"
+                    name="batch-price-mode"
+                    value="targets"
+                    checked={priceMode === 'targets'}
+                    onChange={() => choosePriceMode('targets')}
+                  />
+                  <span>
+                    <strong>逐项设置起售价</strong>
+                    <small>每件商品单独定价，也可统一填入后再微调</small>
+                  </span>
+                </label>
+              </div>
+
+              {priceMode === 'percentage' ? (
+                <div className="batch-price-rule-controls">
+                  <fieldset className="batch-price-direction">
+                    <legend>调整方向</legend>
+                    <label data-selected={priceDirection === 'increase'}>
+                      <input
+                        type="radio"
+                        name="batch-price-direction"
+                        value="increase"
+                        checked={priceDirection === 'increase'}
+                        onChange={() => {
+                          setPriceDirection('increase');
+                          resetPreviewFeedback();
+                        }}
+                      />
+                      上调
+                    </label>
+                    <label data-selected={priceDirection === 'decrease'}>
+                      <input
+                        type="radio"
+                        name="batch-price-direction"
+                        value="decrease"
+                        checked={priceDirection === 'decrease'}
+                        onChange={() => {
+                          setPriceDirection('decrease');
+                          resetPreviewFeedback();
+                        }}
+                      />
+                      下调
+                    </label>
+                  </fieldset>
+                  <label className="batch-price-number-field" htmlFor="batch-price-percentage">
+                    <span>调整幅度</span>
+                    <span className="batch-price-input-shell">
+                      <input
+                        ref={percentageInputRef}
+                        id="batch-price-percentage"
+                        name="batch-price-percentage"
+                        type="number"
+                        inputMode="decimal"
+                        autoComplete="off"
+                        min="0.01"
+                        max={priceDirection === 'decrease' ? '99.99' : '1000'}
+                        step="0.01"
+                        value={percentageInput}
+                        aria-invalid={validationAttempted && !percentageValidation.value}
+                        aria-describedby="batch-price-percentage-help batch-price-percentage-error"
+                        onChange={(event) => {
+                          setPercentageInput(event.target.value);
+                          resetPreviewFeedback();
+                        }}
+                      />
+                      <span aria-hidden="true">%</span>
+                    </span>
+                  </label>
+                  <div className="batch-price-rule-help">
+                    <span id="batch-price-percentage-help">
+                      例如：¥100 {priceDirection === 'increase' ? '上调' : '下调'} 10% →{' '}
+                      {priceDirection === 'increase' ? '¥110' : '¥90'}；每个 SKU
+                      分别计算并取两位小数。
+                    </span>
+                    <span id="batch-price-percentage-error" role="alert">
+                      {validationAttempted && !percentageValidation.value
+                        ? percentageValidation.error
+                        : ''}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <p className="batch-price-rule-help">
+                  选择商品后填写每件商品的目标起售价；其他 SKU
+                  会按相同比例调整，并在预览中展示完整价格区间。
+                </p>
+              )}
+            </fieldset>
+          ) : null}
         </div>
       </section>
 
@@ -207,16 +683,19 @@ function BatchComposer() {
             </label>
             <input
               id="batch-product-search"
+              name="batch-product-search"
+              type="search"
+              autoComplete="off"
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
-              placeholder="搜索商品标题"
+              placeholder="搜索商品标题…"
               maxLength={100}
             />
             <button type="submit">搜索</button>
           </form>
         </div>
 
-        <div className="batch-filter-row" aria-label="商品状态筛选">
+        <div className="batch-filter-row" role="group" aria-label="商品状态筛选">
           {STATUS_FILTERS.map((filter) => (
             <button
               key={filter.value}
@@ -247,9 +726,9 @@ function BatchComposer() {
                         type="checkbox"
                         aria-label={
                           allPageSelected ||
-                          (selected.length >= MAX_SELECTION && selectedPageCount > 0)
+                          (selected.size >= MAX_SELECTION && selectedPageCount > 0)
                             ? '取消本页已选商品'
-                            : '选择本页在线商品'
+                            : `选择本页可${action === 'edit_price' ? '改价' : '下架'}商品`
                         }
                         checked={allPageSelected}
                         disabled={pageSelectionBlocked}
@@ -259,7 +738,7 @@ function BatchComposer() {
                   </th>
                   <th>商品</th>
                   <th>店铺 / 平台</th>
-                  <th>售价</th>
+                  <th>起售价 / SKU</th>
                   <th>货源</th>
                   <th>库存同步</th>
                   <th>当前状态</th>
@@ -270,9 +749,10 @@ function BatchComposer() {
                   <CandidateRow
                     key={item.publishedProductId}
                     item={item}
+                    action={action}
                     selected={selectedSet.has(item.publishedProductId)}
-                    selectionFull={selected.length >= MAX_SELECTION}
-                    onToggle={() => toggle(item.publishedProductId)}
+                    selectionFull={selected.size >= MAX_SELECTION}
+                    onToggle={() => toggle(item)}
                   />
                 ))}
               </tbody>
@@ -308,6 +788,27 @@ function BatchComposer() {
         ) : null}
       </section>
 
+      {action === 'edit_price' && priceMode === 'targets' && selected.size > 0 ? (
+        <TargetPriceEditor
+          items={visibleTargetItems}
+          page={targetPage}
+          totalPages={targetTotalPages}
+          values={targetInputs}
+          validations={targetValidations}
+          validationAttempted={validationAttempted}
+          invalidCount={invalidTargetCount}
+          bulkValue={bulkTargetInput}
+          onBulkValueChange={(value) => {
+            setBulkTargetInput(value);
+            setValidationAttempted(false);
+          }}
+          onApplyBulk={applyBulkTarget}
+          onValueChange={setTargetInput}
+          onPageChange={setTargetPage}
+          inputRefs={targetInputRefs}
+        />
+      ) : null}
+
       {recent.data?.items.length ? (
         <section className="batch-recent-panel">
           <div>
@@ -321,7 +822,9 @@ function BatchComposer() {
                 href={`/published/batch?task=${encodeURIComponent(task.taskId)}`}
               >
                 <span>{formatTaskStatus(task.status)}</span>
-                <strong>{task.summary.total} 件批量下架</strong>
+                <strong>
+                  {task.summary.total} 件{batchActionLabel(task.action)}
+                </strong>
                 <small>{new Date(task.createdAt).toLocaleString('zh-CN')}</small>
               </Link>
             ))}
@@ -329,55 +832,78 @@ function BatchComposer() {
         </section>
       ) : null}
 
-      <div className="batch-selection-bar" data-visible={selected.length > 0}>
-        <div>
-          <strong>
-            已选 {selected.length} / {MAX_SELECTION} 件
-          </strong>
-          <span>下一步只生成差异预览，不会立即调用平台。</span>
+      {selected.size > 0 ? (
+        <div className="batch-selection-bar" data-visible="true">
+          <div>
+            <strong>
+              已选 {selected.size} / {MAX_SELECTION} 件
+            </strong>
+            <span>
+              {action === 'edit_price' && priceMode === 'targets' && invalidTargetCount > 0
+                ? `还需填写 ${invalidTargetCount} 件商品的目标起售价。`
+                : '下一步只生成差异预览，不会立即调用平台。'}
+            </span>
+          </div>
+          <div className="batch-selection-actions">
+            <button
+              type="button"
+              className="batch-quiet-button"
+              onClick={() => {
+                setSelected(new Map());
+                setTargetInputs({});
+                resetPreviewFeedback();
+              }}
+            >
+              清空
+            </button>
+            <button
+              type="button"
+              className="batch-primary-button"
+              disabled={createPreview.isPending}
+              onClick={requestPreview}
+            >
+              {createPreview.isPending
+                ? '生成预览中…'
+                : `预览${batchActionLabel(action)} ${selected.size} 件商品`}
+            </button>
+          </div>
+          {createPreview.isError ? (
+            <p className="batch-bar-error" role="alert">
+              {errorMessage(createPreview.error)}
+            </p>
+          ) : null}
         </div>
-        <div className="batch-selection-actions">
-          <button type="button" className="batch-quiet-button" onClick={() => setSelected([])}>
-            清空
-          </button>
-          <button
-            type="button"
-            className="batch-primary-button"
-            disabled={!selected.length || createPreview.isPending}
-            onClick={requestPreview}
-          >
-            {createPreview.isPending ? '生成预览中…' : `预览下架 ${selected.length} 件商品`}
-          </button>
-        </div>
-        {createPreview.isError ? (
-          <p className="batch-bar-error" role="alert">
-            {errorMessage(createPreview.error)}
-          </p>
-        ) : null}
-      </div>
+      ) : null}
     </div>
   );
 }
 
 function CandidateRow({
   item,
+  action,
   selected,
   selectionFull,
   onToggle,
 }: {
   item: ProductBatchCandidate;
+  action: ProductBatchAction;
   selected: boolean;
   selectionFull: boolean;
   onToggle: () => void;
 }) {
-  const selectable = item.status === 'online';
+  const selectable = isCandidateSelectable(item, action);
+  const unavailableReason = candidateUnavailableReason(item, action);
   return (
     <tr data-selected={selected}>
       <td className="batch-check-cell">
         <label className="batch-checkbox-target">
           <input
             type="checkbox"
-            aria-label={`${selected ? '取消选择' : '选择'} ${item.title}`}
+            aria-label={
+              selectable
+                ? `${selected ? '取消选择' : '选择'} ${item.title}`
+                : `${item.title} 不可用于${batchActionLabel(action)}：${unavailableReason}`
+            }
             checked={selected}
             disabled={!selectable || (!selected && selectionFull)}
             onChange={onToggle}
@@ -388,9 +914,9 @@ function CandidateRow({
         <div className="batch-product-cell">
           {item.mainImage ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.mainImage} alt="" />
+            <img src={item.mainImage} alt="" width={37} height={37} loading="lazy" />
           ) : (
-            <span className="batch-image-placeholder" />
+            <span className="batch-image-placeholder" aria-hidden="true" />
           )}
           <span>
             <strong>{item.title}</strong>
@@ -402,7 +928,17 @@ function CandidateRow({
         <strong className="batch-cell-primary">{item.shopName ?? '未命名店铺'}</strong>
         <small className="batch-cell-secondary">{platformLabel(item.platform)}</small>
       </td>
-      <td className="batch-mono">¥{item.salePrice.toFixed(2)}</td>
+      <td className="batch-mono">
+        <strong className="batch-price-range">
+          {formatPriceRange(item.priceRange ?? [item.salePrice, item.salePrice])}
+        </strong>
+        <small className="batch-cell-secondary">
+          {item.skuCount > 0 ? `${item.skuCount} 个 SKU` : 'SKU 价格待核验'}
+        </small>
+        {!selectable && unavailableReason ? (
+          <small className="batch-row-note">{unavailableReason}</small>
+        ) : null}
+      </td>
       <td>
         <StatusPill value={item.sourceAvailability} />
       </td>
@@ -416,7 +952,184 @@ function CandidateRow({
   );
 }
 
-function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => void }) {
+function TargetPriceEditor({
+  items,
+  page,
+  totalPages,
+  values,
+  validations,
+  validationAttempted,
+  invalidCount,
+  bulkValue,
+  onBulkValueChange,
+  onApplyBulk,
+  onValueChange,
+  onPageChange,
+  inputRefs,
+}: {
+  items: ProductBatchCandidate[];
+  page: number;
+  totalPages: number;
+  values: Record<string, string>;
+  validations: Map<string, TargetPriceValidation>;
+  validationAttempted: boolean;
+  invalidCount: number;
+  bulkValue: string;
+  onBulkValueChange: (value: string) => void;
+  onApplyBulk: () => void;
+  onValueChange: (id: string, value: string) => void;
+  onPageChange: (page: number) => void;
+  inputRefs: { current: Map<string, HTMLInputElement> };
+}) {
+  const bulkValidation = normalizeTargetPrice(bulkValue);
+  return (
+    <section className="batch-target-panel" aria-labelledby="batch-target-heading">
+      <div className="batch-catalog-toolbar">
+        <div>
+          <p className="batch-step-label">03 · 设置目标价</p>
+          <h2 id="batch-target-heading" className="batch-section-title">
+            逐项目标起售价
+          </h2>
+          <p className="batch-target-description">
+            目标起售价决定最低 SKU；其余 SKU 按相同比例调整，最终价格区间会在预览中再次确认。
+          </p>
+        </div>
+        <div className="batch-bulk-price-control">
+          <label htmlFor="batch-bulk-target-price">统一填入</label>
+          <div>
+            <span aria-hidden="true">¥</span>
+            <input
+              id="batch-bulk-target-price"
+              name="batch-bulk-target-price"
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
+              placeholder="例如 39.90"
+              value={bulkValue}
+              aria-invalid={Boolean(bulkValue && !bulkValidation.value)}
+              aria-describedby="batch-bulk-target-help"
+              onChange={(event) => onBulkValueChange(event.target.value)}
+            />
+            <button type="button" disabled={!bulkValidation.value} onClick={onApplyBulk}>
+              填入全部
+            </button>
+          </div>
+          <small id="batch-bulk-target-help">
+            {bulkValue && !bulkValidation.value
+              ? bulkValidation.error
+              : '可统一填入后，再修改个别商品。'}
+          </small>
+        </div>
+      </div>
+
+      {validationAttempted && invalidCount > 0 ? (
+        <p className="batch-target-error-summary" role="alert">
+          还有 {invalidCount} 件商品缺少有效目标起售价，请完成后再生成预览。
+        </p>
+      ) : null}
+
+      <div className="batch-table-shell">
+        <table className="batch-table batch-target-table">
+          <thead>
+            <tr>
+              <th>商品</th>
+              <th>当前价格区间</th>
+              <th>SKU</th>
+              <th>目标起售价</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => {
+              const id = item.publishedProductId;
+              const validation = validations.get(id) ?? normalizeTargetPrice('');
+              const errorId = `batch-target-price-error-${id}`;
+              return (
+                <tr key={id}>
+                  <td>
+                    <div className="batch-product-cell">
+                      {item.mainImage ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={item.mainImage} alt="" width={37} height={37} loading="lazy" />
+                      ) : (
+                        <span className="batch-image-placeholder" aria-hidden="true" />
+                      )}
+                      <span>
+                        <strong>{item.title}</strong>
+                        <small>{item.shopName ?? '未命名店铺'}</small>
+                      </span>
+                    </div>
+                  </td>
+                  <td className="batch-mono">
+                    {formatPriceRange(item.priceRange ?? [item.salePrice, item.salePrice])}
+                  </td>
+                  <td className="batch-mono">{item.skuCount}</td>
+                  <td>
+                    <label className="batch-target-price-field">
+                      <span className="sr-only">{item.title} 的目标起售价</span>
+                      <span aria-hidden="true">¥</span>
+                      <input
+                        ref={(node) => {
+                          if (node) inputRefs.current.set(id, node);
+                          else inputRefs.current.delete(id);
+                        }}
+                        name={`target-price-${id}`}
+                        type="text"
+                        inputMode="decimal"
+                        autoComplete="off"
+                        placeholder="0.00"
+                        value={values[id] ?? ''}
+                        aria-invalid={validationAttempted && !validation.value}
+                        aria-describedby={
+                          validationAttempted && !validation.value ? errorId : undefined
+                        }
+                        onChange={(event) => onValueChange(id, event.target.value)}
+                      />
+                    </label>
+                    {validationAttempted && !validation.value ? (
+                      <small id={errorId} className="batch-field-error">
+                        {validation.error}
+                      </small>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {totalPages > 1 ? (
+        <div className="batch-pagination">
+          <span>
+            目标价第 {page} / {totalPages} 页
+          </span>
+          <div>
+            <button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>
+              上一页
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() => onPageChange(page + 1)}
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function BatchTask({
+  taskId,
+  sessionScope,
+  onStartNew,
+}: {
+  taskId: string;
+  sessionScope: ProductBatchSessionScope;
+  onStartNew: () => void;
+}) {
   const qc = useQueryClient();
   const [itemFilter, setItemFilter] = useState<(typeof RESULT_FILTERS)[number]['value']>('all');
   const task = useQuery({
@@ -427,6 +1140,7 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
     refetchIntervalInBackground: false,
   });
   const refresh = (value: ProductBatchTask) => {
+    if (value.status !== 'preview') clearProductBatchSessionForTask(sessionScope, value);
     qc.setQueryData(['productBatchTask', taskId], value);
     void qc.invalidateQueries({ queryKey: ['productBatchCandidates'] });
     void qc.invalidateQueries({ queryKey: ['publishTasks'] });
@@ -445,9 +1159,16 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
     onSuccess: refresh,
   });
 
+  useEffect(() => {
+    if (task.data && task.data.status !== 'preview') {
+      clearProductBatchSessionForTask(sessionScope, task.data);
+    }
+  }, [sessionScope, task.data]);
+
   if (task.isLoading && !task.data) return <BatchLoading />;
   if (!task.data) return <BatchError error={task.error} />;
   const value = task.data;
+  const priceAction = value.action === 'edit_price';
   const active = ACTIVE_TASK_STATUSES.has(value.status);
   const preview = value.status === 'preview';
   const canRetry = ['failed', 'partial'].includes(value.status) && value.summary.failed > 0;
@@ -456,6 +1177,17 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
     itemFilter === 'all'
       ? value.items
       : value.items.filter((item) => matchesResultFilter(item.status, itemFilter));
+  const priceChanges = priceAction
+    ? value.items.reduce(
+        (summary, item) => {
+          if (item.beforePrice === null || item.desiredPrice === null) return summary;
+          if (item.desiredPrice > item.beforePrice) summary.increased += 1;
+          if (item.desiredPrice < item.beforePrice) summary.decreased += 1;
+          return summary;
+        },
+        { increased: 0, decreased: 0 },
+      )
+    : null;
 
   return (
     <div className="space-y-5">
@@ -463,14 +1195,18 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
         <div className="batch-progress-copy">
           <p className="batch-step-label">{preview ? '03 · 差异预览' : '执行任务'}</p>
           <div className="flex flex-wrap items-center gap-3">
-            <h2 className="batch-section-title">批量下架 · {value.summary.total} 件</h2>
+            <h2 className="batch-section-title">
+              {batchActionLabel(value.action)} · {value.summary.total} 件
+            </h2>
             <TaskStatusBadge status={value.status} />
           </div>
           <p className="batch-section-description">
             {preview
-              ? '确认前请检查每件商品的当前状态与执行后状态。'
+              ? priceAction
+                ? '确认前请检查每件商品的起售价、SKU 价格区间和调整方向。'
+                : '确认前请检查每件商品的当前状态与执行后状态。'
               : active
-                ? '任务按商品独立执行；停止只影响尚未开始的条目。'
+                ? `任务按商品独立${priceAction ? '改价并回读平台价格' : '执行'}；停止只影响尚未开始的条目。`
                 : '任务结果已持久化，可安全刷新或稍后返回查看。'}
           </p>
         </div>
@@ -489,10 +1225,18 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
       </section>
 
       {task.isError ? (
-        <p className="batch-inline-warning" role="alert">
-          进度刷新暂时失败，当前仍显示最近一次成功结果；你可以稍后重试或刷新页面。
-        </p>
+        <div className="batch-inline-warning" role="alert">
+          <span>进度刷新暂时失败，当前仍显示最近一次成功结果。</span>
+          <button type="button" onClick={() => void task.refetch()}>
+            重新读取
+          </button>
+        </div>
       ) : null}
+
+      <p className="sr-only" aria-live="polite">
+        {formatTaskStatus(value.status)}，已完成 {value.summary.completed} / {value.summary.total}{' '}
+        件。
+      </p>
 
       <section className="batch-metrics-grid" aria-label="批量任务汇总">
         <Metric label="总计" value={value.summary.total} />
@@ -511,7 +1255,7 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
           </div>
           <span className="batch-task-id">Task #{value.taskId}</span>
         </div>
-        <div className="batch-filter-row" aria-label="逐项结果筛选">
+        <div className="batch-filter-row" role="group" aria-label="逐项结果筛选">
           {RESULT_FILTERS.map((filter) => {
             const count =
               filter.value === 'all'
@@ -532,20 +1276,21 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
           })}
         </div>
         <div className="batch-table-shell">
-          <table className="batch-table batch-result-table">
+          <table className={`batch-table batch-result-table ${priceAction ? 'is-price' : ''}`}>
             <thead>
               <tr>
                 <th>商品</th>
                 <th>店铺 / 平台</th>
-                <th>当前</th>
-                <th>执行后</th>
+                <th>{priceAction ? '改价前' : '当前'}</th>
+                <th>{priceAction ? '目标价格' : '执行后'}</th>
+                {priceAction ? <th>平台回读</th> : null}
                 <th>执行状态</th>
                 <th>尝试</th>
               </tr>
             </thead>
             <tbody>
               {visibleItems.map((item) => (
-                <TaskItemRow key={item.itemId} item={item} />
+                <TaskItemRow key={item.itemId} item={item} action={value.action} />
               ))}
             </tbody>
           </table>
@@ -560,7 +1305,9 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
           <strong>{preview ? '预览不会产生平台变更' : formatTaskStatus(value.status)}</strong>
           <span>
             {preview
-              ? `${pendingExecution} 件可执行，${value.summary.skipped} 件将跳过。`
+              ? priceAction
+                ? `${pendingExecution} 件可执行；${priceChanges?.increased ?? 0} 件上调，${priceChanges?.decreased ?? 0} 件下调，${value.summary.skipped} 件跳过。`
+                : `${pendingExecution} 件可执行，${value.summary.skipped} 件将跳过。`
               : active
                 ? `已完成 ${value.summary.completed} / ${value.summary.total} 件。`
                 : `完成于 ${value.finishedAt ? new Date(value.finishedAt).toLocaleString('zh-CN') : '—'}`}
@@ -572,18 +1319,20 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
               <button
                 type="button"
                 className="batch-quiet-button"
-                disabled={cancel.isPending}
+                disabled={cancel.isPending || execute.isPending}
                 onClick={() => cancel.mutate()}
               >
                 放弃预览
               </button>
               <button
                 type="button"
-                className="batch-danger-button"
-                disabled={execute.isPending}
+                className={priceAction ? 'batch-primary-button' : 'batch-danger-button'}
+                disabled={execute.isPending || cancel.isPending}
                 onClick={() => execute.mutate(value.previewRevision)}
               >
-                {execute.isPending ? '提交中…' : `确认下架 ${pendingExecution} 件商品`}
+                {execute.isPending
+                  ? '提交中…'
+                  : `确认${batchActionLabel(value.action)} ${pendingExecution} 件商品`}
               </button>
             </>
           ) : active ? (
@@ -623,16 +1372,23 @@ function BatchTask({ taskId, onStartNew }: { taskId: string; onStartNew: () => v
   );
 }
 
-function TaskItemRow({ item }: { item: ProductBatchItem }) {
+function TaskItemRow({ item, action }: { item: ProductBatchItem; action: ProductBatchAction }) {
+  const priceAction = action === 'edit_price';
+  const actualMismatch =
+    priceAction &&
+    item.status === 'succeeded' &&
+    item.actualPriceRange !== null &&
+    item.desiredPriceRange !== null &&
+    !samePriceRange(item.actualPriceRange, item.desiredPriceRange);
   return (
     <tr>
       <td>
         <div className="batch-product-cell">
           {item.mainImage ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.mainImage} alt="" />
+            <img src={item.mainImage} alt="" width={37} height={37} loading="lazy" />
           ) : (
-            <span className="batch-image-placeholder" />
+            <span className="batch-image-placeholder" aria-hidden="true" />
           )}
           <span>
             <strong>{item.title}</strong>
@@ -644,12 +1400,40 @@ function TaskItemRow({ item }: { item: ProductBatchItem }) {
         <strong className="batch-cell-primary">{item.shopName ?? '未命名店铺'}</strong>
         <small className="batch-cell-secondary">{platformLabel(item.platform)}</small>
       </td>
-      <td>
-        <StatusPill value={item.beforeStatus} />
-      </td>
-      <td>
-        <span className="batch-change-arrow">→</span> <StatusPill value={item.desiredStatus} />
-      </td>
+      {priceAction ? (
+        <>
+          <td className="batch-mono">
+            <PriceRange value={item.beforePriceRange} skuCount={item.skuCount} />
+          </td>
+          <td className="batch-mono">
+            <PriceRange value={item.desiredPriceRange} skuCount={item.skuCount} />
+            <PriceDelta before={item.beforePrice} desired={item.desiredPrice} />
+          </td>
+          <td className="batch-mono">
+            {item.actualPriceRange ? (
+              <>
+                <PriceRange value={item.actualPriceRange} skuCount={item.skuCount} />
+                {actualMismatch ? (
+                  <small className="batch-row-error">与目标价格不一致</small>
+                ) : null}
+              </>
+            ) : (
+              <span className="batch-cell-secondary">
+                {item.status === 'succeeded' ? '回读待核验' : '执行后回读'}
+              </span>
+            )}
+          </td>
+        </>
+      ) : (
+        <>
+          <td>
+            <StatusPill value={item.beforeStatus} />
+          </td>
+          <td>
+            <span className="batch-change-arrow">→</span> <StatusPill value={item.desiredStatus} />
+          </td>
+        </>
+      )}
       <td>
         <StatusPill value={item.status} />
         {item.errorMessage ? <small className="batch-row-error">{item.errorMessage}</small> : null}
@@ -658,6 +1442,29 @@ function TaskItemRow({ item }: { item: ProductBatchItem }) {
         {item.attempts}/{item.maxAttempts}
       </td>
     </tr>
+  );
+}
+
+function PriceRange({ value, skuCount }: { value: [number, number] | null; skuCount: number }) {
+  return (
+    <span className="batch-price-range-stack">
+      <strong>{formatPriceRange(value)}</strong>
+      <small>{skuCount > 0 ? `${skuCount} 个 SKU` : 'SKU 待核验'}</small>
+    </span>
+  );
+}
+
+function PriceDelta({ before, desired }: { before: number | null; desired: number | null }) {
+  if (before === null || desired === null || before === desired) return null;
+  const delta = desired - before;
+  const percent = before > 0 ? (delta / before) * 100 : 0;
+  const tone = delta > 0 ? 'increase' : 'decrease';
+  return (
+    <small className="batch-price-delta" data-tone={tone}>
+      {delta > 0 ? '+' : '−'}
+      {formatCurrency(Math.abs(delta))} · {percent > 0 ? '+' : '−'}
+      {Math.abs(percent).toFixed(2)}%
+    </small>
   );
 }
 
@@ -696,8 +1503,8 @@ function TaskStatusBadge({ status }: { status: string }) {
 
 function BatchLoading() {
   return (
-    <div className="batch-loading">
-      <span />
+    <div className="batch-loading" role="status" aria-live="polite">
+      <span aria-hidden="true" />
       正在读取最新商品状态…
     </div>
   );
@@ -758,6 +1565,101 @@ function formatTaskStatus(value: string): string {
 
 function matchesResultFilter(status: string, filter: string): boolean {
   return filter === 'waiting' ? status === 'pending' || status === 'retry_wait' : status === filter;
+}
+
+function batchActionLabel(action: ProductBatchAction): string {
+  return action === 'edit_price' ? '批量改价' : '批量下架';
+}
+
+function isCandidateSelectable(item: ProductBatchCandidate, action: ProductBatchAction): boolean {
+  return action === 'edit_price' ? item.priceEditable : item.status === 'online';
+}
+
+function candidateUnavailableReason(
+  item: ProductBatchCandidate,
+  action: ProductBatchAction,
+): string | null {
+  if (isCandidateSelectable(item, action)) return null;
+  if (action === 'edit_price') return item.priceEditReason ?? '当前商品缺少可核对的 SKU 价格';
+  return item.status === 'offline' ? '商品已经下架' : '只有在线商品可以下架';
+}
+
+function formatCurrency(value: number): string {
+  return CURRENCY_FORMATTER.format(value);
+}
+
+function formatPriceRange(value: [number, number] | null): string {
+  if (!value) return '—';
+  return value[0] === value[1]
+    ? formatCurrency(value[0])
+    : `${formatCurrency(value[0])}–${formatCurrency(value[1])}`;
+}
+
+function samePriceRange(left: [number, number], right: [number, number]): boolean {
+  return left[0] === right[0] && left[1] === right[1];
+}
+
+export function validatePercentageInput(
+  value: string,
+  direction: PriceDirection,
+): { value: number | null; error: string } {
+  const match = /^(\d{1,4})(?:\.(\d{1,2}))?$/.exec(value.trim());
+  if (!match) return { value: null, error: '请输入最多两位小数的调整比例。' };
+  const basisPoints = Number(match[1]) * 100 + Number((match[2] ?? '').padEnd(2, '0'));
+  if (basisPoints < 1) return { value: null, error: '调整比例至少为 0.01%。' };
+  if (direction === 'decrease' && basisPoints >= 10_000) {
+    return { value: null, error: '下调比例必须小于 100%。' };
+  }
+  if (basisPoints > 100_000) return { value: null, error: '上调比例不能超过 1000%。' };
+  return { value: basisPoints, error: '' };
+}
+
+export function normalizeTargetPrice(value: string): TargetPriceValidation {
+  const match = /^(\d{1,7})(?:\.(\d{1,2}))?$/.exec(value.trim());
+  if (!match) return { value: null, error: '请输入最多两位小数的目标起售价。' };
+  const whole = BigInt(match[1]!);
+  const fraction = (match[2] ?? '').padEnd(2, '0');
+  const cents = whole * 100n + BigInt(fraction);
+  if (cents < 1n || cents > 100_000_000n) {
+    return { value: null, error: '目标起售价须在 ¥0.01～¥1,000,000.00 之间。' };
+  }
+  return { value: `${whole.toString()}.${fraction}`, error: '' };
+}
+
+export function productBatchPreviewFingerprint(input: ProductBatchPreviewInput): string {
+  return JSON.stringify({
+    action: input.action,
+    publishedProductIds: [...input.publishedProductIds].sort(),
+    ...(input.action === 'edit_price'
+      ? {
+          priceRule:
+            input.priceRule.mode === 'targets'
+              ? {
+                  ...input.priceRule,
+                  targets: [...input.priceRule.targets].sort((left, right) =>
+                    left.publishedProductId.localeCompare(right.publishedProductId),
+                  ),
+                }
+              : input.priceRule,
+        }
+      : {}),
+  });
+}
+
+export function shouldAcceptProductBatchPreviewResponse(
+  attempt: { fingerprint: string; clientRequestId: string } | null,
+  request: ProductBatchPreviewRequest,
+): boolean {
+  if (!attempt || attempt.clientRequestId !== request.clientRequestId) return false;
+  const input: ProductBatchPreviewInput =
+    request.action === 'offline'
+      ? { action: 'offline', publishedProductIds: request.publishedProductIds }
+      : {
+          action: 'edit_price',
+          publishedProductIds: request.publishedProductIds,
+          priceRule: request.priceRule,
+        };
+  return attempt.fingerprint === productBatchPreviewFingerprint(input);
 }
 
 function errorMessage(error: unknown): string {

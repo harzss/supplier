@@ -1422,8 +1422,10 @@ describe('PublishService', () => {
         },
         qualifications: [expect.objectContaining({ qualityKey: '9001' })],
         mainImages: ['https://img.example/main.jpg'],
+        skus: [expect.objectContaining({ sourceSkuId: 'default', price: 15 })],
       }),
     );
+    expect(fixture.getProductPrices).toHaveBeenCalledWith('plain-access-token', '998877');
     expect(fixture.categoryQualifications.buildPublishSnapshot).toHaveBeenCalledWith(
       1n,
       2n,
@@ -1442,6 +1444,11 @@ describe('PublishService', () => {
       data: expect.objectContaining({
         title: '修正后的纯棉T恤',
         status: 'draft',
+        salePrice: 15,
+        skuPriceSnapshot: {
+          version: 1,
+          items: [{ sourceSkuId: 'default', priceCents: 1500 }],
+        },
         lastEditError: null,
         platformStatusRaw: null,
         platformCheckStatusRaw: null,
@@ -1453,6 +1460,66 @@ describe('PublishService', () => {
       publishedProductId: '7',
       title: '修正后的纯棉T恤',
       status: 'draft',
+    });
+  });
+
+  it('preserves a newer batch SKU price when a later title edit rebuilds the full product', async () => {
+    const fixture = createFixture();
+    const record = publishedProductRecord();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue({
+      ...record,
+      salePrice: 18,
+      skuPriceSnapshot: {
+        version: 1,
+        items: [{ sourceSkuId: 'default', priceCents: 1800 }],
+      },
+    });
+    fixture.getProductPrices.mockResolvedValue({
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+      items: [{ sourceSkuId: 'default', priceCents: 1800 }],
+    });
+
+    await fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' });
+
+    expect(fixture.updateProduct).toHaveBeenCalledWith(
+      'plain-access-token',
+      expect.objectContaining({
+        title: '只修改标题',
+        salePrice: 18,
+        skus: [expect.objectContaining({ sourceSkuId: 'default', price: 18 })],
+      }),
+    );
+  });
+
+  it('synchronizes unexpected platform prices and stops before a full product edit', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.getProductPrices.mockResolvedValue({
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+      items: [{ sourceSkuId: 'default', priceCents: 1800 }],
+    });
+
+    await expect(fixture.service.updatePublishedProduct(USER, '7', {})).rejects.toThrow(
+      '平台 SKU 价格已变化并同步',
+    );
+
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith({
+      where: { id: 7n, platformProductId: '998877', mutationRevision: 1 },
+      data: expect.objectContaining({
+        salePrice: 18,
+        skuPriceSnapshot: {
+          version: 1,
+          items: [{ sourceSkuId: 'default', priceCents: 1800 }],
+        },
+        mutationRevision: { increment: 1 },
+      }),
     });
   });
 
@@ -1658,6 +1725,11 @@ function publishedProductRecord() {
     title: '旧标题',
     salePrice: 15,
     costPrice: 10,
+    skuPriceSnapshot: {
+      version: 1,
+      items: [{ sourceSkuId: 'default', priceCents: 1500 }],
+    },
+    priceSyncedAt: new Date(),
     status: 'rejected',
     mutationRevision: 1,
     categoryId: '12345',
@@ -1789,12 +1861,19 @@ function createFixture(
   const publishProduct = vi.fn().mockResolvedValue({ platformProductId: 'mock-product-1' });
   const findProductByExternalId = vi.fn().mockResolvedValue(null);
   const updateProduct = vi.fn().mockResolvedValue(undefined);
+  const getProductPrices = vi.fn().mockResolvedValue({
+    state: 'online',
+    status: 0,
+    checkStatus: 3,
+    items: [{ sourceSkuId: 'default', priceCents: 1500 }],
+  });
   const getProductState = vi.fn().mockResolvedValue({ state: 'online', status: 0, checkStatus: 3 });
   const adapters = {
     create: vi.fn().mockReturnValue({
       publishProduct,
       findProductByExternalId,
       updateProduct,
+      getProductPrices,
       getProductState,
     }),
   };
@@ -1883,6 +1962,7 @@ function createFixture(
     publishProduct,
     findProductByExternalId,
     updateProduct,
+    getProductPrices,
     getProductState,
     detailRenderer,
     assetStorage,

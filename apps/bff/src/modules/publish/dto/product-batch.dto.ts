@@ -3,21 +3,67 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   ArrayUnique,
+  IsDefined,
   IsArray,
   IsIn,
   IsInt,
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
+  ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 import { IsPositiveInt64String } from './create-publish-task.dto';
 
-export const PRODUCT_BATCH_ACTIONS = ['offline'] as const;
+export const PRODUCT_BATCH_ACTIONS = ['offline', 'edit_price'] as const;
 export type SupportedProductBatchAction = (typeof PRODUCT_BATCH_ACTIONS)[number];
 export const PRODUCT_BATCH_MAX_ITEMS = 100;
+
+export const PRODUCT_BATCH_PRICE_RULE_MODES = ['percentage', 'targets'] as const;
+export const PRODUCT_BATCH_PRICE_DIRECTIONS = ['increase', 'decrease'] as const;
+
+export class ProductBatchPriceTargetDto {
+  @IsString()
+  @IsPositiveInt64String()
+  publishedProductId!: string;
+
+  @IsString()
+  @MaxLength(16)
+  @Matches(/^\d{1,7}(?:\.\d{1,2})?$/)
+  targetStartPrice!: string;
+}
+
+export class ProductBatchPriceRuleDto {
+  @IsIn(PRODUCT_BATCH_PRICE_RULE_MODES)
+  mode!: (typeof PRODUCT_BATCH_PRICE_RULE_MODES)[number];
+
+  @ValidateIf((value: ProductBatchPriceRuleDto) => value.mode === 'percentage')
+  @IsDefined()
+  @IsIn(PRODUCT_BATCH_PRICE_DIRECTIONS)
+  direction?: (typeof PRODUCT_BATCH_PRICE_DIRECTIONS)[number];
+
+  @ValidateIf((value: ProductBatchPriceRuleDto) => value.mode === 'percentage')
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100_000)
+  basisPoints?: number;
+
+  @ValidateIf((value: ProductBatchPriceRuleDto) => value.mode === 'targets')
+  @IsDefined()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(PRODUCT_BATCH_MAX_ITEMS)
+  @ArrayUnique((target: ProductBatchPriceTargetDto) => target.publishedProductId)
+  @ValidateNested({ each: true })
+  @Type(() => ProductBatchPriceTargetDto)
+  targets?: ProductBatchPriceTargetDto[];
+}
 
 export class CreateProductBatchPreviewDto {
   @IsUUID()
@@ -33,6 +79,12 @@ export class CreateProductBatchPreviewDto {
   @IsString({ each: true })
   @IsPositiveInt64String({ each: true })
   publishedProductIds!: string[];
+
+  @ValidateIf((value: CreateProductBatchPreviewDto) => value.action === 'edit_price')
+  @IsDefined()
+  @ValidateNested()
+  @Type(() => ProductBatchPriceRuleDto)
+  priceRule?: ProductBatchPriceRuleDto;
 }
 
 export class ExecuteProductBatchDto {

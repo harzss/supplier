@@ -14,6 +14,40 @@ const CLIENT_REQUEST_ID = '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1';
 const USER = { userId: 1n, plan: 'pro' } as CurrentUser;
 
 describe('ProductBatchService', () => {
+  it('exposes SKU price eligibility and range in the candidate list', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-b', price: 39.9 },
+                { sourceSkuId: 'sku-a', price: 29.9 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'online' }),
+    ).resolves.toMatchObject({
+      total: 1,
+      items: [
+        {
+          publishedProductId: '11',
+          priceEditable: true,
+          priceEditReason: null,
+          skuCount: 2,
+          priceRange: [29.9, 39.9],
+        },
+      ],
+    });
+  });
+
   it('replays the same preview request without creating another task', async () => {
     const fixture = createFixture();
     const replay = taskRecord({
@@ -49,6 +83,64 @@ describe('ProductBatchService', () => {
     ).rejects.toThrow('该请求标识已用于不同的批量操作');
   });
 
+  it('replays an equivalent target-price request regardless of input order and formatting', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(
+      taskRecord({
+        action: 'edit_price',
+        requestFingerprint: fingerprint('edit_price', ['11', '12'], {
+          mode: 'targets',
+          targets: [
+            { publishedProductId: '11', targetStartPriceCents: 1990 },
+            { publishedProductId: '12', targetStartPriceCents: 2900 },
+          ],
+        }),
+        items: [],
+      }),
+    );
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_price',
+        publishedProductIds: ['12', '11'],
+        priceRule: {
+          mode: 'targets',
+          targets: [
+            { publishedProductId: '12', targetStartPrice: '029.00' },
+            { publishedProductId: '11', targetStartPrice: '19.9' },
+          ],
+        },
+      }),
+    ).resolves.toMatchObject({ taskId: '41', action: 'edit_price' });
+
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects reuse of a price-preview key after the adjustment rule changes', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(
+      taskRecord({
+        action: 'edit_price',
+        requestFingerprint: fingerprint('edit_price', ['11'], {
+          mode: 'percentage',
+          direction: 'increase',
+          basisPoints: 1000,
+        }),
+        items: [],
+      }),
+    );
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_price',
+        publishedProductIds: ['11'],
+        priceRule: { mode: 'percentage', direction: 'increase', basisPoints: 1100 },
+      }),
+    ).rejects.toThrow('该请求标识已用于不同的批量操作');
+  });
+
   it('does not create a preview when a selected product is outside the current tenant', async () => {
     const fixture = createFixture();
     fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
@@ -68,6 +160,80 @@ describe('ProductBatchService', () => {
       }),
     );
     expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
+  });
+
+  it('materializes a percentage price rule into absolute per-SKU prices', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        skuPriceSnapshot: priceSnapshot([
+          ['sku-a', 2990],
+          ['sku-b', 3990],
+        ]),
+        task: { skuSnapshot: null },
+      }),
+    ]);
+    fixture.prisma.productBatchTask.create.mockImplementation(async ({ data }: any) =>
+      taskRecord({
+        action: 'edit_price',
+        requestFingerprint: data.requestFingerprint,
+        items: [],
+      }),
+    );
+
+    await fixture.service.createPreview(USER, {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'edit_price',
+      publishedProductIds: ['11'],
+      priceRule: { mode: 'percentage', direction: 'increase', basisPoints: 1000 },
+    });
+
+    expect(fixture.prisma.productBatchTask.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'edit_price',
+          items: {
+            create: [
+              expect.objectContaining({
+                beforeSnapshot: expect.objectContaining({
+                  salePrice: 29.9,
+                  skuPrices: priceSnapshot([
+                    ['sku-a', 2990],
+                    ['sku-b', 3990],
+                  ]),
+                }),
+                desiredSnapshot: expect.objectContaining({
+                  salePrice: 32.89,
+                  skuPrices: priceSnapshot([
+                    ['sku-a', 3289],
+                    ['sku-b', 4389],
+                  ]),
+                }),
+              }),
+            ],
+          },
+        }),
+      }),
+    );
+  });
+
+  it('rejects target prices that do not exactly cover the selected products', async () => {
+    const fixture = createFixture();
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_price',
+        publishedProductIds: ['11', '12'],
+        priceRule: {
+          mode: 'targets',
+          targets: [{ publishedProductId: '11', targetStartPrice: '39.90' }],
+        },
+      }),
+    ).rejects.toThrow('逐项目标价必须与所选商品完全一致');
+
+    expect(fixture.prisma.publishedProduct.findMany).not.toHaveBeenCalled();
   });
 
   it('confirms an unchanged preview and queues its pending items', async () => {
@@ -444,6 +610,157 @@ describe('ProductBatchService', () => {
     );
   });
 
+  it('updates every changed SKU and commits only after price readback matches', async () => {
+    const fixture = createFixture();
+    const item = priceExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductPrices
+      .mockResolvedValueOnce(
+        platformPrices([
+          ['sku-a', 2990],
+          ['sku-b', 3990],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        platformPrices([
+          ['sku-a', 3289],
+          ['sku-b', 4389],
+        ]),
+      );
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.updateProductPrice).toHaveBeenCalledTimes(2);
+    expect(fixture.adapter.updateProductPrice).toHaveBeenNthCalledWith(1, 'shop-token', {
+      platformProductId: '998877',
+      sourceSkuId: 'sku-a',
+      priceCents: 3289,
+    });
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 1, status: 'online' }),
+        data: expect.objectContaining({
+          salePrice: 32.89,
+          skuPriceSnapshot: priceSnapshot([
+            ['sku-a', 3289],
+            ['sku-b', 4389],
+          ]),
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(fixture.productLocks.release.mock.invocationCallOrder[0]).toBeGreaterThan(
+      fixture.prisma.publishedProduct.updateMany.mock.invocationCallOrder.at(-1)!,
+    );
+  });
+
+  it('continues a partially applied multi-SKU price change without repeating completed SKUs', async () => {
+    const fixture = createFixture();
+    const item = priceExecutionRecord({ attempts: 2 });
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductPrices
+      .mockResolvedValueOnce(
+        platformPrices([
+          ['sku-a', 3289],
+          ['sku-b', 3990],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        platformPrices([
+          ['sku-a', 3289],
+          ['sku-b', 4389],
+        ]),
+      );
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.updateProductPrice).toHaveBeenCalledOnce();
+    expect(fixture.adapter.updateProductPrice).toHaveBeenCalledWith('shop-token', {
+      platformProductId: '998877',
+      sourceSkuId: 'sku-b',
+      priceCents: 4389,
+    });
+  });
+
+  it('recovers a timed-out price request when platform readback already matches', async () => {
+    const fixture = createFixture();
+    const item = priceExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductPrices
+      .mockResolvedValueOnce(
+        platformPrices([
+          ['sku-a', 2990],
+          ['sku-b', 3990],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        platformPrices([
+          ['sku-a', 3289],
+          ['sku-b', 4389],
+        ]),
+      );
+    fixture.adapter.updateProductPrice.mockRejectedValueOnce(new Error('request timed out'));
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'succeeded',
+          result: expect.objectContaining({
+            reason: 'platform_price_recovered',
+            recovered: true,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('fails closed and synchronizes an unexpected platform price drift', async () => {
+    const fixture = createFixture();
+    const item = priceExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductPrices.mockResolvedValueOnce(
+      platformPrices([
+        ['sku-a', 3190],
+        ['sku-b', 3990],
+      ]),
+    );
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '平台 SKU 价格已在预览后变化',
+    );
+
+    expect(fixture.adapter.updateProductPrice).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          salePrice: 31.9,
+          skuPriceSnapshot: priceSnapshot([
+            ['sku-a', 3190],
+            ['sku-b', 3990],
+          ]),
+          lastEditError: '平台 SKU 价格已在批量预览后变化',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+  });
+
+  it('does not call a real price mutation when the adapter cannot read prices back', async () => {
+    const fixture = createFixture();
+    const item = priceExecutionRecord();
+    const updateProductPrice = vi.fn();
+    fixture.prepareExecution(item);
+    fixture.adapters.create.mockReturnValue({ updateProductPrice });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '当前平台无法回读 SKU 价格，拒绝执行改价',
+    );
+
+    expect(updateProductPrice).not.toHaveBeenCalled();
+  });
+
   it('stops before calling the platform when the product revision changed after preview', async () => {
     const fixture = createFixture();
     const claimed = executionRecord();
@@ -464,6 +781,8 @@ function createFixture() {
   const adapter = {
     offlineProduct: vi.fn(),
     getProductState: vi.fn(),
+    updateProductPrice: vi.fn(),
+    getProductPrices: vi.fn(),
   };
   const prisma = {
     $transaction: vi.fn().mockImplementation(async (operations: unknown) => {
@@ -618,6 +937,54 @@ function executionRecord(overrides: Record<string, unknown> = {}) {
   } as unknown as ProductBatchExecutionRecord;
 }
 
+function priceExecutionRecord(overrides: Record<string, unknown> = {}) {
+  const record = executionRecord();
+  return {
+    ...record,
+    beforeSnapshot: {
+      status: 'online',
+      platformProductId: '998877',
+      shopId: '21',
+      skuPrices: priceSnapshot([
+        ['sku-a', 2990],
+        ['sku-b', 3990],
+      ]),
+    },
+    desiredSnapshot: {
+      status: 'online',
+      skuPrices: priceSnapshot([
+        ['sku-a', 3289],
+        ['sku-b', 4389],
+      ]),
+    },
+    task: { ...record.task, action: 'edit_price' },
+    publishedProduct: publishedProduct({
+      task: { userId: 1n, skuSnapshot: null },
+      skuPriceSnapshot: priceSnapshot([
+        ['sku-a', 2990],
+        ['sku-b', 3990],
+      ]),
+    }),
+    ...overrides,
+  } as unknown as ProductBatchExecutionRecord;
+}
+
+function priceSnapshot(items: Array<[string, number]>) {
+  return {
+    version: 1,
+    items: items.map(([sourceSkuId, priceCents]) => ({ sourceSkuId, priceCents })),
+  };
+}
+
+function platformPrices(items: Array<[string, number]>) {
+  return {
+    state: 'online' as const,
+    status: 0,
+    checkStatus: 3,
+    items: priceSnapshot(items).items,
+  };
+}
+
 function publishedProduct(overrides: Record<string, unknown> = {}) {
   return {
     id: 11n,
@@ -650,8 +1017,14 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function fingerprint(action: string, ids: string[]): string {
+function fingerprint(action: string, ids: string[], priceRule?: Record<string, unknown>): string {
   return createHash('sha256')
-    .update(JSON.stringify({ action, publishedProductIds: [...ids].sort() }))
+    .update(
+      JSON.stringify({
+        action,
+        publishedProductIds: [...ids].sort(),
+        ...(priceRule ? { priceRule } : {}),
+      }),
+    )
     .digest('hex');
 }

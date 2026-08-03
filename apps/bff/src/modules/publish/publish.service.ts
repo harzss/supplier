@@ -1289,6 +1289,8 @@ export class PublishService {
           !isDemoShop(shop),
           lease,
         );
+        const publishedPriceSnapshot = publishedSkuPriceSnapshot(publishInput.skus);
+        const priceSyncedAt = publishedPriceSnapshot ? new Date() : null;
         const publishedData: Prisma.PublishedProductUncheckedCreateInput = {
           taskId: task.id,
           shopId: shop.id,
@@ -1297,6 +1299,12 @@ export class PublishService {
           title: optimizedTitle,
           salePrice,
           costPrice,
+          ...(publishedPriceSnapshot
+            ? {
+                skuPriceSnapshot: publishedPriceSnapshot as unknown as Prisma.InputJsonValue,
+                priceSyncedAt,
+              }
+            : {}),
           status: isDemoShop(shop) ? 'online' : 'draft',
           categoryId,
           mainImage: publishMainImage,
@@ -1324,6 +1332,12 @@ export class PublishService {
             title: optimizedTitle,
             salePrice,
             costPrice,
+            ...(publishedPriceSnapshot
+              ? {
+                  skuPriceSnapshot: publishedPriceSnapshot as unknown as Prisma.InputJsonValue,
+                  priceSyncedAt,
+                }
+              : {}),
             status: isDemoShop(shop) ? 'online' : 'draft',
             categoryId,
             mainImage: publishMainImage,
@@ -1579,6 +1593,11 @@ export class PublishService {
       ),
       record.sourceProduct.skuList,
     );
+    const baseEditSkus =
+      skuSnapshot[shop.platform]?.skus ?? defaultPublishSkus(Number(record.salePrice));
+    let confirmedPriceSnapshot = parsePublishedSkuPriceSnapshot(record.skuPriceSnapshot);
+    let editSkus = applyPublishedSkuPrices(baseEditSkus, record.skuPriceSnapshot);
+    let editSalePrice = Number(record.salePrice);
     const aiOptimized = jsonRecord(record.task.aiOptimized ?? undefined);
     const detailImages = jsonStringArray(record.sourceProduct.detailImages ?? undefined);
     const detailImageUrl = stringOrNull(aiOptimized?.detailImageUrl);
@@ -1637,6 +1656,46 @@ export class PublishService {
         const token = shop.accessTokenEnc
           ? await this.shopTokens.getAccessToken(shop.id, user.userId)
           : 'mock-token';
+        if (!isDemoShop(shop)) {
+          if (!adapter.getProductPrices) {
+            throw new ServiceUnavailableException('当前平台无法回读 SKU 价格，拒绝编辑商品');
+          }
+          const platformPrices = publishedSkuPriceSnapshotFromPlatform(
+            (await adapter.getProductPrices(token, record.platformProductId)).items,
+          );
+          if (!platformPrices) {
+            throw new ServiceUnavailableException('平台返回的 SKU 价格不完整，拒绝编辑商品');
+          }
+          if (
+            confirmedPriceSnapshot &&
+            !samePublishedSkuPrices(confirmedPriceSnapshot, platformPrices)
+          ) {
+            const synced = await this.prisma.publishedProduct.updateMany({
+              where: {
+                id: record.id,
+                platformProductId: currentProduct.platformProductId,
+                mutationRevision: currentProduct.mutationRevision,
+              },
+              data: {
+                salePrice: publishedSkuStartPrice(platformPrices),
+                skuPriceSnapshot: platformPrices as unknown as Prisma.InputJsonValue,
+                priceSyncedAt: new Date(),
+                lastEditError: '平台 SKU 价格已变化，请确认后重试商品编辑',
+                mutationRevision: { increment: 1 },
+              },
+            });
+            if (synced.count !== 1) {
+              throw new ConflictException('商品已在价格同步期间发生变化，请刷新后重试');
+            }
+            throw new ConflictException('平台 SKU 价格已变化并同步，请确认后重新编辑');
+          }
+          confirmedPriceSnapshot = platformPrices;
+          editSkus = applyPublishedSkuPrices(
+            baseEditSkus,
+            platformPrices as unknown as Prisma.JsonValue,
+          );
+          editSalePrice = publishedSkuStartPrice(platformPrices);
+        }
         await this.platformProductLocks.renew(record.id, platformLock);
         await adapter.updateProduct(token, {
           platformProductId: record.platformProductId,
@@ -1647,8 +1706,8 @@ export class PublishService {
           attributes: stringAttributes(record.sourceProduct.attributes),
           categoryProperties,
           qualifications,
-          skus: skuSnapshot[shop.platform]?.skus ?? defaultPublishSkus(Number(record.salePrice)),
-          salePrice: Number(record.salePrice),
+          skus: editSkus,
+          salePrice: editSalePrice,
           costPrice: record.costPrice === null ? undefined : Number(record.costPrice),
         });
         await this.platformProductLocks.renew(record.id, platformLock);
@@ -1680,6 +1739,13 @@ export class PublishService {
           categoryId,
           mainImage,
           status,
+          salePrice: editSalePrice,
+          ...(confirmedPriceSnapshot
+            ? {
+                skuPriceSnapshot: confirmedPriceSnapshot as unknown as Prisma.InputJsonValue,
+                priceSyncedAt: lastEditedAt,
+              }
+            : {}),
           lastEditedAt,
           lastEditError: null,
           platformStatusRaw: null,
@@ -2461,6 +2527,106 @@ function refreshSkuSnapshotStocks(
 
 function defaultPublishSkus(salePrice: number): PublishSkuSnapshotEntry['skus'] {
   return [{ specName: '默认', price: salePrice, stock: 999, attributes: {} }];
+}
+
+interface PublishedSkuPriceSnapshot {
+  version: 1;
+  items: Array<{ sourceSkuId: string; priceCents: number }>;
+}
+
+function publishedSkuPriceSnapshot(
+  skus: PublishSkuSnapshotEntry['skus'],
+): PublishedSkuPriceSnapshot | null {
+  const items = skus.map((sku) => {
+    const sourceSkuId = sku.sourceSkuId?.trim();
+    const priceCents = Math.round(sku.price * 100);
+    return sourceSkuId && Number.isSafeInteger(priceCents) && priceCents > 0
+      ? { sourceSkuId, priceCents }
+      : null;
+  });
+  if (!items.length || items.some((item) => !item)) return null;
+  const normalized = items as Array<{ sourceSkuId: string; priceCents: number }>;
+  if (new Set(normalized.map((item) => item.sourceSkuId)).size !== normalized.length) return null;
+  normalized.sort((left, right) => left.sourceSkuId.localeCompare(right.sourceSkuId));
+  return { version: 1, items: normalized };
+}
+
+function publishedSkuPriceSnapshotFromPlatform(
+  items: Array<{ sourceSkuId: string; priceCents: number }>,
+): PublishedSkuPriceSnapshot | null {
+  if (!items.length) return null;
+  const normalized = items.map((item) => ({
+    sourceSkuId: item.sourceSkuId.trim(),
+    priceCents: item.priceCents,
+  }));
+  if (
+    normalized.some(
+      (item) => !item.sourceSkuId || !Number.isSafeInteger(item.priceCents) || item.priceCents <= 0,
+    ) ||
+    new Set(normalized.map((item) => item.sourceSkuId)).size !== normalized.length
+  ) {
+    return null;
+  }
+  normalized.sort((left, right) => left.sourceSkuId.localeCompare(right.sourceSkuId));
+  return { version: 1, items: normalized };
+}
+
+function samePublishedSkuPrices(
+  left: PublishedSkuPriceSnapshot,
+  right: PublishedSkuPriceSnapshot,
+): boolean {
+  return (
+    left.items.length === right.items.length &&
+    left.items.every(
+      (item, index) =>
+        item.sourceSkuId === right.items[index]?.sourceSkuId &&
+        item.priceCents === right.items[index]?.priceCents,
+    )
+  );
+}
+
+function publishedSkuStartPrice(snapshot: PublishedSkuPriceSnapshot): number {
+  return Math.min(...snapshot.items.map((item) => item.priceCents)) / 100;
+}
+
+function applyPublishedSkuPrices(
+  skus: PublishSkuSnapshotEntry['skus'],
+  value: Prisma.JsonValue | null,
+): PublishSkuSnapshotEntry['skus'] {
+  const snapshot = parsePublishedSkuPriceSnapshot(value);
+  if (!snapshot) return skus;
+  const byId = new Map(snapshot.items.map((item) => [item.sourceSkuId, item.priceCents]));
+  if (byId.size !== skus.length) {
+    throw new ConflictException('商品 SKU 价格快照与原发布规格不一致，请先同步商品价格');
+  }
+  return skus.map((sku) => {
+    const sourceSkuId = sku.sourceSkuId?.trim();
+    const priceCents = sourceSkuId ? byId.get(sourceSkuId) : undefined;
+    if (!sourceSkuId || priceCents === undefined) {
+      throw new ConflictException('商品 SKU 价格快照与原发布规格不一致，请先同步商品价格');
+    }
+    return { ...sku, price: priceCents / 100 };
+  });
+}
+
+function parsePublishedSkuPriceSnapshot(
+  value: Prisma.JsonValue | null,
+): PublishedSkuPriceSnapshot | null {
+  const record = jsonRecord(value ?? undefined);
+  if (record?.version !== 1 || !Array.isArray(record.items) || !record.items.length) return null;
+  const items = record.items.map((itemValue) => {
+    const item = jsonRecord(itemValue);
+    const sourceSkuId = stringOrNull(item?.sourceSkuId)?.trim();
+    const priceCents = item?.priceCents;
+    return sourceSkuId && Number.isSafeInteger(priceCents) && Number(priceCents) > 0
+      ? { sourceSkuId, priceCents: Number(priceCents) }
+      : null;
+  });
+  if (items.some((item) => !item)) return null;
+  const normalized = items as Array<{ sourceSkuId: string; priceCents: number }>;
+  if (new Set(normalized.map((item) => item.sourceSkuId)).size !== normalized.length) return null;
+  normalized.sort((left, right) => left.sourceSkuId.localeCompare(right.sourceSkuId));
+  return { version: 1, items: normalized };
 }
 
 function storedSkuSummary(value: Prisma.JsonValue | null): {

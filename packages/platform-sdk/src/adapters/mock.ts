@@ -9,6 +9,7 @@ import type {
   CategoryRecommendationResult,
   OrderQuery,
   PlatformOrder,
+  PlatformProductPriceState,
   PlatformProductState,
   PublishProductDto,
   PublishResult,
@@ -16,6 +17,7 @@ import type {
   ShipPackagesDto,
   SyncInventoryDto,
   UpdateProductDto,
+  UpdateProductPriceDto,
 } from '../types';
 
 const DEFAULT_CONFIG: AdapterConfig = {
@@ -24,6 +26,8 @@ const DEFAULT_CONFIG: AdapterConfig = {
   redirectUri: 'https://mock.local/callback',
   sandbox: true,
 };
+
+const MOCK_PRODUCT_PRICES = new Map<string, Map<string, number>>();
 
 /**
  * Mock 平台适配器：模拟发布 / 订单 / 发货。
@@ -59,11 +63,36 @@ export class MockPlatformAdapter extends BasePlatformAdapter {
 
   async publishProduct(_token: string, dto: PublishProductDto): Promise<PublishResult> {
     const id = `${this.platform}-${Date.now()}-${hashTitle(dto.title)}`;
+    storeProductPrices(this.platform, id, dto.skus);
     return { platformProductId: id, url: `https://mock.${this.platform}.shop/item/${id}` };
   }
 
-  async updateProduct(_token: string, _dto: UpdateProductDto): Promise<void> {
-    /* 模拟：无操作 */
+  async updateProduct(_token: string, dto: UpdateProductDto): Promise<void> {
+    storeProductPrices(this.platform, dto.platformProductId, dto.skus);
+  }
+
+  async updateProductPrice(_token: string, dto: UpdateProductPriceDto): Promise<void> {
+    const sourceSkuId = validMockSkuId(dto.sourceSkuId);
+    const priceCents = validMockPrice(dto.priceCents);
+    const key = mockProductKey(this.platform, dto.platformProductId);
+    const prices = MOCK_PRODUCT_PRICES.get(key) ?? new Map<string, number>();
+    prices.set(sourceSkuId, priceCents);
+    MOCK_PRODUCT_PRICES.set(key, prices);
+  }
+
+  async getProductPrices(_token: string, productId: string): Promise<PlatformProductPriceState> {
+    const prices = MOCK_PRODUCT_PRICES.get(mockProductKey(this.platform, productId));
+    if (!prices?.size) throw new Error('Mock product prices are unavailable');
+    return {
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+      items: [...prices]
+        .map(([sourceSkuId, priceCents]) => ({ sourceSkuId, priceCents }))
+        .sort((left, right) =>
+          left.sourceSkuId < right.sourceSkuId ? -1 : left.sourceSkuId > right.sourceSkuId ? 1 : 0,
+        ),
+    };
   }
 
   async getProductState(_token: string, _productId: string): Promise<PlatformProductState> {
@@ -201,6 +230,36 @@ function hashTitle(title: string): string {
     h = (h * 31 + title.charCodeAt(i)) % 1_000_000;
   }
   return h.toString(36);
+}
+
+function storeProductPrices(
+  platform: PlatformType,
+  productId: string,
+  skus: PublishProductDto['skus'],
+): void {
+  const prices = new Map<string, number>();
+  for (const sku of skus) {
+    if (!sku.sourceSkuId) continue;
+    const sourceSkuId = validMockSkuId(sku.sourceSkuId);
+    if (prices.has(sourceSkuId)) throw new Error(`Mock duplicate external SKU ID: ${sourceSkuId}`);
+    prices.set(sourceSkuId, validMockPrice(Math.round(sku.price * 100)));
+  }
+  if (prices.size) MOCK_PRODUCT_PRICES.set(mockProductKey(platform, productId), prices);
+}
+
+function mockProductKey(platform: PlatformType, productId: string): string {
+  return `${platform}:${productId}`;
+}
+
+function validMockSkuId(value: string): string {
+  const sourceSkuId = value.trim();
+  if (!sourceSkuId) throw new Error('Mock external SKU ID is invalid');
+  return sourceSkuId;
+}
+
+function validMockPrice(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error('Mock SKU price is invalid');
+  return value;
 }
 
 export function createMockAdapter(platform: PlatformType): MockPlatformAdapter {

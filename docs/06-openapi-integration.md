@@ -72,7 +72,8 @@
 | Token 交换 | `token.create`                    | 授权 code 换取 access/refresh token 与店铺信息 |
 | 商品发布   | `product.addV2`                   | 携带外部商品编码提交商品并进入平台审核         |
 | 商品编辑   | `product.editV2`                  | 修正已有商品并重新提交审核                     |
-| 商品状态   | `product.detail`                  | 查询上下架状态与审核状态                       |
+| SKU 改价   | `sku.editPrice`                   | 按商品 ID、外部 SKU 编码写入绝对整数分售价     |
+| 商品状态   | `product.detail`                  | 查询上下架、审核状态及 `spec_prices` SKU 价格  |
 | 库存同步   | `sku.syncStockBatchMultiProducts` | 按外部 SKU 编码全量更新库存                    |
 | 商品下架   | `product.setOffline`              | 缺货、货源下架或 SKU 结构变化时安全下架        |
 | 类目获取   | `shop.getShopCategory`            | 按店铺递归获取可发布类目树                     |
@@ -122,6 +123,9 @@
 - 1688 已产生包裹但在抖店回传前进入取消/关闭时，不允许走重新采购或直接复用旧包裹。运营先在 1688 核实/恢复物流，再提交当前异常修订号和处理说明；旧包裹、订单项映射及操作人写入恢复历史后清空，采购状态仅重置为待重新校验。同一远端订单必须再次通过订单 ID、商品快照、状态和完整物流校验，才能形成新的回传包裹
 - 可选后台巡检仅扫描抖店已发货/收货、1688 曾产生物流且当前无未处理异常的采购单。远端订单正常且运单、承运商、商品映射不变时可更新签收状态；后续取消/关闭、物流消失或路由变化时保留原包裹，转人工待办并触发主动告警，不允许静默改写已回传抖店的物流
 - 库存联动使用 `sku.syncStockBatchMultiProducts` 的全量模式（`incremental=false`），单次最多 50 个 SKU；以发布时写入的 `outer_sku_id = 1688 specId` 定位规格
+- 批量改价使用独立的 `sku.editPrice`，请求只携带 `product_id`、发布时写入的 `out_sku_id` 和绝对整数分 `price`；不得为了改价复用会同时覆盖标题、图片、库存等字段的 `product.editV2`
+- 改价预览把比例或逐项目标起售价物化为逐 SKU 绝对价格。执行前后使用 `product.detail.spec_prices` 回读，并严格要求外部 SKU ID 非空且唯一、价格为正整数；平台已达目标时恢复成功，部分成功时只续跑剩余 SKU，出现额外价格漂移或 SKU 集合变化时同步真实快照并 fail-closed
+- 后续执行完整 `product.editV2` 前必须先回读并保留平台最新 SKU 价格，防止标题或详情修正把独立批量改价覆盖回旧价格
 - 每次真实库存变化分配单调递增版本号，并生成店铺内 24 小时唯一、同一次重试稳定的 `idempotent_id`；平台返回“Token 已被使用”时按同一快照已落地处理
 - 库存 worker 的执行、完成和失败必须同时匹配 `syncing + attempts + lockedBy + 目标版本/指纹`；stale recovery 或其他 worker 接管后，迟到结果只能返回 stale，不能覆盖新状态
 - 人工库存重试按读取到的失败状态、尝试次数和目标版本做条件更新；若期间已被 worker 认领则返回冲突，不清除新 worker 的锁
@@ -146,7 +150,7 @@
 - 真实平台适配器若不支持按外部编码恢复，必须在调用创建接口前阻断；平台恢复成功后，本地按 `task_id + shop_id` 幂等 upsert，避免数据库短暂失败或并发恢复产生重复铺货记录
 - “我的铺货”可调用 `product.detail` 手工刷新平台状态；审核状态优先于上下架状态，将待审核/审核通过待上架映射为待审核，将审核不通过/封禁映射为驳回，将下线/删除映射为已下架
 - 同步成功保存平台原始 `status/check_status` 与时间；失败保存脱敏错误且保留原本地业务状态，避免网络故障造成错误下架或错误上线
-- 官方契约：[`sku.syncStockBatchMultiProducts`](https://op.jinritemai.com/docs/api-docs/14/2847)、[`product.setOffline`](https://op.jinritemai.com/docs/api-docs/14/252)
+- 官方契约：[`sku.editPrice`](https://op.jinritemai.com/docs/api-docs/14/1822)、[`sku.syncStockBatchMultiProducts`](https://op.jinritemai.com/docs/api-docs/14/2847)、[`product.setOffline`](https://op.jinritemai.com/docs/api-docs/14/252)
 - 类目官方契约：[`shop.getShopCategory`](https://op.jinritemai.com/docs/api-docs/14/1820)、[`product.GetRecommendCategory`](https://op.jinritemai.com/docs/api-docs/14/2004)
 - 类目属性契约：[`product.getCatePropertyV2`](https://op.jinritemai.com/docs/api-docs/14/1373)、[`product.addV2`](https://op.jinritemai.com/docs/api-docs/14/249)
 - 类目资质契约：[`product.qualificationConfig`](https://op.jinritemai.com/docs/api-docs/14/1382)、[`product.addV2`](https://op.jinritemai.com/docs/api-docs/14/249)
@@ -179,18 +183,18 @@
 
 ### 4.2 应用权限与待核验 scope
 
-| ID   | 平台 | R1 必需能力                                 | 当前 adapter 实际调用                                                                                              | 官方 scope / 权限编码                                    | 负责人 / 状态           | 验证方式                                                                                     |
-| ---- | ---- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------- |
-| D-P1 | 抖店 | 商家 OAuth、Token 获取与刷新                | `token.create`、`token.refresh`                                                                                    | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 完成一次 OAuth，记录授权店铺、授权时间、Token 到期时间和刷新成功日志，不记录 Token 值        |
-| D-P2 | 抖店 | 店铺类目、类目推荐、属性和资质规则          | `shop.getShopCategory`、`product.GetRecommendCategory`、`product.getCatePropertyV2`、`product.qualificationConfig` | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 每个方法至少一次真实成功响应；保存平台 request ID、类目 ID 和 schema 指纹                    |
-| D-P3 | 抖店 | 商品创建、幂等恢复、编辑、状态回读和下架    | `product.addV2`、`product.detail`、`product.editV2`、`product.setOffline`                                          | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 同一测试商品完成创建、按外部编码恢复、状态回读、编辑重审和下架；记录 product ID 与审核截图   |
-| D-P4 | 抖店 | SKU 库存同步                                | `sku.syncStockBatchMultiProducts`                                                                                  | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 真实 SKU 全量改库存后从平台回读或后台截图核对，并保留稳定幂等 ID                             |
-| D-P5 | 抖店 | 订单增量、单笔刷新与已付款订单隐私字段解密  | `order.searchList`、`order.orderDetail`、`order.batchDecrypt`                                                      | 待平台控制台核验；隐私字段能力是否需额外申请必须单独确认 | 主体持有人 / 🟡 待核验  | 同一已付款测试订单可查询、回读并解密测试人员授权的姓名 / 电话 / 地址；日志与仓库证据必须脱敏 |
-| D-P6 | 抖店 | 承运商查询、单包 / 多包发货和已发货物流修正 | `order.logisticsCompanyList`、`order.logisticsAdd`、`order.logisticsAddMultiPack`、`order.logisticsEditByPack`     | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 单包和多包各成功一次；物流修正另做一次受控演练，保存 request ID、订单 ID 和平台回读快照      |
-| A-P1 | 1688 | 买家 OAuth、Token 获取与刷新                | OAuth authorize、authorization code、refresh token 流程                                                            | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | OAuth 后 readiness 出现真实买家，随后完成一次刷新；只保存 member ID、时间和结果              |
-| A-P2 | 1688 | 买家货源搜索和详情                          | `cross.keywords.search`、`cross.productInfo.get`                                                                   | 待官方解决方案和应用权限页核验，不把方法名当 scope       | 主体持有人 / ⛔ 待 A-04 | 对同一 offer 保存搜索命中、详情、SKU、分销价、库存和图片的脱敏响应摘要，并记录配额消耗       |
-| A-P3 | 1688 | 代发下单、未知结果恢复和买家订单详情        | `alibaba.trade.fastCreateOrder`、`alibaba.trade.getBuyerOrderList`、`alibaba.trade.get.buyerView`                  | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 用稳定 `outOrderId` 创建小额采购，按外部订单号恢复并回读同一远端订单及商品快照               |
-| A-P4 | 1688 | 买家物流查询                                | `alibaba.trade.getLogisticsInfos.buyerView`                                                                        | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 回读真实运单、承运商、状态和采购子项映射，平台数据与本地包裹逐项一致                         |
+| ID   | 平台 | R1 必需能力                                 | 当前 adapter 实际调用                                                                                              | 官方 scope / 权限编码                                    | 负责人 / 状态           | 验证方式                                                                                                                       |
+| ---- | ---- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| D-P1 | 抖店 | 商家 OAuth、Token 获取与刷新                | `token.create`、`token.refresh`                                                                                    | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 完成一次 OAuth，记录授权店铺、授权时间、Token 到期时间和刷新成功日志，不记录 Token 值                                          |
+| D-P2 | 抖店 | 店铺类目、类目推荐、属性和资质规则          | `shop.getShopCategory`、`product.GetRecommendCategory`、`product.getCatePropertyV2`、`product.qualificationConfig` | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 每个方法至少一次真实成功响应；保存平台 request ID、类目 ID 和 schema 指纹                                                      |
+| D-P3 | 抖店 | 商品创建、幂等恢复、编辑、状态回读和下架    | `product.addV2`、`product.detail`、`product.editV2`、`product.setOffline`                                          | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 同一测试商品完成创建、按外部编码恢复、状态回读、编辑重审和下架；记录 product ID 与审核截图                                     |
+| D-P4 | 抖店 | SKU 改价与库存同步                          | `sku.editPrice`、`product.detail`、`sku.syncStockBatchMultiProducts`                                               | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 至少 2 个真实 SKU 分别完成比例改价、逐项目标价、价格回读和全量库存更新；保留请求 ID、改前/改后快照，并验证标题修正不回滚新价格 |
+| D-P5 | 抖店 | 订单增量、单笔刷新与已付款订单隐私字段解密  | `order.searchList`、`order.orderDetail`、`order.batchDecrypt`                                                      | 待平台控制台核验；隐私字段能力是否需额外申请必须单独确认 | 主体持有人 / 🟡 待核验  | 同一已付款测试订单可查询、回读并解密测试人员授权的姓名 / 电话 / 地址；日志与仓库证据必须脱敏                                   |
+| D-P6 | 抖店 | 承运商查询、单包 / 多包发货和已发货物流修正 | `order.logisticsCompanyList`、`order.logisticsAdd`、`order.logisticsAddMultiPack`、`order.logisticsEditByPack`     | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 单包和多包各成功一次；物流修正另做一次受控演练，保存 request ID、订单 ID 和平台回读快照                                        |
+| A-P1 | 1688 | 买家 OAuth、Token 获取与刷新                | OAuth authorize、authorization code、refresh token 流程                                                            | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | OAuth 后 readiness 出现真实买家，随后完成一次刷新；只保存 member ID、时间和结果                                                |
+| A-P2 | 1688 | 买家货源搜索和详情                          | `cross.keywords.search`、`cross.productInfo.get`                                                                   | 待官方解决方案和应用权限页核验，不把方法名当 scope       | 主体持有人 / ⛔ 待 A-04 | 对同一 offer 保存搜索命中、详情、SKU、分销价、库存和图片的脱敏响应摘要，并记录配额消耗                                         |
+| A-P3 | 1688 | 代发下单、未知结果恢复和买家订单详情        | `alibaba.trade.fastCreateOrder`、`alibaba.trade.getBuyerOrderList`、`alibaba.trade.get.buyerView`                  | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 用稳定 `outOrderId` 创建小额采购，按外部订单号恢复并回读同一远端订单及商品快照                                                 |
+| A-P4 | 1688 | 买家物流查询                                | `alibaba.trade.getLogisticsInfos.buyerView`                                                                        | 待平台控制台核验                                         | 主体持有人 / 🟡 待核验  | 回读真实运单、承运商、状态和采购子项映射，平台数据与本地包裹逐项一致                                                           |
 
 `alibaba.refund.create` 目前仅在能力规划中，当前采购 adapter 没有调用它；R1-05 首轮通过平台后台人工取消、退款或拦截并在 Supplier 中核销。因此它不是本轮 R0-05 的强制权限，后续实现自动售后时再按官方权限页补充，不能提前猜测 scope。
 

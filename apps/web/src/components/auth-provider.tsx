@@ -18,15 +18,15 @@ import {
   readPendingPasswordSetup,
   savePendingPasswordSetup,
   type PasswordSetupReason,
-} from '@/lib/auth-password-setup';
-import { getSupabaseConfiguration } from '@/lib/environment';
+} from '../lib/auth-password-setup';
+import { getSupabaseConfiguration } from '../lib/environment';
 import {
   authMode,
   getSupabaseClient,
   isDemoAuthMode,
   isSignupEnabled,
   setAccessToken,
-} from '@/lib/supabase';
+} from '../lib/supabase';
 
 interface AuthContextValue {
   session: Session | null;
@@ -191,6 +191,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
     );
   }
   return children;
+}
+
+export function useAuthStorageIdentity(): string | null {
+  const { session } = useContext(AuthContext);
+  return isDemoAuthMode ? 'demo-user:1' : (session?.user.id ?? null);
 }
 
 export function AuthStatus({ compact = false }: { compact?: boolean }) {

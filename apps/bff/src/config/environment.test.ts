@@ -46,6 +46,8 @@ describe('validateEnvironment', () => {
       ALERT_WEBHOOK_RETRY_BASE_MS: 500,
       INVENTORY_SYNC_POLL_MS: 5000,
       INVENTORY_SYNC_MAX_ATTEMPTS: 3,
+      PRODUCT_BATCH_POLL_MS: 2000,
+      PRODUCT_BATCH_MAX_ATTEMPTS: 3,
     });
   });
 
@@ -219,6 +221,35 @@ describe('validateEnvironment', () => {
         INVENTORY_SYNC_ENABLED: 'true',
       }),
     ).toMatchObject({ INVENTORY_SYNC_ENABLED: 'true' });
+  });
+
+  it('validates bounded product batch worker configuration', () => {
+    expect(() => validateEnvironment({ PRODUCT_BATCH_ENABLED: 'enabled' })).toThrow(
+      'PRODUCT_BATCH_ENABLED must be true or false',
+    );
+    expect(() => validateEnvironment({ PRODUCT_BATCH_POLL_MS: 499 })).toThrow(
+      'PRODUCT_BATCH_POLL_MS must be an integer between 500 and 60000',
+    );
+    expect(() => validateEnvironment({ PRODUCT_BATCH_POLL_MS: 60_001 })).toThrow(
+      'PRODUCT_BATCH_POLL_MS must be an integer between 500 and 60000',
+    );
+    expect(() => validateEnvironment({ PRODUCT_BATCH_MAX_ATTEMPTS: 0 })).toThrow(
+      'PRODUCT_BATCH_MAX_ATTEMPTS must be an integer between 1 and 10',
+    );
+    expect(() => validateEnvironment({ PRODUCT_BATCH_MAX_ATTEMPTS: 11 })).toThrow(
+      'PRODUCT_BATCH_MAX_ATTEMPTS must be an integer between 1 and 10',
+    );
+    expect(
+      validateEnvironment({
+        PRODUCT_BATCH_ENABLED: true,
+        PRODUCT_BATCH_POLL_MS: '500',
+        PRODUCT_BATCH_MAX_ATTEMPTS: '10',
+      }),
+    ).toMatchObject({
+      PRODUCT_BATCH_ENABLED: 'true',
+      PRODUCT_BATCH_POLL_MS: 500,
+      PRODUCT_BATCH_MAX_ATTEMPTS: 10,
+    });
   });
 });
 

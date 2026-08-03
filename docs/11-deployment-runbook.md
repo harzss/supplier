@@ -52,6 +52,9 @@ BFF 至少需要：
 - `ALERT_WEBHOOK_SECRET`：至少 32 字符，用于 timestamp + HMAC-SHA256 签名
 - `ALERT_WEBHOOK_MAX_ATTEMPTS`：默认 3，允许 1～5 次总尝试
 - `ALERT_WEBHOOK_RETRY_BASE_MS`：默认 500ms，允许 100～5000ms 的指数退避基数
+- `PRODUCT_BATCH_ENABLED`：批量商品执行 worker 总开关；新环境和首次发布必须先保持 `false`
+- `PRODUCT_BATCH_POLL_MS`：默认 2000ms，允许 500～60000ms
+- `PRODUCT_BATCH_MAX_ATTEMPTS`：默认 3，允许 1～10 次；只作用于 item 级失败，不得通过重跑整批覆盖成功项
 
 `AUDIT_RETENTION_DAYS` 默认 180 天；告警监控周期、队列阈值、5xx 阈值、Webhook timeout 和重试参数应通过部署配置管理并记录变更。接收端必须校验 timestamp + HMAC-SHA256，并按签名 payload/header 中相同的 `deliveryId` 幂等去重。运维端点应同时使用网关来源限制和 `OPERATIONS_TOKEN`，不能只依赖 URL 隐蔽。
 
@@ -99,6 +102,8 @@ docker build --target web -t <registry>/supplier-web:<git-sha> \
 
 每次发布只由一个受控 Job 执行迁移：
 
+当前候选的最新必需 migration 为 `20260804050000_add_product_batch_operations`。它新增 `published_products.mutation_revision`、`product_batch_tasks`、`product_batch_items` 和 `(shop_id, platform_product_id)` 唯一索引。隔离预检必须先确认所有非空 `platform_product_id` 在同一店铺内没有重复；migration 自身也会在建索引前 fail-closed。迁移后必须确认两张新表已启用 RLS，且 `anon` / `authenticated` 对表和 sequence 都没有直接权限。
+
 ```bash
 docker run --rm \
   -e DATABASE_URL=<runtime-database-url> \
@@ -121,6 +126,8 @@ docker run --rm \
 7. `/api/operations/status` 无运维 token 返回 401；有效 token 下 status/check/alerts/metrics 返回 200。
 8. Prometheus 文本包含请求、5xx、队列、活跃告警和审计失败指标。
 9. 执行关键业务 smoke：真实测试账号登录、读取收藏/店铺、创建一条可清理的测试记录，并确认审计记录已落库且不包含 body、token、Cookie、密钥或原始 IP。
+10. 首次启动保持 `PRODUCT_BATCH_ENABLED=false`：候选商品与持久化预览可以读取/创建，但确认执行必须明确返回 503，数据库不得出现 `queued/running` 批量 item；这证明开关关闭时不会产生平台副作用。
+11. 在一次性测试窗口把开关改为 `true` 并重启候选 BFF，只对可清理的测试商品验收首个 `offline` 动作：预览不调用平台；确认后逐项推进；真实平台必须回读到下架才算成功；刷新页面可恢复任务；停止只取消未开始项；失败项重试不重跑成功项。验收后恢复 `false`，直到真实平台权限和运营窗口批准长期启用。
 
 自动验证：
 
@@ -138,6 +145,7 @@ pnpm deploy:verify
 - 5xx、401/403 异常增幅和请求延迟；
 - PostgreSQL/Redis 连接错误；
 - publish queue backlog、重试和 dead job；
+- `product_batch_tasks/items` 的 queued、running、retry_wait、failed 和 stale 数量；批量成功项不得因失败重试再次执行，running 超过 5 分钟应由 stale recovery 收敛；
 - 运行中 publish job 的 `locked_at` 应至少每 60 秒推进；停滞超过 5 分钟才应由 stale recovery 接管；
 - 运行中 `order_logistics_repairs.locked_at` 也应每 60 秒推进；长时多包裹修复不应出现两个并发 lockId；
 - Supabase JWKS/认证失败；
@@ -151,10 +159,11 @@ pnpm deploy:verify
 适用：新版本应用错误，但已执行的 migration 与旧应用向后兼容。
 
 1. 停止继续切流和发布任务。
-2. 将 BFF/Web 指向上一个已验证的 SHA/digest。
-3. 等待旧版本 readiness 为 200 后切回流量。
-4. 运行部署验证和关键业务 smoke。
-5. 保留故障版本日志、指标、镜像 digest 和发布记录。
+2. 将 `PRODUCT_BATCH_ENABLED=false` 并停止新批量确认；保留 `product_batch_tasks/items` 及已完成结果，不删除或整批重置。旧版本不会消费尚未完成的 item，恢复该功能前必须先核对逐项状态。
+3. 将 BFF/Web 指向上一个已验证的 SHA/digest。
+4. 等待旧版本 readiness 为 200 后切回流量。
+5. 运行部署验证和关键业务 smoke。
+6. 保留故障版本日志、指标、镜像 digest 和发布记录。
 
 不重新运行旧版 migration，不执行 `prisma migrate reset`，不删除 `_prisma_migrations` 记录。
 
@@ -200,4 +209,6 @@ Prisma migration 按前向历史管理。已应用到任何共享环境的 migra
 
 以上是 M20 时点的已验证快照。2026-07-22 只读查询确认当时仓库有 32 个 migration，现 staging Supabase 当时仍有 18 个待应用，范围为 `20260720120000_add_inventory_sync`～`20260722091000_add_order_logistics_repairs`；当时只有 30 条货源、6 条铺货、3 条订单和 3 条采购，没有未完成 migration 记录，待新增的 `published_products(task_id, shop_id)` 唯一索引重复组为 0。该段仅保留历史迁移证据，不能作为当前状态。
 
-2026-08-03 审计快照确认 staging 为 PostgreSQL 17.6、当时仓库 33/33 migration applied、0 unfinished、0 rolled back，远端 checksum 与仓库 migration 全匹配，live schema 与 Prisma datamodel 无差异；最新 migration 为 `20260803173000_secure_supabase_public_schema`，28/28 public 表启用 RLS，anon/authenticated 对表和 sequence 均无权限。当前为 10 条货源、0 条铺货、0 条订单和 0 条采购，恢复键重复组为 0。安全 migration 前的一致性归档已在隔离 PostgreSQL 17 中完成恢复演练，归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`。release-gates 已加入全新库 migration status、live schema diff、Supabase 角色初始化和 RLS/ACL 断言，并由 2026-08-03 的 [GitHub Actions #30811827585](https://github.com/harzss/supplier/actions/runs/30811827585) 在全新 Runner 上完成首次 verify + images 全绿验证。其后 R2-01 新增第 34 个 `20260803200000_add_publish_request_idempotency` 和第 35 个 `20260804023000_add_publish_drafts`，当前 staging 均未应用；必须按本手册先备份与隔离预检，再由单一 migration-once 一次执行并复核 35/35。
+2026-08-03 审计快照确认 staging 为 PostgreSQL 17.6、当时仓库 33/33 migration applied、0 unfinished、0 rolled back，远端 checksum 与仓库 migration 全匹配，live schema 与 Prisma datamodel 无差异；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`，28/28 public 表启用 RLS，anon/authenticated 对表和 sequence 均无权限。当前为 10 条货源、0 条铺货、0 条订单和 0 条采购，恢复键重复组为 0。安全 migration 前的一致性归档已在隔离 PostgreSQL 17 中完成恢复演练，归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`。release-gates 已加入全新库 migration status、live schema diff、Supabase 角色初始化和 RLS/ACL 断言，并由 2026-08-03 的 [GitHub Actions #30811827585](https://github.com/harzss/supplier/actions/runs/30811827585) 在全新 Runner 上完成首次 verify + images 全绿验证。其后仓库新增第 34 个 `20260803200000_add_publish_request_idempotency`、第 35 个 `20260804023000_add_publish_drafts` 和第 36 个 `20260804050000_add_product_batch_operations`。真实 staging 尚未应用第 34、35 个，故现有实证仍为 33/35；按当前仓库发布计划则为 33/36。必须按本手册先备份与隔离预检，再由单一 migration-once 一次执行第 34～36 个并复核 36/36，不能把计划状态写成已迁移。
+
+2026-08-04 当前候选已在临时 PostgreSQL 17 全新库一次应用 36/36 migration，`migrate status` 最新且 live schema → Prisma datamodel 无差异；`mutation_revision`、`state_revision`、两张 `product_batch_*` 表和唯一索引存在，两张表均启用 RLS，anon/authenticated 对表与 sequence 的直接权限为 0。临时容器已停止并自动删除。该结果只证明全新库路径，不替代 staging 备份、数据重复预查、恢复库演练和维护窗口。

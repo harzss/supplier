@@ -148,6 +148,20 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
     10,
     'INVENTORY_SYNC_MAX_ATTEMPTS',
   );
+  environment.PRODUCT_BATCH_POLL_MS = integer(
+    environment.PRODUCT_BATCH_POLL_MS,
+    2_000,
+    500,
+    60_000,
+    'PRODUCT_BATCH_POLL_MS',
+  );
+  environment.PRODUCT_BATCH_MAX_ATTEMPTS = integer(
+    environment.PRODUCT_BATCH_MAX_ATTEMPTS,
+    3,
+    1,
+    10,
+    'PRODUCT_BATCH_MAX_ATTEMPTS',
+  );
   validateOptionalBoolean(environment.SWAGGER_ENABLED, 'SWAGGER_ENABLED');
   validateOptionalBoolean(environment.DOUYIN_ORDER_SYNC_ENABLED, 'DOUYIN_ORDER_SYNC_ENABLED');
   if (typeof environment.DOUYIN_ORDER_SYNC_ENABLED === 'boolean') {
@@ -156,6 +170,10 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
   validateOptionalBoolean(environment.INVENTORY_SYNC_ENABLED, 'INVENTORY_SYNC_ENABLED');
   if (typeof environment.INVENTORY_SYNC_ENABLED === 'boolean') {
     environment.INVENTORY_SYNC_ENABLED = String(environment.INVENTORY_SYNC_ENABLED);
+  }
+  validateOptionalBoolean(environment.PRODUCT_BATCH_ENABLED, 'PRODUCT_BATCH_ENABLED');
+  if (typeof environment.PRODUCT_BATCH_ENABLED === 'boolean') {
+    environment.PRODUCT_BATCH_ENABLED = String(environment.PRODUCT_BATCH_ENABLED);
   }
   validateOptionalBoolean(
     environment.ALIBABA_1688_PURCHASE_ENABLED,

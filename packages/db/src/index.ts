@@ -1,4 +1,4 @@
-export { PrismaClient } from '@prisma/client';
+export { Prisma, PrismaClient } from '@prisma/client';
 export type {
   User,
   Shop,
@@ -9,6 +9,8 @@ export type {
   PublishTask,
   PublishJob,
   PublishedProduct,
+  ProductBatchTask,
+  ProductBatchItem,
   ProductCategoryPropertyMapping,
   Order,
   OrderItem,
@@ -32,6 +34,9 @@ export type {
   PublishTaskStatus,
   PublishJobStatus,
   PublishedProductStatus,
+  ProductBatchAction,
+  ProductBatchTaskStatus,
+  ProductBatchItemStatus,
   OrderStatus,
   OrderAfterSaleStatus,
   OrderPartialRefundDisposition,
@@ -41,5 +46,4 @@ export type {
   AuditOutcome,
   OperationalAlertSeverity,
   OperationalAlertStatus,
-  Prisma,
 } from '@prisma/client';

@@ -459,6 +459,87 @@ export interface PublishedProductStatusResult {
   syncedAt: string;
 }
 
+export interface ProductBatchCandidate {
+  publishedProductId: string;
+  title: string;
+  mainImage: string | null;
+  shopId: string;
+  shopName: string | null;
+  platform: string;
+  platformProductId: string;
+  status: string;
+  salePrice: number;
+  sourceProductId: string;
+  sourceAvailability: string;
+  inventorySyncStatus: string;
+  mutationRevision: number;
+  publishedAt: string;
+}
+
+export interface ProductBatchCandidatePage {
+  items: ProductBatchCandidate[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface ProductBatchSummary {
+  total: number;
+  pending: number;
+  running: number;
+  retryWait: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+  completed: number;
+  progressPercent: number;
+}
+
+export interface ProductBatchItem {
+  itemId: string;
+  publishedProductId: string;
+  title: string;
+  mainImage: string | null;
+  shopId: string;
+  shopName: string | null;
+  platform: string;
+  platformProductId: string | null;
+  beforeStatus: string;
+  desiredStatus: string;
+  status: string;
+  attempts: number;
+  maxAttempts: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  result: Record<string, unknown> | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface ProductBatchTask {
+  taskId: string;
+  clientRequestId: string;
+  action: string;
+  status: string;
+  previewRevision: number;
+  cancelRequestedAt: string | null;
+  confirmedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  summary: ProductBatchSummary;
+  items: ProductBatchItem[];
+}
+
+export interface ProductBatchTaskPage {
+  items: ProductBatchTask[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export interface PublishTaskSummary {
   taskId: string;
   status: string;
@@ -972,6 +1053,59 @@ export const api = {
   syncPublishedProductStatus(publishedProductId: string): Promise<PublishedProductStatusResult> {
     return request(`/published-products/${encodeURIComponent(publishedProductId)}/status-sync`, {
       method: 'POST',
+    });
+  },
+
+  productBatchCandidates(filters: {
+    page: number;
+    pageSize: number;
+    status?: string;
+    q?: string;
+  }): Promise<ProductBatchCandidatePage> {
+    const params = new URLSearchParams({
+      page: String(filters.page),
+      pageSize: String(filters.pageSize),
+    });
+    if (filters.status) params.set('status', filters.status);
+    if (filters.q) params.set('q', filters.q);
+    return request(`/product-batches/candidates?${params.toString()}`);
+  },
+
+  createProductBatchPreview(body: {
+    clientRequestId: string;
+    action: 'offline';
+    publishedProductIds: string[];
+  }): Promise<ProductBatchTask> {
+    return request('/product-batches/previews', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  productBatchTask(taskId: string): Promise<ProductBatchTask> {
+    return request(`/product-batches/${encodeURIComponent(taskId)}`);
+  },
+
+  productBatchTasks(page: number, pageSize: number): Promise<ProductBatchTaskPage> {
+    const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+    return request(`/product-batches?${params.toString()}`);
+  },
+
+  executeProductBatch(taskId: string, previewRevision: number): Promise<ProductBatchTask> {
+    return request(`/product-batches/${encodeURIComponent(taskId)}/execute`, {
+      method: 'POST',
+      body: JSON.stringify({ previewRevision }),
+    });
+  },
+
+  cancelProductBatch(taskId: string): Promise<ProductBatchTask> {
+    return request(`/product-batches/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
+  },
+
+  retryProductBatch(taskId: string, itemIds?: string[]): Promise<ProductBatchTask> {
+    return request(`/product-batches/${encodeURIComponent(taskId)}/retry`, {
+      method: 'POST',
+      body: JSON.stringify(itemIds?.length ? { itemIds } : {}),
     });
   },
 

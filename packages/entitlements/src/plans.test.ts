@@ -40,7 +40,7 @@ describe('plans definition', () => {
 
   it('describes only implemented capabilities', () => {
     expect(listPlans().map((plan) => plan.highlight)).toEqual([
-      '基础选品、AI 标题与单店铺货',
+      '基础选品、AI 标题、单店铺货与批量下架',
       'AI 详情优化与单商品多店铺货',
       '主图处理（需图片服务就绪）、目标毛利与竞品区间定价、经营看板',
       '更高 AI 调用、店铺与铺货额度',
@@ -54,6 +54,7 @@ describe('canUseFeature', () => {
     expect(canUseFeature('free', 'ai.title')).toBe(true);
     expect(canUseFeature('free', 'product.browse')).toBe(true);
     expect(canUseFeature('free', 'publish.single')).toBe(true);
+    expect(canUseFeature('free', 'catalog.batch')).toBe(true);
   });
 
   it('free plan cannot use premium features', () => {
@@ -79,6 +80,7 @@ describe('isPremiumFeature', () => {
   it('classifies basic vs premium correctly', () => {
     expect(isPremiumFeature('ai.title')).toBe(false);
     expect(isPremiumFeature('product.browse')).toBe(false);
+    expect(isPremiumFeature('catalog.batch')).toBe(false);
     expect(isPremiumFeature('ai.detail')).toBe(true);
     expect(isPremiumFeature('publish.batch')).toBe(true);
   });
@@ -87,6 +89,7 @@ describe('isPremiumFeature', () => {
 describe('requiredPlanFor', () => {
   it('returns the cheapest plan that grants the feature', () => {
     expect(requiredPlanFor('ai.title')).toBe('free');
+    expect(requiredPlanFor('catalog.batch')).toBe('free');
     expect(requiredPlanFor('ai.detail')).toBe('basic');
     expect(requiredPlanFor('publish.batch')).toBe('basic');
     expect(requiredPlanFor('ai.image.watermark')).toBe('pro');

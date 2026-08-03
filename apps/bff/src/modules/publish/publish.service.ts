@@ -1327,6 +1327,7 @@ export class PublishService {
             status: isDemoShop(shop) ? 'online' : 'draft',
             categoryId,
             mainImage: publishMainImage,
+            mutationRevision: { increment: 1 },
             ...(product.inventoryFingerprint
               ? {
                   inventorySyncStatus: 'synced',
@@ -1584,6 +1585,31 @@ export class PublishService {
     const mainImage = record.mainImage ?? record.sourceProduct.mainImage;
     const platformLock = await this.platformProductLocks.acquire(record.id);
     try {
+      const currentProduct = await this.prisma.publishedProduct.findFirst({
+        where: {
+          id: record.id,
+          task: { userId: user.userId },
+          shop: {
+            role: 'seller',
+            status: 'active',
+            ...runtimeShopWhere(this.demoMode),
+          },
+        },
+        select: {
+          shopId: true,
+          platformProductId: true,
+          status: true,
+          mutationRevision: true,
+        },
+      });
+      if (
+        !currentProduct ||
+        currentProduct.shopId !== record.shopId ||
+        currentProduct.platformProductId !== record.platformProductId ||
+        currentProduct.mutationRevision !== record.mutationRevision
+      ) {
+        throw new ConflictException('商品已在修正前发生变化，请刷新后重试');
+      }
       const currentSource = await this.prisma.sourceProduct.findUnique({
         where: { id: record.sourceProductId },
         select: { inventoryFingerprint: true, inventoryVersion: true },
@@ -1642,9 +1668,13 @@ export class PublishService {
       }
 
       const lastEditedAt = new Date();
-      const status = record.status === 'rejected' ? 'draft' : record.status;
-      await this.prisma.publishedProduct.update({
-        where: { id: record.id },
+      const status = currentProduct.status === 'rejected' ? 'draft' : currentProduct.status;
+      const updated = await this.prisma.publishedProduct.updateMany({
+        where: {
+          id: record.id,
+          platformProductId: currentProduct.platformProductId,
+          mutationRevision: currentProduct.mutationRevision,
+        },
         data: {
           title,
           categoryId,
@@ -1656,8 +1686,12 @@ export class PublishService {
           platformCheckStatusRaw: null,
           platformStatusSyncedAt: null,
           platformStatusError: null,
+          mutationRevision: { increment: 1 },
         },
       });
+      if (updated.count !== 1) {
+        throw new ConflictException('商品已在修正期间发生变化，请刷新平台状态后重试');
+      }
       return {
         publishedProductId: record.id.toString(),
         title,
@@ -1688,39 +1722,66 @@ export class PublishService {
     });
     if (!record) throw new NotFoundException('已发布商品不存在或目标店铺不可用');
     if (!record.platformProductId) throw new BadRequestException('平台商品 ID 不存在');
-    const adapter = this.adapters.create(record.shop);
-    if (!adapter.getProductState) {
-      throw new BadRequestException('当前平台暂不支持商品状态同步');
-    }
     const platformLock = await this.platformProductLocks.acquire(record.id);
     try {
-      const token = record.shop.accessTokenEnc
-        ? await this.shopTokens.getAccessToken(record.shop.id, user.userId)
+      const current = await this.prisma.publishedProduct.findFirst({
+        where: {
+          id: record.id,
+          task: { userId: user.userId },
+          shop: {
+            role: 'seller',
+            status: 'active',
+            ...runtimeShopWhere(this.demoMode),
+          },
+        },
+        include: { shop: true },
+      });
+      if (!current?.platformProductId) {
+        throw new ConflictException('商品已在状态同步前发生变化，请刷新后重试');
+      }
+      const adapter = this.adapters.create(current.shop);
+      if (!adapter.getProductState) {
+        throw new BadRequestException('当前平台暂不支持商品状态同步');
+      }
+      const token = current.shop.accessTokenEnc
+        ? await this.shopTokens.getAccessToken(current.shop.id, user.userId)
         : 'mock-token';
-      await this.platformProductLocks.renew(record.id, platformLock);
-      const platformState = await adapter.getProductState(token, record.platformProductId);
-      await this.platformProductLocks.renew(record.id, platformLock);
-      const status = mapPlatformProductState(platformState, record.status);
+      await this.platformProductLocks.renew(current.id, platformLock);
+      const platformState = await adapter.getProductState(token, current.platformProductId);
+      await this.platformProductLocks.renew(current.id, platformLock);
+      const status = mapPlatformProductState(platformState, current.status);
       const syncedAt = new Date();
-      await this.prisma.publishedProduct.update({
-        where: { id: record.id },
+      const updated = await this.prisma.publishedProduct.updateMany({
+        where: {
+          id: current.id,
+          platformProductId: current.platformProductId,
+          mutationRevision: current.mutationRevision,
+        },
         data: {
           status,
           platformStatusRaw: platformState.status,
           platformCheckStatusRaw: platformState.checkStatus,
           platformStatusSyncedAt: syncedAt,
           platformStatusError: null,
+          mutationRevision: { increment: 1 },
         },
       });
+      if (updated.count !== 1) {
+        throw new ConflictException('商品已在状态同步期间发生变化，请刷新后重试');
+      }
       return {
-        publishedProductId: record.id.toString(),
+        publishedProductId: current.id.toString(),
         status,
         platformStatus: platformState.status,
         platformCheckStatus: platformState.checkStatus,
         syncedAt: syncedAt.toISOString(),
       };
     } catch (error) {
-      if (error instanceof ConflictException || error instanceof ServiceUnavailableException) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof ConflictException ||
+        error instanceof ServiceUnavailableException
+      ) {
         throw error;
       }
       const message = (error instanceof Error ? error.message : '平台商品状态同步失败').slice(

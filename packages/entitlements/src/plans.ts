@@ -13,6 +13,7 @@ const BASIC_FEATURES: FeatureId[] = [
   'ai.title',
   'publish.single',
   'shops.connect',
+  'catalog.batch',
 ];
 
 /** basic 相比 free 新增 */
@@ -42,7 +43,7 @@ export const PLANS: Record<PlanId, PlanDefinition> = {
     billingLabel: '邀请内测 · ¥0 / 内测期',
     features: [...FREE_FEATURES],
     quotas: { 'ai.calls.monthly': 20, 'shops.max': 1, 'publish.monthly': 50 },
-    highlight: '基础选品、AI 标题与单店铺货',
+    highlight: '基础选品、AI 标题、单店铺货与批量下架',
   },
   basic: {
     id: 'basic',

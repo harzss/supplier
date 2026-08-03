@@ -310,6 +310,7 @@ export class InventorySyncService {
         inventoryLastSyncedAt: new Date(),
         inventorySyncReason: reason,
         inventorySyncError: null,
+        mutationRevision: { increment: 1 },
       },
     });
     return updated.count === 1;

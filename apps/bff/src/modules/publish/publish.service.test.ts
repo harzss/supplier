@@ -1433,8 +1433,12 @@ describe('PublishService', () => {
     expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);
     expect(fixture.platformProductLocks.renew).toHaveBeenCalledTimes(2);
     expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
-    expect(fixture.prisma.publishedProduct.update).toHaveBeenLastCalledWith({
-      where: { id: 7n },
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenLastCalledWith({
+      where: {
+        id: 7n,
+        platformProductId: '998877',
+        mutationRevision: 1,
+      },
       data: expect.objectContaining({
         title: '修正后的纯棉T恤',
         status: 'draft',
@@ -1466,6 +1470,23 @@ describe('PublishService', () => {
     );
 
     expect(fixture.updateProduct).not.toHaveBeenCalled();
+    expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
+  });
+
+  it('does not revive a product that was batch-offlined while an edit waited for the lock', async () => {
+    const fixture = createFixture();
+    const initial = publishedProductRecord();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce({ ...initial, status: 'offline', mutationRevision: 2 });
+
+    await expect(fixture.service.updatePublishedProduct(USER, '7', {})).rejects.toThrow(
+      '商品已在修正前发生变化',
+    );
+
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
     expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
   });
 
@@ -1508,10 +1529,15 @@ describe('PublishService', () => {
     expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);
     expect(fixture.platformProductLocks.renew).toHaveBeenCalledTimes(2);
     expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
-    expect(fixture.prisma.publishedProduct.update).toHaveBeenCalledWith({
-      where: { id: 7n },
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 7n,
+        platformProductId: '998877',
+        mutationRevision: 1,
+      },
       data: {
         status: 'rejected',
+        mutationRevision: { increment: 1 },
         platformStatusRaw: 0,
         platformCheckStatusRaw: 4,
         platformStatusSyncedAt: expect.any(Date),
@@ -1626,12 +1652,14 @@ function leaseLostWhen(predicate: () => boolean): PublishExecutionLease {
 function publishedProductRecord() {
   return {
     id: 7n,
+    shopId: 9n,
     sourceProductId: 2n,
     platformProductId: '998877',
     title: '旧标题',
     salePrice: 15,
     costPrice: 10,
     status: 'rejected',
+    mutationRevision: 1,
     categoryId: '12345',
     mainImage: 'https://img.example/main.jpg',
     shop: SHOP,
@@ -1737,6 +1765,7 @@ function createFixture(
       upsert: vi.fn().mockResolvedValue({}),
       findFirst: vi.fn().mockResolvedValue(null),
       update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
   };
   prisma.$transaction.mockImplementation(

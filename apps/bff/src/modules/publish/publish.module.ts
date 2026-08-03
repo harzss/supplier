@@ -18,6 +18,9 @@ import { PlatformProductLockService } from './platform-product-lock.service';
 import { PricingPreviewReceiptService } from './pricing-preview-receipt.service';
 import { PublishDraftController } from './publish-draft.controller';
 import { PublishDraftService } from './publish-draft.service';
+import { ProductBatchController } from './product-batch.controller';
+import { ProductBatchService } from './product-batch.service';
+import { ProductBatchWorker } from './product-batch.worker';
 
 @Module({
   imports: [AiModule, ShopModule, CategoryModule],
@@ -27,6 +30,7 @@ import { PublishDraftService } from './publish-draft.service';
     PublishedProductController,
     MediaController,
     InventorySyncController,
+    ProductBatchController,
   ],
   providers: [
     PublishService,
@@ -40,6 +44,8 @@ import { PublishDraftService } from './publish-draft.service';
     PlatformProductLockService,
     PricingPreviewReceiptService,
     PublishDraftService,
+    ProductBatchService,
+    ProductBatchWorker,
   ],
   exports: [PublishService],
 })

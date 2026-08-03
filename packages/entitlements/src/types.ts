@@ -16,6 +16,7 @@ export type FeatureId =
   | 'ai.title' // AI 标题生成
   | 'publish.single' // 单店铺一键铺货
   | 'shops.connect' // 连接店铺
+  | 'catalog.batch' // 批量商品经营（内测核心能力）
   // ---- 高级功能 ----
   | 'ai.detail' // AI 详情页文案优化
   | 'ai.image.watermark' // 主图去水印

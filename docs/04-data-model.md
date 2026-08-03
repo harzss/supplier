@@ -20,6 +20,9 @@ erDiagram
     SOURCE_PRODUCT ||--o{ PRODUCT_CATEGORY_PROPERTY_MAPPING : configures
     PUBLISH_TASK ||--o{ PUBLISHED_PRODUCT : produces
     PUBLISHED_PRODUCT ||--o{ ORDER : sold_in
+    USER ||--o{ PRODUCT_BATCH_TASK : owns
+    PRODUCT_BATCH_TASK ||--o{ PRODUCT_BATCH_ITEM : contains
+    PUBLISHED_PRODUCT ||--o{ PRODUCT_BATCH_ITEM : targets
     ORDER ||--o| PURCHASE_ORDER : triggers
     USER ||--o{ AI_USAGE : consumes
     USER ||--o{ AUDIT_LOG : acts
@@ -95,7 +98,30 @@ erDiagram
         bigint shop_id FK
         string platform_product_id
         decimal sale_price
+        int mutation_revision
         timestamp published_at
+    }
+    PRODUCT_BATCH_TASK {
+        bigint id PK
+        bigint user_id FK
+        uuid client_request_id UK
+        string request_fingerprint
+        enum action
+        enum status
+        int preview_revision
+        timestamp cancel_requested_at
+    }
+    PRODUCT_BATCH_ITEM {
+        bigint id PK
+        bigint task_id FK
+        bigint published_product_id FK
+        enum status
+        int expected_mutation_revision
+        json before_snapshot
+        json desired_snapshot
+        int attempts
+        int max_attempts
+        timestamp locked_at
     }
     ORDER {
         bigint id PK
@@ -163,11 +189,38 @@ erDiagram
 
 权威定义见 `packages/db/prisma/schema.prisma` 的 `PublishDraft` 和 migration `20260804023000_add_publish_drafts`。
 
-## 3. 核心表 Schema（历史 MySQL 设计草案）
+## 3. 当前批量商品操作契约
+
+`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前第一个垂直切片只允许 `offline`（批量下架）；数据库 action enum 为后续标题、价格、库存、上架、换源和清理预留值，不表示这些动作已经实现。
+
+### 3.1 `product_batch_tasks`
+
+- `user_id + client_request_id` 唯一；`request_fingerprint` 同时绑定动作和与顺序无关的商品集合。同键同参返回原预览，同键异参拒绝，避免响应丢失后创建第二批任务。
+- `preview_revision` 绑定用户确认时看到的物化预览；只有匹配当前 revision 才能从 `preview` 进入 `queued`。
+- `state_revision` 为任务状态 CAS 版本。确认、停止、重试、领取和汇总都会递增；并发汇总失去版本后必须重读 item，不能把已经完成的任务写回运行中。
+- 状态为 `preview / queued / running / cancelling / cancelled / partial / succeeded / failed`。停止请求写入 `cancel_requested_at`，只阻止尚未开始或等待重试的条目；已经在执行的条目按协作式停止语义收敛。
+- 任务按用户隔离查询；任务汇总从 item 状态派生，不能用整批重试覆盖逐项事实。worker 周期性对账“任务仍活跃但 item 已全部终态”的崩溃窗口，并用 `state_revision` CAS 收敛终态。
+
+### 3.2 `product_batch_items`
+
+- 每个任务与已发布商品组合唯一，最多由 API 创建 100 项；`ordinal` 保留预览顺序。
+- `expected_mutation_revision`、`before_snapshot` 和 `desired_snapshot` 固化预览时事实。执行前必须确认商品 revision、平台商品 ID、店铺和状态未漂移，否则 fail-closed 并要求新建预览。
+- 状态为 `pending / running / retry_wait / succeeded / failed / skipped / cancelled`。worker 以旧状态、attempts 和任务取消状态做 CAS 领取，并记录 `locked_at / locked_by`；超过 5 分钟的 running 项按次数恢复为等待重试或失败。
+- 失败重试只把选中的 `failed` 项重置为 `pending`；`succeeded` 与 `skipped` 不会重新执行。`result` 保存平台确认/恢复原因，错误码与脱敏信息按 item 保留。
+
+### 3.3 `published_products.mutation_revision`
+
+- 每次可能改变平台商品事实的本地成功写入递增 `mutation_revision`；批量执行使用预览值做条件更新，阻止旧预览覆盖后来的人工修正、状态同步或库存任务。
+- 人工修正和平台状态同步在取得共享 Redis 商品锁后必须重读商品，并在最终写入时再次按 `mutation_revision` CAS；等待锁期间形成的旧快照不能复活已下架商品。
+- `(shop_id, platform_product_id)` 在非空平台商品 ID 上保持唯一，既支撑稳定锁域，也在 migration 前显式阻断历史重复绑定。
+
+两张批量表均启用 RLS，并撤销 `anon` / `authenticated` 对表和 sequence 的直接权限。权威定义见 `packages/db/prisma/schema.prisma` 的 `ProductBatchTask`、`ProductBatchItem`、`PublishedProduct.mutationRevision` 和 migration `20260804050000_add_product_batch_operations`。该 migration 目前只存在于仓库，尚未应用到 staging。
+
+## 4. 核心表 Schema（历史 MySQL 设计草案）
 
 本节仅保留早期字段和容量规划背景。当前应用使用 PostgreSQL、Prisma snake_case 映射和正式 migration；字段、enum、索引、外键与默认值必须从权威 schema 读取。
 
-### 3.1 用户与店铺
+### 4.1 用户与店铺
 
 ```sql
 -- 用户表
@@ -202,7 +255,7 @@ CREATE TABLE shops (
 );
 ```
 
-### 3.2 选品与货源
+### 4.2 选品与货源
 
 ```sql
 -- 1688 货源池（TiDB，亿级，分区按 category_l1）
@@ -257,7 +310,7 @@ CREATE TABLE user_favorites (
 );
 ```
 
-### 3.3 铺货与商品
+### 4.3 铺货与商品
 
 ```sql
 -- 铺货任务（一个货源 → 多个目标店铺）
@@ -303,7 +356,7 @@ CREATE TABLE published_products (
 );
 ```
 
-### 3.4 订单与代发
+### 4.4 订单与代发
 
 ```sql
 -- 销售订单
@@ -379,7 +432,7 @@ CREATE TABLE purchase_order_recoveries (
 );
 ```
 
-### 3.5 AI 使用与计费
+### 4.5 AI 使用与计费
 
 ```sql
 -- AI 调用流水（成本核算 + 风控）
@@ -413,9 +466,9 @@ CREATE TABLE subscriptions (
 );
 ```
 
-## 4. 当前审计与告警模型（PostgreSQL / Prisma）
+## 5. 当前审计与告警模型（PostgreSQL / Prisma）
 
-### 4.1 `audit_logs`
+### 5.1 `audit_logs`
 
 | 字段组       | 当前定义                                                                                    |
 | ------------ | ------------------------------------------------------------------------------------------- |
@@ -426,7 +479,7 @@ CREATE TABLE subscriptions (
 
 审计覆盖写操作、失败鉴权和 OAuth 流程。禁止写入请求 body、Authorization、Cookie、明文 token、密钥或原始 IP。租户审计 API 只能读取当前用户的数据；运维汇总只暴露必要计数。`AuditRetentionService` 默认删除 180 天前记录，可通过 `AUDIT_RETENTION_DAYS` 调整。
 
-### 4.2 `operational_alerts`
+### 5.2 `operational_alerts`
 
 | 字段组     | 当前定义                                                                  |
 | ---------- | ------------------------------------------------------------------------- |
@@ -437,7 +490,7 @@ CREATE TABLE subscriptions (
 
 告警记录支持同 key 去重、严重度升级、重通知窗口和条件消失后的自动 resolved。通知 Webhook 使用 timestamp + HMAC-SHA256；数据库记录是状态源，外部通知失败不能导致告警状态丢失。
 
-## 5. 向量库（Milvus）
+## 6. 向量库（Milvus）
 
 | Collection            | 维度          | 用途                 |
 | --------------------- | ------------- | -------------------- |
@@ -460,7 +513,7 @@ CREATE TABLE subscriptions (
 }
 ```
 
-## 6. 数据流（关键事件）
+## 7. 数据流（关键事件）
 
 | 事件                    | 来源         | 消费方                                  |
 | ----------------------- | ------------ | --------------------------------------- |
@@ -472,7 +525,7 @@ CREATE TABLE subscriptions (
 | `purchase.placed`       | order 服务   | 1688 代发                               |
 | `ai.usage.recorded`     | ai-gateway   | 计费 + 限流                             |
 
-## 7. 缓存策略
+## 8. 缓存策略
 
 | Key 模式                       | 用途         | TTL                |
 | ------------------------------ | ------------ | ------------------ |
@@ -482,7 +535,7 @@ CREATE TABLE subscriptions (
 | `ratelimit:user:{id}:{module}` | AI 限流      | 滑动窗口           |
 | `compliance:words`             | 敏感词库     | 24h                |
 
-## 8. 数据合规
+## 9. 数据合规
 
 - **手机号、地址**：当前使用 AES-256-GCM；生产密钥必须由 Secret Manager/KMS 注入和轮换
 - **OAuth Token**：当前加密落库、仅在调用时解密；生产环境须完成密钥轮换演练

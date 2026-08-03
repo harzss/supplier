@@ -46,6 +46,7 @@ model User {
   shops                         Shop[]
   publishDraft                  PublishDraft?
   publishTasks                  PublishTask[]
+  productBatchTasks             ProductBatchTask[]
   favorites                     UserFavorite[]
   aiUsageLogs                   AiUsageLog[]
   subscriptions                 Subscription[]
@@ -441,24 +442,118 @@ model PublishedProduct {
   lastEditAttemptAt          DateTime?              @map("last_edit_attempt_at")
   lastEditedAt               DateTime?              @map("last_edited_at")
   lastEditError              String?                @map("last_edit_error") @db.Text
+  mutationRevision           Int                    @default(1) @map("mutation_revision")
   platformStatusRaw          Int?                   @map("platform_status_raw")
   platformCheckStatusRaw     Int?                   @map("platform_check_status_raw")
   platformStatusSyncedAt     DateTime?              @map("platform_status_synced_at")
   platformStatusError        String?                @map("platform_status_error") @db.Text
   publishedAt                DateTime               @default(now()) @map("published_at")
 
-  task          PublishTask   @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  shop          Shop          @relation(fields: [shopId], references: [id])
-  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id])
+  task          PublishTask        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  shop          Shop               @relation(fields: [shopId], references: [id])
+  sourceProduct SourceProduct      @relation(fields: [sourceProductId], references: [id])
   orders        Order[]
   orderItems    OrderItem[]
+  batchItems    ProductBatchItem[]
 
   @@unique([taskId, shopId], name: "uk_publish_task_shop", map: "published_products_task_id_shop_id_key")
+  @@unique([shopId, platformProductId], name: "uk_shop_platform_product", map: "published_products_shop_platform_product_key")
   @@index([shopId])
   @@index([platformProductId])
   @@index([inventorySyncStatus, inventoryNextRunAt], map: "published_products_inventory_sync_status_inventory_next_run_at_")
   @@index([inventoryLockedAt])
   @@map("published_products")
+}
+
+// ----- 批量商品经营 -----
+
+enum ProductBatchAction {
+  edit_title
+  edit_price
+  sync_inventory
+  online
+  offline
+  change_source
+  cleanup
+}
+
+enum ProductBatchTaskStatus {
+  preview
+  queued
+  running
+  cancelling
+  cancelled
+  partial
+  succeeded
+  failed
+}
+
+enum ProductBatchItemStatus {
+  pending
+  running
+  retry_wait
+  succeeded
+  failed
+  skipped
+  cancelled
+}
+
+// 物化后的批量操作预览；确认后由 item 级队列执行，避免整批重试。
+model ProductBatchTask {
+  id                 BigInt                 @id @default(autoincrement())
+  userId             BigInt                 @map("user_id")
+  clientRequestId    String                 @map("client_request_id") @db.Uuid
+  requestFingerprint String                 @map("request_fingerprint") @db.VarChar(64)
+  action             ProductBatchAction
+  status             ProductBatchTaskStatus @default(preview)
+  stateRevision      Int                    @default(1) @map("state_revision")
+  previewRevision    Int                    @default(1) @map("preview_revision")
+  cancelRequestedAt  DateTime?              @map("cancel_requested_at")
+  confirmedAt        DateTime?              @map("confirmed_at")
+  startedAt          DateTime?              @map("started_at")
+  finishedAt         DateTime?              @map("finished_at")
+  createdAt          DateTime               @default(now()) @map("created_at")
+  updatedAt          DateTime               @updatedAt @map("updated_at")
+
+  user  User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items ProductBatchItem[]
+
+  @@unique([userId, clientRequestId], name: "uk_product_batch_user_client_request", map: "product_batch_tasks_user_client_request_key")
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@map("product_batch_tasks")
+}
+
+model ProductBatchItem {
+  id                       BigInt                 @id @default(autoincrement())
+  taskId                   BigInt                 @map("task_id")
+  publishedProductId       BigInt                 @map("published_product_id")
+  ordinal                  Int
+  status                   ProductBatchItemStatus @default(pending)
+  expectedMutationRevision Int                    @map("expected_mutation_revision")
+  beforeSnapshot           Json                   @map("before_snapshot") @db.JsonB
+  desiredSnapshot          Json                   @map("desired_snapshot") @db.JsonB
+  result                   Json?                  @db.JsonB
+  errorCode                String?                @map("error_code") @db.VarChar(64)
+  errorMessage             String?                @map("error_message") @db.Text
+  attempts                 Int                    @default(0)
+  maxAttempts              Int                    @default(3) @map("max_attempts")
+  nextRunAt                DateTime               @default(now()) @map("next_run_at")
+  lockedAt                 DateTime?              @map("locked_at")
+  lockedBy                 String?                @map("locked_by") @db.VarChar(128)
+  startedAt                DateTime?              @map("started_at")
+  finishedAt               DateTime?              @map("finished_at")
+  createdAt                DateTime               @default(now()) @map("created_at")
+  updatedAt                DateTime               @updatedAt @map("updated_at")
+
+  task             ProductBatchTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  publishedProduct PublishedProduct @relation(fields: [publishedProductId], references: [id])
+
+  @@unique([taskId, publishedProductId], name: "uk_product_batch_task_product", map: "product_batch_items_task_product_key")
+  @@index([taskId, status])
+  @@index([status, nextRunAt])
+  @@index([lockedAt])
+  @@map("product_batch_items")
 }
 
 // ----- 订单 -----

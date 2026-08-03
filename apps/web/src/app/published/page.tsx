@@ -94,12 +94,17 @@ export default function PublishedPage() {
 
   return (
     <main className="app-page">
-      <header className="mb-6">
-        <p className="page-kicker">商品管理</p>
-        <h1 className="page-title">铺货中心</h1>
-        <p className="page-description">
-          跟踪铺货任务、平台上架状态、库存同步和需要人工修正的商品。
-        </p>
+      <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="page-kicker">商品管理</p>
+          <h1 className="page-title">铺货中心</h1>
+          <p className="page-description">
+            跟踪铺货任务、平台上架状态、库存同步和需要人工修正的商品。
+          </p>
+        </div>
+        <Link href="/published/batch" className="batch-primary-button w-fit">
+          进入批量经营
+        </Link>
       </header>
 
       {isDemoAuthMode && simulate.isSuccess && (

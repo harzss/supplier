@@ -4,9 +4,11 @@ import type { Platform } from '@supplier/db';
 import { CurrentUser } from '../entitlement/current-user.decorator';
 import type { CurrentUser as CurrentUserType } from '../entitlement/user-context.service';
 import { ConnectShopDto } from './dto/connect-shop.dto';
+import { OAuthAuthorizeQueryDto } from './dto/oauth-authorize-query.dto';
+import { OAuthResultDto } from './dto/oauth-result.dto';
 import { DouyinReadinessService } from './douyin-readiness.service';
 import { OAuthCallbackDto } from './dto/oauth-callback.dto';
-import { OAuthFlowService } from './oauth-flow.service';
+import { OAuthExchangeFailure, OAuthFlowService } from './oauth-flow.service';
 import { OAuthConfigService, type OAuthPlatform } from './oauth-config.service';
 import { ShopService } from './shop.service';
 import { Public } from '../entitlement/public.decorator';
@@ -60,15 +62,24 @@ export class ShopController {
   /** 发起抖店 OAuth，返回商家授权页地址 */
   @AuditAction('shop.oauth.authorize', 'shop')
   @Get('oauth/douyin/authorize')
-  authorizeDouyin(@CurrentUser() user: CurrentUserType) {
-    return this.oauth.authorize(user.userId, 'douyin');
+  authorizeDouyin(@CurrentUser() user: CurrentUserType, @Query() query: OAuthAuthorizeQueryDto) {
+    return this.oauth.authorize(user.userId, 'douyin', query.returnTo);
   }
 
   /** 发起 1688 买家 OAuth，返回官方授权页地址 */
   @AuditAction('shop.oauth.authorize', 'shop')
   @Get('oauth/alibaba_1688/authorize')
-  authorizeAlibaba1688(@CurrentUser() user: CurrentUserType) {
-    return this.oauth.authorize(user.userId, 'alibaba_1688');
+  authorizeAlibaba1688(
+    @CurrentUser() user: CurrentUserType,
+    @Query() query: OAuthAuthorizeQueryDto,
+  ) {
+    return this.oauth.authorize(user.userId, 'alibaba_1688', query.returnTo);
+  }
+
+  /** 一次性读取当前用户的 OAuth 回调结果。 */
+  @Post('oauth/result')
+  consumeOAuthResult(@CurrentUser() user: CurrentUserType, @Body() dto: OAuthResultDto) {
+    return this.oauth.consumeResult(user.userId, dto.token);
   }
 
   /** 抖店 OAuth 回调：校验 state、交换 token 并加密保存授权店铺 */
@@ -102,32 +113,63 @@ export class ShopController {
         statusCode: 302,
         metadata: { platform: result.platform },
       });
-      return {
-        url: this.oauthConfig.buildResultRedirect({
-          oauth: platform,
+      return this.issueResultRedirect(
+        result.userId,
+        {
+          platform: result.platform,
           result: 'success',
           shopId: result.shop.id,
-          shopName: result.shop.shopName ?? undefined,
-        }),
-      };
+          shopName: result.shop.shopName ?? null,
+        },
+        result.returnTo,
+      );
     } catch (error) {
+      const failure = error instanceof OAuthExchangeFailure ? error : null;
+      const callbackError = failure?.originalError ?? error;
       await this.audit.record({
+        userId: failure?.userId,
         action: 'shop.oauth.callback',
         method: 'GET',
         route,
         resourceType: 'shop',
         outcome: 'failure',
-        statusCode: error instanceof HttpException ? error.getStatus() : 500,
-        metadata: { errorType: error instanceof Error ? error.name : 'unknown' },
+        statusCode: callbackError instanceof HttpException ? callbackError.getStatus() : 500,
+        metadata: {
+          errorType: callbackError instanceof Error ? callbackError.name : 'unknown',
+        },
       });
-      return {
-        url: this.oauthConfig.buildResultRedirect({
-          oauth: platform,
+      if (!failure) return this.genericErrorRedirect(platform);
+      return this.issueResultRedirect(
+        failure.userId,
+        {
+          platform: failure.platform,
           result: 'error',
-          message: publicOAuthError(error),
-        }),
-      };
+          message: publicOAuthError(callbackError),
+        },
+        failure.returnTo,
+      );
     }
+  }
+
+  private async issueResultRedirect(
+    userId: bigint,
+    result: Parameters<OAuthFlowService['issueResult']>[1],
+    returnTo: string,
+  ) {
+    try {
+      const token = await this.oauth.issueResult(userId, result);
+      return {
+        url: this.oauthConfig.buildResultRedirect({ oauthResult: token }, returnTo),
+      };
+    } catch {
+      return this.genericErrorRedirect(result.platform);
+    }
+  }
+
+  private genericErrorRedirect(platform: OAuthPlatform) {
+    return {
+      url: this.oauthConfig.buildResultRedirect({ oauth: platform, result: 'error' }),
+    };
   }
 }
 

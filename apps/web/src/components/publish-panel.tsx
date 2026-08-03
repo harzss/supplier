@@ -20,6 +20,12 @@ import {
   type PublishAttempt,
   type PublishAttemptRecovery,
 } from '@/lib/publish-draft-client';
+import {
+  productPublishReturnTo,
+  readOAuthCallbackResult,
+  settingsHrefWithReturnTo,
+  type OAuthCallbackResult,
+} from '@/lib/oauth-return';
 
 interface Props {
   sourceProductId: string;
@@ -50,6 +56,7 @@ export function PublishPanel({
     version: number;
     promise: Promise<PublishAttemptRecovery<PublishTaskSummary>>;
   } | null>(null);
+  const oauthCallbackRef = useRef<OAuthCallbackResult | null | undefined>(undefined);
   const draftHydrated = useRef(false);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
@@ -68,6 +75,10 @@ export function PublishPanel({
     '' | 'white_studio' | 'warm_lifestyle' | 'cool_minimal'
   >('');
   const [draftFeedback, setDraftFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [oauthFeedback, setOAuthFeedback] = useState<{
     type: 'success' | 'error';
     message: string;
   } | null>(null);
@@ -401,7 +412,11 @@ export function PublishPanel({
   const navigateAfterDraftSave = async (href: string) => {
     try {
       await persistDraft();
-      window.location.assign(href);
+      const destination =
+        href === '/settings#shops'
+          ? settingsHrefWithReturnTo(href, productPublishReturnTo(sourceProductId))
+          : href;
+      window.location.assign(destination);
     } catch {
       // 保留当前页面和输入，让用户先处理草稿冲突或保存失败。
     }
@@ -504,6 +519,65 @@ export function PublishPanel({
     window.addEventListener('hashchange', openFromHash);
     return () => window.removeEventListener('hashchange', openFromHash);
   }, [sourceProductId]);
+
+  useEffect(() => {
+    if (oauthCallbackRef.current === undefined) {
+      oauthCallbackRef.current = readOAuthCallbackResult(window.location.href);
+      if (oauthCallbackRef.current) {
+        window.history.replaceState({}, '', oauthCallbackRef.current.cleanHref);
+      }
+    }
+    const callback = oauthCallbackRef.current;
+    if (!callback) return;
+    setOpen(true);
+    void Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['activation'] }),
+      queryClient.invalidateQueries({ queryKey: ['publishDraft'] }),
+    ]);
+
+    if (callback.kind === 'unverified_error') {
+      const platformLabel = callback.platform === 'douyin' ? '抖店' : '1688 买家账号';
+      setOAuthFeedback({
+        type: 'error',
+        message: `${platformLabel}授权未完成，请返回店铺管理重试。`,
+      });
+      return;
+    }
+
+    let cancelled = false;
+    void queryClient
+      .fetchQuery({
+        queryKey: ['oauthResult', callback.token],
+        queryFn: () => api.consumeOAuthResult(callback.token),
+        staleTime: Number.POSITIVE_INFINITY,
+      })
+      .then((result) => {
+        if (cancelled) return;
+        const platformLabel = result.platform === 'douyin' ? '抖店' : '1688 买家账号';
+        setOAuthFeedback({
+          type: result.result === 'success' ? 'success' : 'error',
+          message:
+            result.result === 'success'
+              ? result.shopName
+                ? `${platformLabel}「${result.shopName}」授权成功，已返回原商品并恢复铺货草稿。`
+                : `${platformLabel}授权成功，已返回原商品并恢复铺货草稿。`
+              : result.message || `${platformLabel}授权未完成，请返回店铺管理重试。`,
+        });
+        if (result.result === 'success') {
+          void queryClient.invalidateQueries({ queryKey: ['shops'] });
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setOAuthFeedback({
+          type: 'error',
+          message: '授权结果暂时无法确认，请返回店铺管理查看状态。',
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [queryClient]);
   const sellerShops =
     shops.data?.filter((shop) => shop.role === 'seller' && shop.status === 'active') ?? [];
   const visibleSellerIds = new Set(sellerShops.map((shop) => shop.id));
@@ -634,6 +708,19 @@ export function PublishPanel({
           收起
         </button>
       </div>
+
+      {oauthFeedback ? (
+        <div
+          role="status"
+          className={`mb-3 rounded-lg border px-3 py-2 text-sm ${
+            oauthFeedback.type === 'success'
+              ? 'border-green-200 bg-green-50 text-green-700'
+              : 'border-red-200 bg-red-50 text-red-700'
+          }`}
+        >
+          {oauthFeedback.message}
+        </div>
+      ) : null}
 
       {attemptRecoveryStatus === 'checking' ? (
         <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">

@@ -11,6 +11,7 @@ const DEFAULT_DEV_CALLBACKS = [
   'http://localhost:3001/api/shops/oauth/alibaba_1688/callback',
 ];
 const DEFAULT_DEV_RESULT_REDIRECT = 'http://localhost:3000/settings';
+const UNSAFE_RETURN_TO_CHARACTERS = /[\\\u0000-\u001f\u007f]/;
 
 @Injectable()
 export class OAuthConfigService {
@@ -59,17 +60,54 @@ export class OAuthConfigService {
     return ttl;
   }
 
-  buildResultRedirect(params: Record<string, string | undefined>): string {
+  normalizeReturnTo(value?: string): string {
+    const fallback = this.getResultRedirectUrl();
+    if (value === undefined) {
+      return `${fallback.pathname}${fallback.search}${fallback.hash}`;
+    }
+    if (
+      !value.startsWith('/') ||
+      value.startsWith('//') ||
+      UNSAFE_RETURN_TO_CHARACTERS.test(value)
+    ) {
+      throw new BadRequestException('OAuth returnTo must be an application-relative URL');
+    }
+
+    let url: URL;
+    try {
+      url = new URL(value, fallback);
+    } catch {
+      throw new BadRequestException('OAuth returnTo must be an application-relative URL');
+    }
+    if (
+      url.origin !== fallback.origin ||
+      !url.pathname.startsWith('/') ||
+      url.pathname.startsWith('//')
+    ) {
+      throw new BadRequestException('OAuth returnTo must be an application-relative URL');
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
+  buildResultRedirect(params: Record<string, string | undefined>, returnTo?: string): string {
+    const fallback = this.getResultRedirectUrl();
+    const url =
+      returnTo === undefined
+        ? new URL(fallback)
+        : new URL(this.normalizeReturnTo(returnTo), fallback.origin);
+    for (const [key, paramValue] of Object.entries(params)) {
+      if (paramValue) url.searchParams.set(key, paramValue);
+    }
+    return url.toString();
+  }
+
+  private getResultRedirectUrl(): URL {
     const configured = this.config.get<string>('OAUTH_RESULT_REDIRECT_URL')?.trim();
     const value = configured || (this.production ? '' : DEFAULT_DEV_RESULT_REDIRECT);
     if (!value) {
       throw new ServiceUnavailableException('OAUTH_RESULT_REDIRECT_URL is not configured');
     }
-    const url = new URL(this.normalizeCallback(value));
-    for (const [key, paramValue] of Object.entries(params)) {
-      if (paramValue) url.searchParams.set(key, paramValue);
-    }
-    return url.toString();
+    return new URL(this.normalizeCallback(value));
   }
 
   assertAllowedCallback(value: string): string {

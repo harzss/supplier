@@ -132,6 +132,14 @@ export interface OAuthAuthorizationResult {
   expiresInSeconds: number;
 }
 
+export interface OAuthResult {
+  platform: 'douyin' | 'alibaba_1688';
+  result: 'success' | 'error';
+  shopId?: string;
+  shopName?: string;
+  message?: string;
+}
+
 export interface DouyinReadiness {
   ready: boolean;
   readyCount: number;
@@ -717,12 +725,19 @@ export const api = {
     return request(`/shops/${encodeURIComponent(shopId)}/disconnect`, { method: 'POST' });
   },
 
-  authorizeDouyin(): Promise<OAuthAuthorizationResult> {
-    return request('/shops/oauth/douyin/authorize');
+  authorizeDouyin(returnTo?: string): Promise<OAuthAuthorizationResult> {
+    return request(oauthAuthorizePath('douyin', returnTo));
   },
 
-  authorizeAlibaba1688(): Promise<OAuthAuthorizationResult> {
-    return request('/shops/oauth/alibaba_1688/authorize');
+  authorizeAlibaba1688(returnTo?: string): Promise<OAuthAuthorizationResult> {
+    return request(oauthAuthorizePath('alibaba_1688', returnTo));
+  },
+
+  consumeOAuthResult(token: string): Promise<OAuthResult> {
+    return request('/shops/oauth/result', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    });
   },
 
   douyinReadiness(): Promise<DouyinReadiness> {
@@ -1069,3 +1084,9 @@ export const api = {
     return request(`/analytics/overview?days=${days}`);
   },
 };
+
+function oauthAuthorizePath(platform: 'douyin' | 'alibaba_1688', returnTo?: string): string {
+  const path = `/shops/oauth/${platform}/authorize`;
+  if (!returnTo) return path;
+  return `${path}?${new URLSearchParams({ returnTo }).toString()}`;
+}

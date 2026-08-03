@@ -98,7 +98,7 @@
 - 正式网关：`https://openapi-fxg.jinritemai.com`
 - 通用 API 使用 HMAC-SHA256 签名，业务 JSON 递归按 key 排序后参与签名，请求超时 10 秒
 - 商品发布需要配置 `DOUYIN_CUSTOMER_MOBILE`，货源 `attributes` 中需要提供 `douyinCategoryId`，或 `platformCategoryIds.douyin`
-- OAuth 完成后由 BFF 通过 `OAUTH_RESULT_REDIRECT_URL` 安全跳回 Web 设置页，页面展示成功/失败结果后清理 URL 参数
+- OAuth 完成后由 BFF 只使用一次性 state 中绑定的站内相对路径跳回原业务页；callback 只在 URL 中携带短期一次性结果 token，登录用户通过 `POST /api/shops/oauth/result` 消费后才能读取成功、店铺或错误信息，跨用户、伪造和重放均被拒绝。`OAUTH_RESULT_REDIRECT_URL` 提供可信 Web origin 和无上下文时的设置页回退，页面消费结果后清理 URL 参数
 - `GET /api/shops/oauth/douyin/readiness` 只读检查应用凭证、OAuth/Redis/加密配置、客服电话、真实授权店铺和可发布测试商品，不返回任何密钥
 - `POST /api/orders/sync/:shopId` 按固定更新时间窗从第 0 页全分页增量同步；成功后才推进持久水位，手机号和地址经 AES-256-GCM 加密后落库
 - 平台订单主状态不能代表全部售后结果：部分退款和已完成订单后续退款时，主订单状态可能保持不变；系统读取子订单 `after_sale_info.after_sale_status/after_sale_type/refund_status`
@@ -200,16 +200,16 @@
 
 当前 staging 固定 BFF 入口为 `https://supplier-staging-gateway.chenjie.workers.dev`。平台控制台、BFF 平台变量和 OAuth 白名单必须使用下列 **完全一致** 的 URL；不允许通配符、HTTP、临时 Tunnel URL、末尾路径省略或另一个域名。
 
-| 用途             | staging 目标值                                                                               | 配置位置                                            | 负责人                         | 当前状态 / 证据                                |
-| ---------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------ | ---------------------------------------------- |
-| 抖店 OAuth 回调  | `https://supplier-staging-gateway.chenjie.workers.dev/api/shops/oauth/douyin/callback`       | 抖店应用控制台 + `DOUYIN_OAUTH_REDIRECT_URI`        | 主体持有人登记；工程负责人回填 | ⛔ 控制台待登记；BFF 值待外部凭证就绪后复核    |
-| 1688 OAuth 回调  | `https://supplier-staging-gateway.chenjie.workers.dev/api/shops/oauth/alibaba_1688/callback` | 1688 应用控制台 + `ALIBABA_1688_OAUTH_REDIRECT_URI` | 主体持有人登记；工程负责人回填 | ⛔ 控制台待登记；BFF 值待外部凭证就绪后复核    |
-| BFF 精确白名单   | 上述两个 URL，以逗号分隔                                                                     | `OAUTH_CALLBACK_ALLOWLIST`                          | 工程负责人                     | ⬜ 部署时用 readiness 和授权跳转验证           |
-| OAuth 完成返回页 | `https://<稳定 Web 域名>/settings`                                                           | `OAUTH_RESULT_REDIRECT_URL`                         | 工程负责人                     | ⛔ 依赖 R0-03 稳定 Web URL；不得填预览随机域名 |
-| Web 调用 BFF     | `https://supplier-staging-gateway.chenjie.workers.dev`                                       | Web 的 `NEXT_PUBLIC_BFF_URL`                        | 工程负责人                     | ⬜ 与最终 Web 部署一起复核                     |
-| BFF 允许 Web     | `https://<稳定 Web 域名>`                                                                    | `CORS_ORIGINS`                                      | 工程负责人                     | ⛔ 依赖 R0-03 稳定 Web URL                     |
+| 用途             | staging 目标值                                                                               | 配置位置                                            | 负责人                         | 当前状态 / 证据                                                                 |
+| ---------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------- |
+| 抖店 OAuth 回调  | `https://supplier-staging-gateway.chenjie.workers.dev/api/shops/oauth/douyin/callback`       | 抖店应用控制台 + `DOUYIN_OAUTH_REDIRECT_URI`        | 主体持有人登记；工程负责人回填 | ⛔ 控制台待登记；BFF 值待外部凭证就绪后复核                                     |
+| 1688 OAuth 回调  | `https://supplier-staging-gateway.chenjie.workers.dev/api/shops/oauth/alibaba_1688/callback` | 1688 应用控制台 + `ALIBABA_1688_OAUTH_REDIRECT_URI` | 主体持有人登记；工程负责人回填 | ⛔ 控制台待登记；BFF 值待外部凭证就绪后复核                                     |
+| BFF 精确白名单   | 上述两个 URL，以逗号分隔                                                                     | `OAUTH_CALLBACK_ALLOWLIST`                          | 工程负责人                     | ⬜ 部署时用 readiness 和授权跳转验证                                            |
+| OAuth 安全回退页 | `https://<稳定 Web 域名>/settings`                                                           | `OAUTH_RESULT_REDIRECT_URL`                         | 工程负责人                     | ⛔ 依赖 R0-03 稳定 Web URL；同时限定上下文回跳的可信 origin，不得填预览随机域名 |
+| Web 调用 BFF     | `https://supplier-staging-gateway.chenjie.workers.dev`                                       | Web 的 `NEXT_PUBLIC_BFF_URL`                        | 工程负责人                     | ⬜ 与最终 Web 部署一起复核                                                      |
+| BFF 允许 Web     | `https://<稳定 Web 域名>`                                                                    | `CORS_ORIGINS`                                      | 工程负责人                     | ⛔ 依赖 R0-03 稳定 Web URL                                                      |
 
-生产式 OAuth 还必须配置可用的 `REDIS_URL`、至少 32 字符随机 `ENCRYPTION_KEY` 和 60–900 秒的 `OAUTH_STATE_TTL_SECONDS`。Redis 保存一次性 state，数据库只保存 AES-256-GCM 加密后的平台 Token；截图、日志、提交、工单和聊天中均不得出现 AppSecret、access token、refresh token、收货地址明文或完整手机号。
+生产式 OAuth 还必须配置可用的 `REDIS_URL`、至少 32 字符随机 `ENCRYPTION_KEY` 和 60–900 秒的 `OAUTH_STATE_TTL_SECONDS`。Redis 保存一次性 state 和短期用户绑定结果 token，数据库只保存 AES-256-GCM 加密后的平台 Token；截图、日志、提交、工单和聊天中均不得出现 AppSecret、access token、refresh token、收货地址明文或完整手机号。
 
 | 平台 / 阶段           | 必填环境变量                                                                                                                                                        | 开关顺序与安全约束                                                                                                                                    |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |

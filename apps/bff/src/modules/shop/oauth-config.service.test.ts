@@ -87,4 +87,40 @@ describe('OAuthConfigService', () => {
       'https://supplier.example.com/settings?oauth=douyin&result=success&shopName=%E6%B5%8B%E8%AF%95%E5%BA%97%E9%93%BA',
     );
   });
+
+  it('normalizes an application-relative return target with query and hash', () => {
+    const service = makeService({
+      OAUTH_RESULT_REDIRECT_URL: 'https://supplier.example.com/settings',
+    });
+
+    expect(service.normalizeReturnTo('/catalog/../products?id=offer%2F1001#publish')).toBe(
+      '/products?id=offer%2F1001#publish',
+    );
+    expect(
+      service.buildResultRedirect(
+        { oauth: 'douyin', result: 'success' },
+        '/products?id=offer%2F1001#publish',
+      ),
+    ).toBe(
+      'https://supplier.example.com/products?id=offer%2F1001&oauth=douyin&result=success#publish',
+    );
+  });
+
+  it.each([
+    '',
+    'https://supplier.example.com/products',
+    '//evil.example.com/products',
+    '/catalog/..//evil.example.com/products',
+    'products?id=1001',
+    '/products\\evil',
+    '/products\n#publish',
+  ])('rejects unsafe OAuth return target %s', (returnTo) => {
+    const service = makeService({
+      OAUTH_RESULT_REDIRECT_URL: 'https://supplier.example.com/settings',
+    });
+
+    expect(() => service.normalizeReturnTo(returnTo)).toThrow(
+      'OAuth returnTo must be an application-relative URL',
+    );
+  });
 });

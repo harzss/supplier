@@ -1,9 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from '@/lib/api';
 import { isDemoAuthMode } from '@/lib/environment';
+import {
+  normalizeAppReturnTo,
+  readOAuthCallbackResult,
+  type OAuthCallbackResult,
+} from '@/lib/oauth-return';
 
 const CONNECTABLE = [
   { value: 'douyin', label: '抖音小店' },
@@ -20,6 +25,7 @@ interface OAuthFeedback {
 /** 店铺管理：销售店铺与 1688 买家 OAuth + 演示店铺。 */
 export function ShopsSection() {
   const qc = useQueryClient();
+  const oauthCallbackRef = useRef<OAuthCallbackResult | null | undefined>(undefined);
   const [feedback, setFeedback] = useState<OAuthFeedback | null>(null);
   const shops = useQuery({ queryKey: ['shops'], queryFn: () => api.shops() });
   const readiness = useQuery({
@@ -39,8 +45,14 @@ export function ShopsSection() {
     },
   });
   const authorize = useMutation({
-    mutationFn: (platform: 'douyin' | 'alibaba_1688') =>
-      platform === 'douyin' ? api.authorizeDouyin() : api.authorizeAlibaba1688(),
+    mutationFn: (platform: 'douyin' | 'alibaba_1688') => {
+      const returnTo = normalizeAppReturnTo(
+        new URL(window.location.href).searchParams.get('returnTo'),
+      );
+      return platform === 'douyin'
+        ? api.authorizeDouyin(returnTo)
+        : api.authorizeAlibaba1688(returnTo);
+    },
     onSuccess: ({ authorizationUrl }) => window.location.assign(authorizationUrl),
   });
   const disconnect = useMutation({
@@ -69,36 +81,62 @@ export function ShopsSection() {
   });
 
   useEffect(() => {
-    const url = new URL(window.location.href);
-    const oauthPlatform = url.searchParams.get('oauth');
-    if (oauthPlatform !== 'douyin' && oauthPlatform !== 'alibaba_1688') return;
-    const platformLabel = oauthPlatform === 'douyin' ? '抖店' : '1688 买家账号';
+    if (oauthCallbackRef.current === undefined) {
+      oauthCallbackRef.current = readOAuthCallbackResult(window.location.href);
+      if (oauthCallbackRef.current) {
+        window.history.replaceState({}, '', oauthCallbackRef.current.cleanHref);
+      }
+    }
+    const callback = oauthCallbackRef.current;
+    if (!callback) return;
 
-    const result = url.searchParams.get('result');
-    if (result === 'success') {
-      const shopName = url.searchParams.get('shopName');
-      setFeedback({
-        type: 'success',
-        message: shopName
-          ? `${platformLabel}「${shopName}」授权成功。`
-          : `${platformLabel}授权成功。`,
-      });
-      void qc.invalidateQueries({ queryKey: ['shops'] });
-      void qc.invalidateQueries({ queryKey: ['entitlements'] });
-      void qc.invalidateQueries({ queryKey: ['douyinReadiness'] });
-      void qc.invalidateQueries({ queryKey: ['alibaba1688Readiness'] });
-      void qc.invalidateQueries({ queryKey: ['activation'] });
-    } else {
+    if (callback.kind === 'unverified_error') {
+      const platformLabel = callback.platform === 'douyin' ? '抖店' : '1688 买家账号';
       setFeedback({
         type: 'error',
-        message: url.searchParams.get('message') || `${platformLabel}授权失败，请重试。`,
+        message: `${platformLabel}授权未完成，请重试。`,
       });
+      return;
     }
 
-    ['oauth', 'result', 'shopId', 'shopName', 'message'].forEach((key) =>
-      url.searchParams.delete(key),
-    );
-    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+    let cancelled = false;
+    void qc
+      .fetchQuery({
+        queryKey: ['oauthResult', callback.token],
+        queryFn: () => api.consumeOAuthResult(callback.token),
+        staleTime: Number.POSITIVE_INFINITY,
+      })
+      .then((result) => {
+        if (cancelled) return;
+        const platformLabel = result.platform === 'douyin' ? '抖店' : '1688 买家账号';
+        setFeedback({
+          type: result.result === 'success' ? 'success' : 'error',
+          message:
+            result.result === 'success'
+              ? result.shopName
+                ? `${platformLabel}「${result.shopName}」授权成功。`
+                : `${platformLabel}授权成功。`
+              : result.message || `${platformLabel}授权未完成，请重试。`,
+        });
+        if (result.result !== 'success') return;
+        void Promise.all([
+          qc.invalidateQueries({ queryKey: ['shops'] }),
+          qc.invalidateQueries({ queryKey: ['entitlements'] }),
+          qc.invalidateQueries({ queryKey: ['douyinReadiness'] }),
+          qc.invalidateQueries({ queryKey: ['alibaba1688Readiness'] }),
+          qc.invalidateQueries({ queryKey: ['activation'] }),
+        ]);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setFeedback({
+          type: 'error',
+          message: '授权结果暂时无法确认，请重新读取店铺状态。',
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [qc]);
 
   return (

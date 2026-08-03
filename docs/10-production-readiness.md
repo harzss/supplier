@@ -13,9 +13,9 @@
 
 当前 staging 已完成数据库备份恢复、RLS、Storage、关闭公开注册、匿名访问拒绝、Cloudflare Worker、Redis AOF、BFF readiness、告警 firing/resolved 基础 smoke，以及 Redis / 数据库队列非空重启持久性实测；Web 已部署为 59 个纯静态 Cloudflare Assets，固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 验收均通过，且没有可执行 Worker CPU 路径。新旧 Supabase Key 兼容和安全轮换/Auth 验收器已有代码证据，但尚未在 Dashboard 创建新 Key、重部署 Web/BFF、停用 legacy Key 或完成真实邀请账号生命周期；已授权安装的长期进程守护也仍未验收，因此 R0-03 保持进行中。当前 staging 证据和临时 Quick Tunnel 都不能当作生产部署证据。
 
-R2-01 当前已有跨页首次铺货进度、利润试算、统一风险预检、服务端草稿和用户内请求幂等键。草稿恢复后强制重新试算/预检，多标签旧 generation 不能覆盖新草稿；重复点击和响应丢失恢复原任务。该能力在两条新 migration 应用并重部署前不能进入 staging，且尚缺 OAuth 安全回跳、真实店 E2E 和 5 人无指导可用性验收，因此仍只属于应用侧进行中。
+R2-01 当前已有跨页首次铺货进度、利润试算、统一风险预检、服务端草稿、用户内请求幂等键和上下文绑定的 OAuth 安全回跳。回跳目标只接受站内相对地址并绑定进一次性 state；callback 只在 URL 携带短期一次性、用户绑定的结果 token，登录用户消费后才能读取成功、店铺或错误信息，跨用户、伪造和重放均拒绝。草稿恢复后强制重新试算/预检，多标签旧 generation 不能覆盖新草稿，重复点击和响应丢失恢复原任务。该能力在两条新 migration 应用并重部署前不能进入 staging，且尚缺真实店 E2E 和 5 人无指导可用性验收，因此仍只属于应用侧进行中。
 
-候选版本已通过全仓 607 项测试（其中 BFF 413、Web 18）、51 项运维脚本、隔离 Chromium 1/1，以及 lint 2/2、typecheck 14/14、production build 9/9、Prisma、Prettier 和差异检查。BFF、migration、Web 三个非 root Linux 镜像仍属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用第 34、35 个 migration。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
+候选版本已通过全仓 650 项测试（其中 BFF 445、Web 29）、51 项运维脚本、隔离 Chromium 1/1，以及 lint 2/2、typecheck 14/14、production build 9/9、Prisma、Prettier 和差异检查。BFF、migration、Web 三个非 root Linux 镜像仍属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用第 34、35 个 migration。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
 
 ### M13～M67 历史账本（按记录当时理解）
 

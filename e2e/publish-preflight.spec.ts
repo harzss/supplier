@@ -203,6 +203,70 @@ test('keeps publish confirmation behind the latest pricing preview and preflight
   );
   await expect(page.getByRole('button', { name: '确认发布到 1 个店铺' })).toHaveCount(0);
 
+  const expectedReturnTo = '/products?id=mock-1001#publish';
+  const oauthResultToken = 'r'.repeat(43);
+  let requestedReturnTo: string | null = null;
+  const consumedOAuthResultTokens: string[] = [];
+  await page.route(`${bffOrigin}/api/shops/oauth/result`, async (route) => {
+    const body = route.request().postDataJSON() as { token?: string };
+    if (body.token) consumedOAuthResultTokens.push(body.token);
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': 'http://127.0.0.1:3200',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        platform: 'douyin',
+        result: 'success',
+        shopId: 'oauth-9',
+        shopName: 'E2E OAuth 店',
+      }),
+    });
+  });
+  await page.route(`${bffOrigin}/api/shops/oauth/douyin/authorize**`, async (route) => {
+    const authorizeUrl = new URL(route.request().url());
+    requestedReturnTo = authorizeUrl.searchParams.get('returnTo');
+    const callbackUrl = new URL(requestedReturnTo ?? '/settings', 'http://127.0.0.1:3200');
+    callbackUrl.searchParams.set('oauthResult', oauthResultToken);
+    callbackUrl.searchParams.set('shopName', '伪造店名');
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': 'http://127.0.0.1:3200',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        platform: 'douyin',
+        authorizationUrl: callbackUrl.toString(),
+        expiresInSeconds: 300,
+      }),
+    });
+  });
+
+  await Promise.all([
+    page.waitForURL((url) => url.pathname === '/settings' && url.hash === '#shops'),
+    preflightResult.getByRole('link', { name: '去处理 →' }).click(),
+  ]);
+  expect(new URL(page.url()).searchParams.get('returnTo')).toBe(expectedReturnTo);
+
+  await page.getByRole('button', { name: '前往官方授权' }).first().click();
+  await page.waitForURL(
+    (url) =>
+      url.pathname === '/products' &&
+      url.searchParams.get('id') === 'mock-1001' &&
+      !url.searchParams.has('oauth') &&
+      url.hash === '#publish',
+  );
+  expect(requestedReturnTo).toBe(expectedReturnTo);
+  await expect(
+    page.getByText('抖店「E2E OAuth 店」授权成功，已返回原商品并恢复铺货草稿。'),
+  ).toBeVisible();
+  expect(consumedOAuthResultTokens).toEqual([oauthResultToken]);
+  await expect(
+    page.getByText('已恢复服务端草稿。为防止价格或货源变化，请重新试算并检查发布条件。'),
+  ).toBeVisible();
+
   const tasksAfterBlockedResponse = await request.get(
     `${bffOrigin}/api/publish-tasks?page=1&pageSize=1`,
     { headers: demoHeaders },

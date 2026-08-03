@@ -3,7 +3,7 @@ name: Release gates
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/internal-test-deploy]
   workflow_dispatch:
 
 permissions:

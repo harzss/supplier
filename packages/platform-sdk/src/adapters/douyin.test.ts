@@ -820,9 +820,13 @@ describe('DouyinAdapter', () => {
   it('maps product.detail audit status before the shop online status', async () => {
     const fetcher = vi.fn(
       async () =>
-        new Response(JSON.stringify({ code: 10000, data: { status: 0, check_status: 4 } }), {
-          status: 200,
-        }),
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: { product_id: '998877', status: 0, check_status: 4 },
+          }),
+          { status: 200 },
+        ),
     );
     const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
 
@@ -836,6 +840,107 @@ describe('DouyinAdapter', () => {
     expect(new URL(String(input)).searchParams.get('method')).toBe('product.detail');
     expect(JSON.parse(String(init?.body))).toEqual({ product_id: '998877' });
   });
+
+  it('rejects a product-state readback for a different product', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      vi.fn().mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: 10000,
+              data: { product_id: '998878', status: 0, check_status: 3 },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+
+    await expect(adapter.getProductState('access-token', '998877')).rejects.toThrow(
+      'mismatched product ID',
+    );
+  });
+
+  it('rejects every strong product readback when product.detail omits the product ID', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      vi.fn().mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: 10000,
+              data: {
+                name: '修正后的纯棉短袖商品',
+                status: 0,
+                check_status: 3,
+                spec_prices: [{ outer_sku_id: 'sku-a', price: 2990, stock_num: 12 }],
+              },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+
+    await expect(adapter.getProductState('access-token', '998877')).rejects.toThrow(
+      'mismatched product ID',
+    );
+    await expect(adapter.getProductInventory('access-token', '998877')).rejects.toThrow(
+      'mismatched product ID',
+    );
+    await expect(adapter.getProductPrices('access-token', '998877')).rejects.toThrow(
+      'mismatched product ID',
+    );
+    await expect(adapter.getProductTitle('access-token', '998877')).rejects.toThrow(
+      'mismatched product ID',
+    );
+  });
+
+  it.each([null, 0, 6, 99])(
+    'maps unrecognized audit status %s to unknown even when status says online',
+    async (checkStatus) => {
+      const adapter = new DouyinAdapter(
+        CONFIG,
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              code: 10000,
+              data: { product_id: '998877', status: 0, check_status: checkStatus },
+            }),
+            { status: 200 },
+          ),
+        ),
+      );
+
+      await expect(adapter.getProductState('access-token', '998877')).resolves.toMatchObject({
+        state: 'unknown',
+        status: 0,
+      });
+    },
+  );
+
+  it.each([null, '', false])(
+    'does not coerce malformed product status %j to online',
+    async (status) => {
+      const adapter = new DouyinAdapter(
+        CONFIG,
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              code: 10000,
+              data: { product_id: '998877', status, check_status: 3 },
+            }),
+            { status: 200 },
+          ),
+        ),
+      );
+
+      await expect(adapter.getProductState('access-token', '998877')).resolves.toEqual({
+        state: 'unknown',
+        status: null,
+        checkStatus: 3,
+      });
+    },
+  );
 
   it('syncs absolute SKU inventory through the official batch endpoint', async () => {
     const fetcher = vi.fn(
@@ -1033,6 +1138,53 @@ describe('DouyinAdapter', () => {
     const [input, init] = fetcher.mock.calls[0]!;
     expect(new URL(String(input)).pathname).toBe('/product/setOffline');
     expect(JSON.parse(String(init?.body))).toEqual({ product_id: '998877' });
+  });
+
+  it('onlines a product through the dedicated product endpoint', async () => {
+    const fetcher = vi.fn(
+      async () => new Response(JSON.stringify({ code: 10000, data: {} }), { status: 200 }),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await expect(adapter.onlineProduct('access-token', '998877')).resolves.toBeUndefined();
+    const [input, init] = fetcher.mock.calls[0]!;
+    const url = new URL(String(input));
+    expect(url.pathname).toBe('/product/setOnline');
+    expect(url.searchParams.get('method')).toBe('product.setOnline');
+    expect(JSON.parse(String(init?.body))).toEqual({ product_id: '998877' });
+  });
+
+  it('classifies an ambiguous product.setOnline response as result unknown', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: {} }), { status: 200 })),
+    );
+
+    await expect(adapter.onlineProduct('access-token', '998877')).rejects.toBeInstanceOf(
+      PlatformMutationResultUnknownError,
+    );
+  });
+
+  it.each([
+    ['transport failure', vi.fn().mockRejectedValue(new Error('socket closed'))],
+    ['HTTP 500', vi.fn().mockResolvedValue(new Response('server error', { status: 500 }))],
+  ])('classifies product.setOnline %s as result unknown', async (_label, fetcher) => {
+    const adapter = new DouyinAdapter(CONFIG, fetcher);
+
+    await expect(adapter.onlineProduct('access-token', '998877')).rejects.toBeInstanceOf(
+      PlatformMutationResultUnknownError,
+    );
+  });
+
+  it('keeps a definitive product.setOnline HTTP 400 response out of result-unknown recovery', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      vi.fn().mockResolvedValue(new Response('bad request', { status: 400 })),
+    );
+
+    const result = adapter.onlineProduct('access-token', '998877');
+    await expect(result).rejects.toThrow('HTTP 400');
+    await expect(result).rejects.not.toBeInstanceOf(PlatformMutationResultUnknownError);
   });
 
   it('recursively loads the enabled official shop category tree', async () => {

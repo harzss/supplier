@@ -156,6 +156,10 @@ export class MockPlatformAdapter extends BasePlatformAdapter {
     if (inventory.size) MOCK_PRODUCT_INVENTORY.set(key, inventory);
   }
 
+  async onlineProduct(_token: string, productId: string): Promise<void> {
+    MOCK_PRODUCT_STATES.set(mockProductKey(this.platform, productId), onlineMockProductState());
+  }
+
   async offlineProduct(_token: string, productId: string): Promise<void> {
     MOCK_PRODUCT_STATES.set(mockProductKey(this.platform, productId), {
       state: 'offline',

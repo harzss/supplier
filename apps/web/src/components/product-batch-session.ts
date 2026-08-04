@@ -15,10 +15,18 @@ const INVENTORY_CANDIDATE_FIELDS = [
   'inventorySyncReason',
 ] as const;
 const TITLE_CANDIDATE_FIELDS = ['titleEditable', 'titleEditReason'] as const;
+const ONLINE_CANDIDATE_FIELDS = [
+  'onlineEligible',
+  'onlineReason',
+  'onlineVerificationTaskId',
+  'onlineVerificationItemId',
+] as const;
 
 type LegacyProductBatchCandidate = Omit<
   ProductBatchCandidate,
-  (typeof INVENTORY_CANDIDATE_FIELDS)[number] | (typeof TITLE_CANDIDATE_FIELDS)[number]
+  | (typeof INVENTORY_CANDIDATE_FIELDS)[number]
+  | (typeof TITLE_CANDIDATE_FIELDS)[number]
+  | (typeof ONLINE_CANDIDATE_FIELDS)[number]
 >;
 
 export interface ProductBatchSessionScope {
@@ -240,18 +248,24 @@ function parseProductBatchCandidate(
   action: ProductBatchAction,
 ): ProductBatchCandidate | null {
   if (!isLegacyProductBatchCandidate(value)) return null;
-  if (isProductBatchCandidate(value)) return value;
+  if (isProductBatchCandidate(value)) {
+    return action !== 'online' || value.onlineEligible === true ? value : null;
+  }
   const hasInventoryFields = INVENTORY_CANDIDATE_FIELDS.some((field) =>
     Object.hasOwn(value, field),
   );
   const hasTitleFields = TITLE_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
+  const hasOnlineFields = ONLINE_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
   const inventoryFieldsValid = hasInventoryCandidateFields(value);
   const titleFieldsValid = hasTitleCandidateFields(value);
+  const onlineFieldsValid = hasValidOnlineCandidateState(value);
   if (
     (hasInventoryFields && !inventoryFieldsValid) ||
     (hasTitleFields && !titleFieldsValid) ||
+    (hasOnlineFields && !onlineFieldsValid) ||
     (action === 'sync_inventory' && !inventoryFieldsValid) ||
-    (action === 'edit_title' && !titleFieldsValid)
+    (action === 'edit_title' && !titleFieldsValid) ||
+    (action === 'online' && (!onlineFieldsValid || value.onlineEligible !== true))
   ) {
     return null;
   }
@@ -273,6 +287,16 @@ function parseProductBatchCandidate(
     titleEditReason: titleFieldsValid
       ? (value.titleEditReason as string | null)
       : '旧版会话缺少标题编辑状态，请刷新商品后再修改标题',
+    onlineEligible: onlineFieldsValid ? (value.onlineEligible as boolean) : false,
+    onlineReason: onlineFieldsValid
+      ? (value.onlineReason as string | null)
+      : '旧版会话缺少安全上架状态，请刷新商品后再上架',
+    onlineVerificationTaskId: onlineFieldsValid
+      ? (value.onlineVerificationTaskId as string | null)
+      : null,
+    onlineVerificationItemId: onlineFieldsValid
+      ? (value.onlineVerificationItemId as string | null)
+      : null,
   };
 }
 
@@ -307,7 +331,11 @@ function isLegacyProductBatchCandidate(
 function isProductBatchCandidate(
   value: LegacyProductBatchCandidate & Record<string, unknown>,
 ): value is ProductBatchCandidate & Record<string, unknown> {
-  return hasInventoryCandidateFields(value) && hasTitleCandidateFields(value);
+  return (
+    hasInventoryCandidateFields(value) &&
+    hasTitleCandidateFields(value) &&
+    hasValidOnlineCandidateState(value)
+  );
 }
 
 function hasInventoryCandidateFields(value: Record<string, unknown>): boolean {
@@ -330,6 +358,21 @@ function hasTitleCandidateFields(value: Record<string, unknown>): boolean {
   );
 }
 
+export function hasValidOnlineCandidateState(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const eligible = value.onlineEligible;
+  const reason = value.onlineReason;
+  const taskId = value.onlineVerificationTaskId;
+  const itemId = value.onlineVerificationItemId;
+  const verificationIdsValid =
+    (taskId === null && itemId === null) || (isPositiveId(taskId) && isPositiveId(itemId));
+  if (typeof eligible !== 'boolean' || !verificationIdsValid) return false;
+  if (eligible) {
+    return value.status === 'offline' && reason === null && taskId === null && itemId === null;
+  }
+  return typeof reason === 'string' && reason.trim().length > 0;
+}
+
 function isPriceRange(value: unknown): value is [number, number] | null {
   return (
     value === null ||
@@ -342,6 +385,7 @@ function isPriceRange(value: unknown): value is [number, number] | null {
 
 function isProductBatchAction(value: unknown): value is ProductBatchAction {
   return (
+    value === 'online' ||
     value === 'offline' ||
     value === 'edit_title' ||
     value === 'edit_price' ||

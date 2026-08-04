@@ -42,6 +42,7 @@ export interface PlatformAdapter {
   getProductPrices?(token: string, productId: string): Promise<PlatformProductPriceState>;
   getProductInventory?(token: string, productId: string): Promise<PlatformProductInventoryState>;
   getProductState?(token: string, productId: string): Promise<PlatformProductState>;
+  onlineProduct?(token: string, productId: string): Promise<void>;
   syncInventory(token: string, dto: SyncInventoryDto): Promise<void>;
   offlineProduct(token: string, productId: string): Promise<void>;
 

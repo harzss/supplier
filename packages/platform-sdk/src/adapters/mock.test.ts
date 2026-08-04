@@ -126,8 +126,14 @@ describe('MockPlatformAdapter', () => {
       status: 1,
       checkStatus: 3,
     });
+    await adapter.onlineProduct('tok', published.platformProductId);
+    await expect(adapter.getProductState('tok', published.platformProductId)).resolves.toEqual({
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+    });
     await expect(adapter.getProductInventory('tok', published.platformProductId)).resolves.toEqual(
-      expect.objectContaining({ state: 'offline', status: 1 }),
+      expect.objectContaining({ state: 'online', status: 0 }),
     );
   });
 

@@ -1500,7 +1500,7 @@ button:not(:disabled),
 
 .batch-action-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 0.55rem;
   margin-top: 1rem;
 }
@@ -2738,6 +2738,11 @@ button:not(:disabled),
   color: var(--muted-light);
   font-family: var(--font-sans);
   font-size: 0.56rem;
+}
+
+.batch-status-pill + .batch-inventory-stack,
+.batch-cell-secondary + .batch-inventory-stack {
+  margin-top: 0.35rem;
 }
 
 .batch-price-delta {

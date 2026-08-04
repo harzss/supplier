@@ -1635,17 +1635,25 @@ export class PublishService {
     });
     if (!record) throw new NotFoundException('已发布商品不存在或目标店铺不可用');
     if (!record.platformProductId) throw new BadRequestException('平台商品 ID 不存在');
-    const unresolvedTitleMutation = await this.prisma.productBatchItem.findFirst({
+    const unresolvedPlatformMutation = await this.prisma.productBatchItem.findFirst({
       where: {
         publishedProductId: record.id,
         status: { in: ['running', 'retry_wait', 'failed'] },
-        errorCode: { in: ['TITLE_WRITE_STARTED', 'TITLE_RESULT_UNKNOWN'] },
-        task: { userId: user.userId, action: 'edit_title' },
+        OR: [
+          {
+            errorCode: { in: ['TITLE_WRITE_STARTED', 'TITLE_RESULT_UNKNOWN'] },
+            task: { userId: user.userId, action: 'edit_title' },
+          },
+          {
+            errorCode: { in: ['ONLINE_WRITE_STARTED', 'ONLINE_RESULT_UNKNOWN'] },
+            task: { userId: user.userId, action: 'online' },
+          },
+        ],
       },
       select: { id: true },
     });
-    if (unresolvedTitleMutation) {
-      throw new ConflictException('商品存在结果待核验的标题更新，请先在原批量任务核验平台标题');
+    if (unresolvedPlatformMutation) {
+      throw new ConflictException('商品存在结果待核验的平台写入，请先在原批量任务完成核验');
     }
     assertSourceAvailable(record.sourceProduct);
 
@@ -1736,17 +1744,25 @@ export class PublishService {
     const mainImage = record.mainImage ?? record.sourceProduct.mainImage;
     const platformLock = await this.platformProductLocks.acquire(record.id);
     try {
-      const unresolvedTitleMutationAfterLock = await this.prisma.productBatchItem.findFirst({
+      const unresolvedPlatformMutationAfterLock = await this.prisma.productBatchItem.findFirst({
         where: {
           publishedProductId: record.id,
           status: { in: ['running', 'retry_wait', 'failed'] },
-          errorCode: { in: ['TITLE_WRITE_STARTED', 'TITLE_RESULT_UNKNOWN'] },
-          task: { userId: user.userId, action: 'edit_title' },
+          OR: [
+            {
+              errorCode: { in: ['TITLE_WRITE_STARTED', 'TITLE_RESULT_UNKNOWN'] },
+              task: { userId: user.userId, action: 'edit_title' },
+            },
+            {
+              errorCode: { in: ['ONLINE_WRITE_STARTED', 'ONLINE_RESULT_UNKNOWN'] },
+              task: { userId: user.userId, action: 'online' },
+            },
+          ],
         },
         select: { id: true },
       });
-      if (unresolvedTitleMutationAfterLock) {
-        throw new ConflictException('商品存在结果待核验的标题更新，请先在原批量任务核验平台标题');
+      if (unresolvedPlatformMutationAfterLock) {
+        throw new ConflictException('商品存在结果待核验的平台写入，请先在原批量任务完成核验');
       }
       const currentProduct = await this.prisma.publishedProduct.findFirst({
         where: {
@@ -2130,6 +2146,18 @@ export class PublishService {
     });
     if (!record) throw new NotFoundException('已发布商品不存在或目标店铺不可用');
     if (!record.platformProductId) throw new BadRequestException('平台商品 ID 不存在');
+    const unresolvedOnlineMutation = await this.prisma.productBatchItem.findFirst({
+      where: {
+        publishedProductId: record.id,
+        status: { in: ['running', 'retry_wait', 'failed'] },
+        errorCode: { in: ['ONLINE_WRITE_STARTED', 'ONLINE_RESULT_UNKNOWN'] },
+        task: { userId: user.userId, action: 'online' },
+      },
+      select: { id: true },
+    });
+    if (unresolvedOnlineMutation) {
+      throw new ConflictException('商品存在结果待核验的上架操作，请先在原批量任务完成核验');
+    }
     const platformLock = await this.platformProductLocks.acquire(record.id);
     try {
       const current = await this.prisma.publishedProduct.findFirst({
@@ -2146,6 +2174,18 @@ export class PublishService {
       });
       if (!current?.platformProductId) {
         throw new ConflictException('商品已在状态同步前发生变化，请刷新后重试');
+      }
+      const unresolvedOnlineMutationAfterLock = await this.prisma.productBatchItem.findFirst({
+        where: {
+          publishedProductId: current.id,
+          status: { in: ['running', 'retry_wait', 'failed'] },
+          errorCode: { in: ['ONLINE_WRITE_STARTED', 'ONLINE_RESULT_UNKNOWN'] },
+          task: { userId: user.userId, action: 'online' },
+        },
+        select: { id: true },
+      });
+      if (unresolvedOnlineMutationAfterLock) {
+        throw new ConflictException('商品存在结果待核验的上架操作，请先在原批量任务完成核验');
       }
       const adapter = this.adapters.create(current.shop);
       if (!adapter.getProductState) {
@@ -2480,10 +2520,10 @@ function mapPlatformProductState(
   currentStatus: 'online' | 'offline' | 'draft' | 'rejected',
 ): 'online' | 'offline' | 'draft' | 'rejected' {
   if (state.state === 'online') return 'online';
-  if (state.state === 'rejected' || state.state === 'blocked') return 'rejected';
-  if (state.state === 'offline' || state.state === 'deleted') {
-    return 'offline';
+  if (state.state === 'rejected' || state.state === 'blocked' || state.state === 'deleted') {
+    return 'rejected';
   }
+  if (state.state === 'offline') return 'offline';
   if (
     state.state === 'draft' ||
     state.state === 'reviewing' ||

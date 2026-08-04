@@ -475,6 +475,10 @@ export interface ProductBatchCandidate {
   titleEditReason: string | null;
   titleVerificationTaskId: string | null;
   titleVerificationItemId: string | null;
+  onlineEligible: boolean;
+  onlineReason: string | null;
+  onlineVerificationTaskId: string | null;
+  onlineVerificationItemId: string | null;
   priceEditable: boolean;
   priceEditReason: string | null;
   sourceProductId: string;
@@ -492,7 +496,12 @@ export interface ProductBatchCandidate {
   publishedAt: string;
 }
 
-export type ProductBatchAction = 'offline' | 'edit_title' | 'edit_price' | 'sync_inventory';
+export type ProductBatchAction =
+  | 'online'
+  | 'offline'
+  | 'edit_title'
+  | 'edit_price'
+  | 'sync_inventory';
 
 export type ProductBatchPriceRule =
   | {
@@ -506,6 +515,11 @@ export type ProductBatchPriceRule =
     };
 
 export type ProductBatchPreviewRequest =
+  | {
+      clientRequestId: string;
+      action: 'online';
+      publishedProductIds: string[];
+    }
   | {
       clientRequestId: string;
       action: 'offline';
@@ -572,6 +586,7 @@ export interface ProductBatchItem {
   actualTitle: string | null;
   beforeStatus: string;
   desiredStatus: string;
+  actualStatus: string | null;
   beforePrice: number | null;
   desiredPrice: number | null;
   beforePriceRange: [number, number] | null;
@@ -1185,6 +1200,13 @@ export const api = {
   verifyProductBatchTitle(taskId: string, itemId: string): Promise<ProductBatchTask> {
     return request(
       `/product-batches/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/verify-title`,
+      { method: 'POST' },
+    );
+  },
+
+  verifyProductBatchOnline(taskId: string, itemId: string): Promise<ProductBatchTask> {
+    return request(
+      `/product-batches/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/verify-online`,
       { method: 'POST' },
     );
   },

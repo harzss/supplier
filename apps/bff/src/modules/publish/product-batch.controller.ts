@@ -75,4 +75,14 @@ export class ProductBatchController {
   ) {
     return this.batches.verifyTitleResult(user, id, itemId);
   }
+
+  @Post(':id/items/:itemId/verify-online')
+  @AuditAction('product_batch.verify_online', 'product_batch_item')
+  verifyOnline(
+    @CurrentUser() user: CurrentUserType,
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+  ) {
+    return this.batches.verifyOnlineResult(user, id, itemId);
+  }
 }

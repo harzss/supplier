@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { ProductBatchCandidate } from '../lib/api';
 import {
   candidateUnavailableReason,
   isCandidateSelectable,
@@ -158,6 +159,28 @@ describe('product batch price inputs', () => {
     ).toBe(true);
   });
 
+  it('keeps online fingerprints stable and accepts only the matching request intent', () => {
+    const left = productBatchPreviewFingerprint({
+      action: 'online',
+      publishedProductIds: ['2', '1'],
+    });
+    const request = {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'online' as const,
+      publishedProductIds: ['1', '2'],
+    };
+
+    expect(left).toBe(
+      productBatchPreviewFingerprint({ action: 'online', publishedProductIds: ['1', '2'] }),
+    );
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        request,
+      ),
+    ).toBe(true);
+  });
+
   it('keeps title-edit fingerprints stable across selection order and rejects stale intent', () => {
     const left = productBatchPreviewFingerprint({
       action: 'edit_title',
@@ -238,6 +261,60 @@ describe('product batch price inputs', () => {
     expect(isCandidateSelectable(eligible, 'edit_title')).toBe(true);
     expect(isCandidateSelectable(blocked, 'edit_title')).toBe(false);
     expect(candidateUnavailableReason(blocked, 'edit_title')).toBe(blocked.titleEditReason);
+  });
+
+  it('selects only server-approved online candidates and surfaces verification fences', () => {
+    const eligible = {
+      ...candidate('11', '可上架商品'),
+      status: 'offline',
+      onlineEligible: true,
+      onlineReason: null,
+    };
+    const blocked = {
+      ...candidate('12', '待核验商品'),
+      status: 'offline',
+      onlineEligible: false,
+      onlineReason: '上一次上架结果未知，请先核验平台状态与库存',
+      onlineVerificationTaskId: '41',
+      onlineVerificationItemId: '52',
+    };
+    const malformedType = {
+      ...eligible,
+      onlineEligible: 'true',
+    } as unknown as ProductBatchCandidate;
+    const conflictingReason = {
+      ...eligible,
+      onlineReason: '后端同时返回允许与阻止上架',
+    } as ProductBatchCandidate;
+    const staleVerification = {
+      ...eligible,
+      onlineVerificationTaskId: '41',
+      onlineVerificationItemId: '52',
+    } as ProductBatchCandidate;
+    const incompleteVerification = {
+      ...blocked,
+      onlineVerificationItemId: null,
+    } as ProductBatchCandidate;
+    const wrongStatus = {
+      ...eligible,
+      status: 'online',
+    } as ProductBatchCandidate;
+
+    expect(isCandidateSelectable(eligible, 'online')).toBe(true);
+    expect(isCandidateSelectable(blocked, 'online')).toBe(false);
+    expect(candidateUnavailableReason(blocked, 'online')).toBe(blocked.onlineReason);
+    for (const malformed of [
+      malformedType,
+      conflictingReason,
+      staleVerification,
+      incompleteVerification,
+      wrongStatus,
+    ]) {
+      expect(isCandidateSelectable(malformed, 'online')).toBe(false);
+      expect(candidateUnavailableReason(malformed, 'online')).toBe(
+        '商品上架安全状态异常，请刷新商品后再操作',
+      );
+    }
   });
 
   it('summarizes and compares authoritative inventory snapshots by SKU', () => {
@@ -336,6 +413,29 @@ describe('product batch workbench session recovery', () => {
     expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(titleSession);
   });
 
+  it('restores online action with its frozen eligibility and verification fields', () => {
+    const storage = new MemoryStorage();
+    const selected = {
+      ...candidate('11', '待恢复上架商品'),
+      status: 'offline',
+      onlineEligible: true,
+      onlineReason: null,
+    };
+    const onlineSession: ProductBatchWorkbenchSession = {
+      ...session,
+      draft: {
+        ...session.draft,
+        status: 'offline',
+        action: 'online',
+        targetInputs: {},
+        selected: [selected],
+      },
+    };
+
+    expect(writeProductBatchWorkbenchSession(scope, onlineSession, storage)).toBe(true);
+    expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(onlineSession);
+  });
+
   it.each(['offline', 'edit_price'] as const)(
     'migrates legacy v1 %s drafts without losing their preview identity',
     (action) => {
@@ -369,6 +469,10 @@ describe('product batch workbench session recovery', () => {
           inventorySyncReason: '旧版会话缺少库存快照，请刷新商品后再同步库存',
           titleEditable: false,
           titleEditReason: '旧版会话缺少标题编辑状态，请刷新商品后再修改标题',
+          onlineEligible: false,
+          onlineReason: '旧版会话缺少安全上架状态，请刷新商品后再上架',
+          onlineVerificationTaskId: null,
+          onlineVerificationItemId: null,
         },
       ]);
       expect(isCandidateSelectable(restored!.draft.selected[0]!, 'sync_inventory')).toBe(false);
@@ -387,6 +491,100 @@ describe('product batch workbench session recovery', () => {
           ...session.draft,
           action: 'sync_inventory',
           selected: [legacyCandidate('11', '旧版会话商品')],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('does not migrate a legacy candidate without safety fields into an online draft', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          status: 'offline',
+          action: 'online',
+          selected: [legacyCandidate('11', '旧版上架商品')],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('does not restore a blocked candidate as selected in an online draft', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          status: 'offline',
+          action: 'online',
+          selected: [
+            {
+              ...candidate('11', '待核验上架商品'),
+              status: 'offline',
+              onlineEligible: false,
+              onlineReason: '上一次上架结果未知，请先核验平台状态与库存',
+              onlineVerificationTaskId: '41',
+              onlineVerificationItemId: '52',
+            },
+          ],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('fails closed when online safety fields are partial or internally inconsistent', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    const partial = candidate('11', '字段不完整上架商品') as Record<string, unknown>;
+    delete partial.onlineVerificationItemId;
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: { ...session.draft, selected: [partial] },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          selected: [
+            {
+              ...candidate('12', '资格冲突上架商品'),
+              onlineEligible: true,
+              onlineReason: '不能同时允许并阻止上架',
+            },
+          ],
         },
         preview: session.preview,
       }),
@@ -547,6 +745,10 @@ function candidate(publishedProductId: string, title: string) {
     titleEditReason: null,
     titleVerificationTaskId: null,
     titleVerificationItemId: null,
+    onlineEligible: false,
+    onlineReason: '只有已下架商品可以上架',
+    onlineVerificationTaskId: null,
+    onlineVerificationItemId: null,
     priceEditable: true,
     priceEditReason: null,
     sourceProductId: `source-${publishedProductId}`,
@@ -570,6 +772,10 @@ function legacyCandidate(publishedProductId: string, title: string): Record<stri
   for (const field of [
     'titleEditable',
     'titleEditReason',
+    'onlineEligible',
+    'onlineReason',
+    'onlineVerificationTaskId',
+    'onlineVerificationItemId',
     'sourceTotalStock',
     'sourceSkuCount',
     'sourceInventoryVersion',

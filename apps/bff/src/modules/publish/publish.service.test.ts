@@ -1623,7 +1623,7 @@ describe('PublishService', () => {
 
     await expect(
       fixture.service.updatePublishedProduct(USER, '7', { title: '夏季修正后的纯棉T恤' }),
-    ).rejects.toThrow('存在结果待核验的标题更新');
+    ).rejects.toThrow('存在结果待核验的平台写入');
 
     expect(fixture.platformProductLocks.acquire).not.toHaveBeenCalled();
     expect(fixture.updateProduct).not.toHaveBeenCalled();
@@ -1639,7 +1639,7 @@ describe('PublishService', () => {
 
     await expect(
       fixture.service.updatePublishedProduct(USER, '7', { title: '夏季修正后的纯棉T恤' }),
-    ).rejects.toThrow('存在结果待核验的标题更新');
+    ).rejects.toThrow('存在结果待核验的平台写入');
 
     expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);
     expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
@@ -1971,6 +1971,59 @@ describe('PublishService', () => {
       platformStatus: 0,
       platformCheckStatus: 4,
     });
+  });
+
+  it('keeps a deleted platform product in the non-publishable local terminal state', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue({
+      ...publishedProductRecord(),
+      status: 'rejected',
+    });
+    fixture.getProductState.mockResolvedValue({ state: 'deleted', status: 2, checkStatus: 3 });
+
+    await expect(fixture.service.syncPublishedProductStatus(USER, '7')).resolves.toMatchObject({
+      status: 'rejected',
+      platformStatus: 2,
+    });
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'rejected',
+          platformStatusRaw: 2,
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+  });
+
+  it('blocks ordinary status sync while an online result still needs verification', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 51n });
+
+    await expect(fixture.service.syncPublishedProductStatus(USER, '7')).rejects.toThrow(
+      '存在结果待核验的上架操作',
+    );
+
+    expect(fixture.platformProductLocks.acquire).not.toHaveBeenCalled();
+    expect(fixture.getProductState).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the online verification fence after taking the status-sync lock', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.prisma.productBatchItem.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 51n });
+
+    await expect(fixture.service.syncPublishedProductStatus(USER, '7')).rejects.toThrow(
+      '存在结果待核验的上架操作',
+    );
+
+    expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);
+    expect(fixture.getProductState).not.toHaveBeenCalled();
+    expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
   });
 
   it('queues a retained inventory target when a non-online product becomes online', async () => {

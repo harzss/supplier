@@ -129,6 +129,9 @@
 - 批量改标题只使用 `product.partialEdit`，请求仅携带 `product_id + name`，不得复用会覆盖图片、价格、库存与 SKU 的完整 `product.editV2`
 - 标题回读使用 `product.detail(show_draft=true).data.name`，同时保存平台状态、审核状态和实际标题；抖店标题统一按 8～30 个汉字、16～60 加权字符校验
 - `partialEdit` 的网络错误、408/429/5xx、无法解析或缺失合法业务 `code` 的 2xx 响应均视为结果未知；写入 fence 未核验前禁止再次改标题或执行完整商品编辑。明确普通 4xx 才按确定失败处理
+- 批量上架只使用 `product.setOnline`，且只允许已下架、1688 货源可售并具有完整 SKU 库存快照的商品。平台库存与 1688 目标不一致时，先在保持下架的状态下使用绝对库存接口补齐，不能先上架再异步追库存
+- 上架前后与专用核验都使用 `product.detail` 的 `state → inventory → state` 强回读；每次详情响应必须返回与请求精确一致的 `product_id/product_id_str`，只有已识别的审核通过状态才能根据 `status` 映射在线或下架。缺失商品 ID、未知审核码、状态与库存不一致或逐 SKU 库存不一致均 fail-closed
+- `product.setOnline` 的网络错误、408/429/5xx 和畸形 2xx 响应均视为结果未知。写入 fence 未核验前禁止普通重试、完整商品编辑和普通状态同步；系统只在持有共享商品锁、商品 revision 仍属于本任务时调用 `product.setOffline` 并回读确认隔离。若原上架请求在隔离后迟到生效，专用核验必须再次下架，不能把迟到在线当作成功
 - 每次真实库存变化分配单调递增版本号，并生成店铺内 24 小时唯一、同一次重试稳定的 `idempotent_id`；平台返回“Token 已被使用”时按同一快照已落地处理
 - 库存 worker 的执行、完成和失败必须同时匹配 `syncing + attempts + lockedBy + 目标版本/指纹`；stale recovery 或其他 worker 接管后，迟到结果只能返回 stale，不能覆盖新状态
 - 人工库存重试按读取到的失败状态、尝试次数和目标版本做条件更新；若期间已被 worker 认领则返回冲突，不清除新 worker 的锁

@@ -1,4 +1,5 @@
 import type { ConfigService } from '@nestjs/config';
+import { Prisma } from '@supplier/db';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
@@ -104,6 +105,46 @@ describe('ProductBatchService', () => {
     });
   });
 
+  it('fails closed every candidate action when the raw platform status says deleted', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        status: 'offline',
+        platformStatusRaw: 2,
+        platformCheckStatusRaw: null,
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5, price: 29.9 },
+                { sourceSkuId: 'sku-b', stock: 8, price: 39.9 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50 }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          status: 'rejected',
+          priceEditable: false,
+          priceEditReason: '平台商品已删除，不能继续操作，请重新铺货',
+          titleEditable: false,
+          titleEditReason: '平台商品已删除，不能改标题，请重新铺货',
+          inventorySyncEligible: false,
+          inventorySyncReason: '平台商品已删除，不能同步库存，请重新铺货',
+          onlineEligible: false,
+          onlineReason: '平台商品已删除，不能重新上架，请重新铺货',
+        },
+      ],
+    });
+  });
+
   it('blocks title editing while an earlier platform write still needs verification', async () => {
     const fixture = createFixture();
     fixture.prisma.publishedProduct.count.mockResolvedValue(1);
@@ -123,6 +164,103 @@ describe('ProductBatchService', () => {
           titleEditReason: '存在结果待核验的标题更新，请先在原批量任务核验',
           titleVerificationTaskId: '41',
           titleVerificationItemId: '51',
+        },
+      ],
+    });
+  });
+
+  it('exposes safe online eligibility and the original verification fence', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(2);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        status: 'offline',
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+      publishedProduct({
+        id: 12n,
+        status: 'offline',
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+    fixture.prisma.productBatchItem.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 52n, taskId: 42n, publishedProductId: 12n }]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'offline' }),
+    ).resolves.toMatchObject({
+      items: [
+        { publishedProductId: '11', onlineEligible: true, onlineReason: null },
+        {
+          publishedProductId: '12',
+          onlineEligible: false,
+          onlineReason: '存在结果待核验的上架操作，请先在原批量任务核验',
+          onlineVerificationTaskId: '42',
+          onlineVerificationItemId: '52',
+        },
+      ],
+    });
+  });
+
+  it('skips an online preview when a stale local offline row has a deleted raw status', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        status: 'offline',
+        platformStatusRaw: 2,
+        platformCheckStatusRaw: 3,
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+    fixture.prisma.productBatchTask.create.mockImplementation(async ({ data }: any) =>
+      taskRecord({
+        action: 'online',
+        requestFingerprint: data.requestFingerprint,
+        items: data.items.create.map((item: any) => taskItem(item)),
+      }),
+    );
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'online',
+        publishedProductIds: ['11'],
+      }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          status: 'skipped',
+          errorCode: 'ONLINE_UNAVAILABLE',
+          errorMessage: '平台商品已删除，不能重新上架，请重新铺货',
         },
       ],
     });
@@ -420,6 +558,70 @@ describe('ProductBatchService', () => {
     );
   });
 
+  it('freezes source inventory and the local offline baseline into an online preview', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        status: 'offline',
+        inventorySyncStatus: 'pending',
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+    fixture.prisma.productBatchTask.create.mockImplementation(async ({ data }: any) =>
+      taskRecord({ action: 'online', requestFingerprint: data.requestFingerprint, items: [] }),
+    );
+
+    await fixture.service.createPreview(USER, {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'online',
+      publishedProductIds: ['11'],
+    });
+
+    expect(fixture.prisma.productBatchTask.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'online',
+          items: {
+            create: [
+              expect.objectContaining({
+                status: 'pending',
+                expectedMutationRevision: 1,
+                beforeSnapshot: expect.objectContaining({
+                  status: 'offline',
+                  inventoryFingerprint: 'a'.repeat(64),
+                  inventoryVersion: 3,
+                  skuInventory: inventorySnapshot([
+                    ['sku-a', 5],
+                    ['sku-b', 8],
+                  ]),
+                }),
+                desiredSnapshot: {
+                  status: 'online',
+                  inventoryFingerprint: 'b'.repeat(64),
+                  inventoryVersion: 4,
+                  skuInventory: inventorySnapshot([
+                    ['sku-a', 7],
+                    ['sku-b', 13],
+                  ]),
+                },
+              }),
+            ],
+          },
+        }),
+      }),
+    );
+  });
+
   it('materializes an absolute target title and skips platform-invalid short titles per item', async () => {
     const fixture = createFixture();
     fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
@@ -542,6 +744,37 @@ describe('ProductBatchService', () => {
         ],
       }),
     ).rejects.toThrow('存在结果待核验的标题更新');
+  });
+
+  it('rejects a new online preview until every earlier platform mutation is verified', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        status: 'offline',
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 51n });
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'online',
+        publishedProductIds: ['11'],
+      }),
+    ).rejects.toThrow('存在结果待核验的平台写入');
+
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
   });
 
   it('returns immutable before, desired and platform-read title fields in task detail', async () => {
@@ -705,6 +938,75 @@ describe('ProductBatchService', () => {
     expect(fixture.prisma.productBatchItem.updateMany).not.toHaveBeenCalled();
   });
 
+  it('blocks manual replay when an online mutation result is still unknown', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'online',
+        status: 'failed',
+        confirmedAt: NOW,
+        items: [
+          taskItem({ status: 'failed', errorCode: 'ONLINE_RESULT_UNKNOWN', finishedAt: NOW }),
+        ],
+      }),
+    );
+
+    await expect(fixture.service.retry(USER, '41', {})).rejects.toThrow(
+      '请先在原批量任务核验平台状态与库存',
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('advances the online retry baseline after a verified not-applied quarantine', async () => {
+    const fixture = createFixture();
+    const failed = taskItem({
+      status: 'failed',
+      expectedMutationRevision: 1,
+      errorCode: 'ONLINE_RESULT_NOT_APPLIED',
+      result: {
+        onlineWriteStartedAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+        quarantineRevision: 2,
+      },
+      finishedAt: NOW,
+      publishedProduct: publishedProduct({ status: 'offline', mutationRevision: 2 }),
+    });
+    const initial = taskRecord({
+      action: 'online',
+      status: 'failed',
+      confirmedAt: NOW,
+      items: [failed],
+    });
+    const queued = taskRecord({
+      action: 'online',
+      status: 'queued',
+      confirmedAt: NOW,
+      items: [taskItem({ status: 'pending', expectedMutationRevision: 2 })],
+    });
+    fixture.prisma.productBatchTask.findFirst
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(queued);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(fixture.service.retry(USER, '41', {})).resolves.toMatchObject({
+      status: 'queued',
+    });
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 51n,
+        status: 'failed',
+        errorCode: 'ONLINE_RESULT_NOT_APPLIED',
+        expectedMutationRevision: 1,
+        publishedProduct: { mutationRevision: 2 },
+      },
+      data: expect.objectContaining({
+        status: 'pending',
+        expectedMutationRevision: 2,
+        result: Prisma.JsonNull,
+      }),
+    });
+  });
+
   it('verifies an unknown title result as succeeded when the platform shows the target', async () => {
     const fixture = createFixture();
     const item = unknownTitleExecutionRecord(new Date().toISOString());
@@ -857,6 +1159,48 @@ describe('ProductBatchService', () => {
     );
   });
 
+  it('persists a deleted title-verification state as rejected instead of offline', async () => {
+    const fixture = createFixture();
+    const item = unknownTitleExecutionRecord(new Date().toISOString());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.adapter.getProductTitle.mockResolvedValue({
+      title: '夏季纯棉短袖上衣',
+      state: 'deleted',
+      status: 2,
+      checkStatus: 3,
+    });
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'failed',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: null,
+      items: [{ status: 'failed' }],
+    });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        status: 'failed',
+        confirmedAt: NOW,
+        finishedAt: NOW,
+        items: [taskItem({ status: 'failed', errorCode: 'TITLE_RESULT_STATE_INVALID' })],
+      }),
+    );
+
+    await fixture.service.verifyTitleResult(USER, '41', '51');
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'rejected',
+          platformStatusRaw: 2,
+          platformCheckStatusRaw: 3,
+        }),
+      }),
+    );
+  });
+
   it('closes an unknown platform state instead of leaving the title fence stuck', async () => {
     const fixture = createFixture();
     const item = unknownTitleExecutionRecord(new Date().toISOString());
@@ -928,6 +1272,472 @@ describe('ProductBatchService', () => {
         expect.objectContaining({ errorCode: 'TITLE_NOT_APPLIED_VERIFIED', retryable: false }),
       ],
     });
+  });
+
+  it('verifies online only after two state reads and exact SKU inventory agree', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'online', status: 'succeeded', items: [] }),
+    );
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    );
+
+    await expect(fixture.service.verifyOnlineResult(USER, '41', '51')).resolves.toMatchObject({
+      action: 'online',
+      status: 'succeeded',
+    });
+
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 1 }),
+        data: expect.objectContaining({
+          status: 'online',
+          inventoryFingerprint: 'b'.repeat(64),
+          inventoryVersion: 4,
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'succeeded',
+          errorCode: null,
+          result: expect.objectContaining({ reason: 'platform_online_verified' }),
+        }),
+      }),
+    );
+  });
+
+  it('keeps a verified product online when the verification transaction ACK is lost', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    const desiredInventory = inventorySnapshot([
+      ['sku-a', 7],
+      ['sku-b', 13],
+    ]);
+    const committedProduct = publishedProduct({
+      status: 'online',
+      mutationRevision: 2,
+      skuInventorySnapshot: desiredInventory,
+      inventoryFingerprint: 'b'.repeat(64),
+      inventoryTargetFingerprint: 'b'.repeat(64),
+      inventoryVersion: 4,
+      inventoryTargetVersion: 4,
+      inventorySyncStatus: 'synced',
+    });
+    const committedItem = {
+      ...item,
+      status: 'succeeded',
+      errorCode: null,
+      result: {
+        ...item.result,
+        actualStatus: 'online',
+        actualInventory: desiredInventory,
+      },
+    };
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.findUnique.mockResolvedValue(committedItem);
+    fixture.prisma.publishedProduct.findUnique
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(committedProduct);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'online', status: 'succeeded', items: [] }),
+    );
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    );
+    fixture.prisma.$transaction.mockImplementation(async (callback: any) => {
+      await callback(fixture.prisma);
+      throw new Error('transaction commit acknowledgement lost');
+    });
+
+    await expect(fixture.service.verifyOnlineResult(USER, '41', '51')).resolves.toMatchObject({
+      status: 'succeeded',
+    });
+
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a terminal task after verified-online refresh temporarily fails', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst
+      .mockResolvedValueOnce(item)
+      .mockResolvedValueOnce(item)
+      .mockResolvedValue(null);
+    fixture.prisma.productBatchItem.findMany.mockResolvedValue([]);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'online', status: 'failed', confirmedAt: NOW, items: [] }),
+    );
+    fixture.prisma.productBatchTask.findUnique
+      .mockRejectedValueOnce(new Error('task refresh temporarily unavailable'))
+      .mockResolvedValueOnce({
+        id: 41n,
+        status: 'failed',
+        stateRevision: 3,
+        confirmedAt: NOW,
+        cancelRequestedAt: null,
+        finishedAt: NOW,
+        items: [{ status: 'succeeded' }],
+      });
+    fixture.prisma.productBatchTask.findMany.mockResolvedValue([{ id: 41n }]);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    );
+
+    await fixture.service.verifyOnlineResult(USER, '41', '51');
+    await expect(fixture.service.claimNext('worker-reconcile')).resolves.toBeNull();
+
+    expect(fixture.prisma.productBatchTask.updateMany).toHaveBeenCalledWith({
+      where: { id: 41n, stateRevision: 3 },
+      data: {
+        status: 'succeeded',
+        stateRevision: { increment: 1 },
+        finishedAt: expect.any(Date),
+      },
+    });
+  });
+
+  it('closes a quiet-window online fence only after state and inventory both remain offline', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'online', status: 'failed', items: [] }),
+    );
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    );
+
+    await fixture.service.verifyOnlineResult(USER, '41', '51');
+
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ errorCode: 'ONLINE_RESULT_NOT_APPLIED' }),
+      }),
+    );
+  });
+
+  it('keeps the online fence when the platform is still reviewing', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.adapter.getProductState.mockResolvedValueOnce(platformState('reviewing'));
+
+    await expect(fixture.service.verifyOnlineResult(USER, '41', '51')).rejects.toThrow(
+      '平台仍在处理或无法确认上架结果',
+    );
+
+    expect(fixture.prisma.productBatchItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('keeps the rejected-result fence when the product CAS loses', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('rejected'))
+      .mockResolvedValueOnce(platformState('rejected'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce({
+      ...platformState('rejected'),
+      items: inventorySnapshot([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]).items,
+    });
+    fixture.prisma.publishedProduct.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    await expect(fixture.service.verifyOnlineResult(USER, '41', '51')).rejects.toThrow(
+      '核验栅栏保持不变',
+    );
+
+    expect(fixture.prisma.productBatchItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a stable rejected online result for manual correction', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'online', status: 'failed', items: [] }),
+    );
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('rejected'))
+      .mockResolvedValueOnce(platformState('rejected'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce({
+      ...platformState('rejected'),
+      items: inventorySnapshot([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]).items,
+    });
+
+    await fixture.service.verifyOnlineResult(USER, '41', '51');
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'rejected' }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ errorCode: 'ONLINE_RESULT_REJECTED' }),
+      }),
+    );
+  });
+
+  it('records a stable deleted platform product as a non-retryable terminal state', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'online', status: 'failed', items: [] }),
+    );
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('deleted'))
+      .mockResolvedValueOnce(platformState('deleted'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce({
+      ...platformState('deleted'),
+      items: inventorySnapshot([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]).items,
+    });
+
+    await fixture.service.verifyOnlineResult(USER, '41', '51');
+
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'rejected',
+          platformStatusRaw: 2,
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          errorCode: { in: ['ONLINE_WRITE_STARTED', 'ONLINE_RESULT_UNKNOWN'] },
+        }),
+        data: expect.objectContaining({
+          errorCode: 'ONLINE_RESULT_REJECTED',
+          errorMessage: '平台商品已删除，无法重新上架，请重新铺货',
+          result: expect.objectContaining({ actualStatus: 'deleted' }),
+        }),
+      }),
+    );
+
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'online',
+        status: 'failed',
+        confirmedAt: NOW,
+        items: [
+          taskItem({
+            status: 'failed',
+            errorCode: 'ONLINE_RESULT_REJECTED',
+            publishedProduct: publishedProduct({ status: 'rejected', mutationRevision: 2 }),
+          }),
+        ],
+      }),
+    );
+    await expect(fixture.service.retry(USER, '41', {})).rejects.toThrow('需要重新预览或人工处理');
+
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        status: 'rejected',
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50 }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          onlineEligible: false,
+          onlineReason: '只有已下架商品可以重新上架',
+        },
+      ],
+    });
+  });
+
+  it.each(['inventory timeout', 'malformed inventory'])(
+    'quarantines a known-online verification after %s and preserves its fence',
+    async (failure) => {
+      const fixture = createFixture();
+      const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+      fixture.prepareExecution(item);
+      fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+      fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+      if (failure === 'inventory timeout') {
+        fixture.adapter.getProductState
+          .mockResolvedValueOnce(platformState('online'))
+          .mockResolvedValueOnce(platformState('offline'));
+        fixture.adapter.getProductInventory.mockRejectedValueOnce(new Error('inventory timeout'));
+      } else {
+        fixture.adapter.getProductState
+          .mockResolvedValueOnce(platformState('online'))
+          .mockResolvedValueOnce(platformState('online'))
+          .mockResolvedValueOnce(platformState('offline'));
+        fixture.adapter.getProductInventory.mockResolvedValueOnce({
+          ...platformState('online'),
+          items: [],
+        });
+      }
+
+      await expect(fixture.service.verifyOnlineResult(USER, '41', '51')).rejects.toThrow(
+        '核验栅栏保持不变',
+      );
+
+      expect(fixture.adapter.offlineProduct).toHaveBeenCalledOnce();
+      expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'offline' }),
+        }),
+      );
+      expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: {
+            result: expect.objectContaining({ quarantineRevision: 2 }),
+          },
+        }),
+      );
+      expect(
+        fixture.prisma.productBatchItem.updateMany.mock.calls.every(
+          ([input]: any[]) => input.data.errorCode === undefined,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('fails closed when online verification cannot read both state and inventory', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.adapters.create.mockReturnValue({
+      getProductState: vi.fn(),
+      offlineProduct: vi.fn(),
+    });
+
+    await expect(fixture.service.verifyOnlineResult(USER, '41', '51')).rejects.toThrow(
+      '当前平台无法回读商品状态与库存',
+    );
+  });
+
+  it('re-quarantines a delayed online result using the recorded quarantine revision', async () => {
+    const fixture = createFixture();
+    const startedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+    const base = unknownOnlineExecutionRecord(startedAt);
+    const item = unknownOnlineExecutionRecord(startedAt, {
+      result: {
+        ...base.result,
+        quarantineRevision: 2,
+        quarantinedAt: '2026-08-04T07:51:00.000Z',
+      },
+      publishedProduct: publishedProduct({
+        status: 'offline',
+        mutationRevision: 2,
+        inventorySyncStatus: 'pending',
+      }),
+    });
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'online', status: 'failed', items: [] }),
+    );
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    );
+
+    await fixture.service.verifyOnlineResult(USER, '41', '51');
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 2 }),
+        data: expect.objectContaining({ status: 'offline', mutationRevision: { increment: 1 } }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: expect.objectContaining({ quarantineRevision: 3 }),
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ errorCode: 'ONLINE_LATE_APPLY_QUARANTINED' }),
+      }),
+    );
   });
 
   it('claims an item with compare-and-set and retries after a lost race', async () => {
@@ -1044,6 +1854,42 @@ describe('ProductBatchService', () => {
     );
   });
 
+  it('turns a stale online write into a verification fence even after cancellation', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchItem.findMany.mockResolvedValue([
+      {
+        id: 51n,
+        taskId: 41n,
+        status: 'running',
+        attempts: 1,
+        maxAttempts: 3,
+        lockedBy: 'dead-worker',
+        errorCode: 'ONLINE_WRITE_STARTED',
+        task: { action: 'online', cancelRequestedAt: NOW },
+      },
+    ]);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(null);
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'cancelling',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: NOW,
+      items: [{ status: 'failed' }],
+    });
+
+    await expect(fixture.service.claimNext('worker-2')).resolves.toBeNull();
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'ONLINE_RESULT_UNKNOWN',
+        }),
+      }),
+    );
+  });
+
   it('settles a cancelled running item instead of leaving it in an unreachable retry wait', async () => {
     const fixture = createFixture();
     const item = executionRecord();
@@ -1140,7 +1986,7 @@ describe('ProductBatchService', () => {
         stateRevision: 5,
         confirmedAt: NOW,
         cancelRequestedAt: null,
-        items: [{ status: 'running' }],
+        items: [{ status: 'failed' }],
       })
       .mockResolvedValueOnce({
         id: 41n,
@@ -1203,6 +2049,38 @@ describe('ProductBatchService', () => {
         data: expect.objectContaining({
           status: 'succeeded',
           result: expect.objectContaining({ reason: 'offline_confirmed', recovered: false }),
+        }),
+      }),
+    );
+  });
+
+  it('persists a platform-deleted result from batch offline as rejected instead of offline', async () => {
+    const fixture = createFixture();
+    const item = executionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.offlineProduct.mockResolvedValue(undefined);
+    fixture.adapter.getProductState.mockResolvedValue(platformState('deleted'));
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'rejected',
+          inventorySyncReason: 'platform_product_deleted',
+          platformStatusRaw: 2,
+          platformCheckStatusRaw: 3,
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'succeeded',
+          result: expect.objectContaining({
+            reason: 'platform_product_deleted',
+            platformState: expect.objectContaining({ state: 'deleted' }),
+          }),
         }),
       }),
     );
@@ -1283,6 +2161,809 @@ describe('ProductBatchService', () => {
         }),
       }),
     );
+  });
+
+  it('fills inventory while offline and onlines only after state and inventory readback agree', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'));
+    fixture.adapter.getProductInventory
+      .mockResolvedValueOnce(
+        platformInventory(
+          [
+            ['sku-a', 5],
+            ['sku-b', 8],
+          ],
+          'offline',
+        ),
+      )
+      .mockResolvedValueOnce(
+        platformInventory(
+          [
+            ['sku-a', 7],
+            ['sku-b', 13],
+          ],
+          'offline',
+        ),
+      )
+      .mockResolvedValueOnce(
+        platformInventory(
+          [
+            ['sku-a', 7],
+            ['sku-b', 13],
+          ],
+          'offline',
+        ),
+      )
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ]),
+      );
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.syncInventory).toHaveBeenCalledWith(
+      'shop-token',
+      expect.objectContaining({
+        platformProductId: '998877',
+        items: [
+          { sourceSkuId: 'sku-a', stock: 7 },
+          { sourceSkuId: 'sku-b', stock: 13 },
+        ],
+      }),
+    );
+    expect(fixture.adapter.onlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(4);
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 1 }),
+        data: expect.objectContaining({
+          status: 'online',
+          skuInventorySnapshot: inventorySnapshot([
+            ['sku-a', 7],
+            ['sku-b', 13],
+          ]),
+          inventoryFingerprint: 'b'.repeat(64),
+          inventoryVersion: 4,
+          inventorySyncStatus: 'synced',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'succeeded',
+          result: expect.objectContaining({ reason: 'online_confirmed', actualStatus: 'online' }),
+        }),
+      }),
+    );
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+  });
+
+  it('recovers an already-online platform product only when its full inventory matches', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord({ attempts: 2 });
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    );
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.syncInventory).not.toHaveBeenCalled();
+    expect(fixture.adapter.onlineProduct).not.toHaveBeenCalled();
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'succeeded',
+          result: expect.objectContaining({
+            reason: 'platform_online_recovered',
+            recovered: true,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('quarantines an already-online recovery when the second state read is no longer online', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord({ attempts: 2 });
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    );
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '平台状态与库存回读的售卖状态不一致',
+    );
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledOnce();
+    expect(fixture.prisma.productBatchItem.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'succeeded' }),
+      }),
+    );
+  });
+
+  it('persists a pre-write deleted drift as a terminal product without platform mutation', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState.mockResolvedValueOnce(platformState('deleted'));
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.getProductInventory).not.toHaveBeenCalled();
+    expect(fixture.adapter.onlineProduct).not.toHaveBeenCalled();
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'rejected',
+          platformStatusRaw: 2,
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'ONLINE_RESULT_REJECTED',
+          result: expect.objectContaining({ actualStatus: 'deleted' }),
+        }),
+      }),
+    );
+  });
+
+  it.each(['inventory timeout', 'malformed inventory'])(
+    'quarantines a known-online execution after %s without ordinary retry',
+    async (failure) => {
+      const fixture = createFixture();
+      const item = onlineExecutionRecord({ attempts: 2 });
+      fixture.prepareExecution(item);
+      let fenceMarked = false;
+      fixture.prisma.productBatchItem.updateMany.mockImplementation(
+        async ({ where, data }: any) => {
+          if (data?.errorCode === 'ONLINE_RESULT_UNKNOWN') {
+            fenceMarked = true;
+            return { count: 1 };
+          }
+          if (where?.errorCode) return { count: fenceMarked ? 1 : 0 };
+          if (where?.task?.cancelRequestedAt) return { count: 0 };
+          return { count: 1 };
+        },
+      );
+      if (failure === 'inventory timeout') {
+        fixture.adapter.getProductState
+          .mockResolvedValueOnce(platformState('online'))
+          .mockResolvedValueOnce(platformState('offline'));
+        fixture.adapter.getProductInventory.mockRejectedValueOnce(new Error('inventory timeout'));
+      } else {
+        fixture.adapter.getProductState
+          .mockResolvedValueOnce(platformState('online'))
+          .mockResolvedValueOnce(platformState('online'))
+          .mockResolvedValueOnce(platformState('offline'));
+        fixture.adapter.getProductInventory.mockResolvedValueOnce({
+          ...platformState('online'),
+          items: [],
+        });
+      }
+
+      let thrown: unknown;
+      try {
+        await fixture.service.executeClaimed(item);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(fixture.adapter.offlineProduct).toHaveBeenCalledOnce();
+      expect(fixture.adapter.onlineProduct).not.toHaveBeenCalled();
+      await expect(fixture.service.failClaimedItem(item, thrown)).resolves.toBe('failed');
+      expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: 'failed',
+            errorCode: 'ONLINE_RESULT_UNKNOWN',
+          }),
+        }),
+      );
+    },
+  );
+
+  it.each(['offline not confirmed', 'quarantine readback failed', 'quarantine lock lost'])(
+    'keeps an online verification fence when %s',
+    async (failure) => {
+      const fixture = createFixture();
+      const item = onlineExecutionRecord({ attempts: 2 });
+      fixture.prepareExecution(item);
+      let fenceMarked = false;
+      fixture.prisma.productBatchItem.updateMany.mockImplementation(
+        async ({ where, data }: any) => {
+          if (data?.errorCode === 'ONLINE_RESULT_UNKNOWN') {
+            fenceMarked = true;
+            return { count: 1 };
+          }
+          if (where?.errorCode) return { count: fenceMarked ? 1 : 0 };
+          if (where?.task?.cancelRequestedAt) return { count: 0 };
+          return { count: 1 };
+        },
+      );
+      fixture.adapter.getProductState.mockResolvedValueOnce(platformState('online'));
+      fixture.adapter.getProductInventory.mockRejectedValueOnce(new Error('inventory timeout'));
+      if (failure === 'offline not confirmed') {
+        fixture.adapter.offlineProduct.mockRejectedValueOnce(new Error('offline request failed'));
+        fixture.adapter.getProductState.mockResolvedValueOnce(platformState('online'));
+      } else if (failure === 'quarantine readback failed') {
+        fixture.adapter.getProductState.mockRejectedValueOnce(
+          new Error('quarantine readback failed'),
+        );
+      } else {
+        fixture.productLocks.renew
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error('quarantine lock lost'));
+      }
+
+      let thrown: unknown;
+      try {
+        await fixture.service.executeClaimed(item);
+      } catch (error) {
+        thrown = error;
+      }
+      await expect(fixture.service.failClaimedItem(item, thrown)).resolves.toBe('failed');
+
+      expect(fenceMarked).toBe(true);
+      expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: 'failed',
+            errorCode: 'ONLINE_RESULT_UNKNOWN',
+          }),
+        }),
+      );
+      expect(fixture.adapter.offlineProduct).toHaveBeenCalledTimes(
+        failure === 'quarantine lock lost' ? 0 : 1,
+      );
+    },
+  );
+
+  it('blocks candidates after failed online quarantine and allows only verify recovery', async () => {
+    const fixture = createFixture();
+    const item = unknownOnlineExecutionRecord(new Date().toISOString());
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        status: 'offline',
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+    fixture.prisma.productBatchItem.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 51n, taskId: 41n, publishedProductId: 11n }]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'offline' }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          onlineEligible: false,
+          onlineVerificationTaskId: '41',
+          onlineVerificationItemId: '51',
+        },
+      ],
+    });
+
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'online', status: 'succeeded', items: [] }),
+    );
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'));
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    );
+
+    await expect(fixture.service.verifyOnlineResult(USER, '41', '51')).resolves.toMatchObject({
+      status: 'succeeded',
+    });
+  });
+
+  it('fails closed before platform access when safe online capabilities are incomplete', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    const onlineProduct = vi.fn();
+    fixture.prepareExecution(item);
+    fixture.adapters.create.mockReturnValue({
+      onlineProduct,
+      offlineProduct: vi.fn(),
+      syncInventory: vi.fn(),
+      getProductState: vi.fn(),
+    });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '当前平台不支持库存可回读的安全上架',
+    );
+
+    expect(onlineProduct).not.toHaveBeenCalled();
+  });
+
+  it('does not submit online when the lock expires after the write fence is persisted', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValue(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    );
+    fixture.productLocks.renew
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('product lock lost'));
+
+    let thrown: unknown;
+    try {
+      await fixture.service.executeClaimed(item);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(fixture.adapter.onlineProduct).not.toHaveBeenCalled();
+    await expect(fixture.service.failClaimedItem(item, thrown)).resolves.toBe('retry_wait');
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'retry_wait',
+          errorCode: 'ONLINE_WRITE_GUARD_LOST',
+        }),
+      }),
+    );
+  });
+
+  it('quarantines a post-write readback failure and keeps the online fence despite cancellation', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockRejectedValueOnce(new Error('readback timed out'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValue(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    );
+    let writeStarted = false;
+    fixture.prisma.productBatchItem.updateMany.mockImplementation(async ({ where, data }: any) => {
+      if (data?.errorCode === 'ONLINE_WRITE_STARTED') {
+        writeStarted = true;
+        return { count: 1 };
+      }
+      if (where?.errorCode) return { count: writeStarted ? 1 : 0 };
+      if (where?.task?.cancelRequestedAt) return { count: 0 };
+      return { count: 1 };
+    });
+
+    let thrown: unknown;
+    try {
+      await fixture.service.executeClaimed(item);
+    } catch (error) {
+      thrown = error;
+    }
+    (item.task as { cancelRequestedAt: Date | null }).cancelRequestedAt = NOW;
+
+    expect(fixture.adapter.onlineProduct).toHaveBeenCalledOnce();
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledOnce();
+    await expect(fixture.service.failClaimedItem(item, thrown)).resolves.toBe('failed');
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'ONLINE_RESULT_UNKNOWN',
+        }),
+      }),
+    );
+  });
+
+  it('creates a new quarantine revision when a retried online attempt crashes again', async () => {
+    const fixture = createFixture();
+    const base = onlineExecutionRecord();
+    const item = onlineExecutionRecord({
+      expectedMutationRevision: 2,
+      publishedProduct: {
+        ...base.publishedProduct,
+        mutationRevision: 2,
+      },
+    });
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockRejectedValueOnce(new Error('second attempt readback timed out'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValue(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    );
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '上架写入后无法可靠回读平台状态与库存',
+    );
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 2 }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: expect.objectContaining({ quarantineRevision: 3 }),
+        }),
+      }),
+    );
+  });
+
+  it('quarantines a reverse post-write state and inventory inconsistency exactly once', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory
+      .mockResolvedValueOnce(
+        platformInventory(
+          [
+            ['sku-a', 7],
+            ['sku-b', 13],
+          ],
+          'offline',
+        ),
+      )
+      .mockResolvedValueOnce(
+        platformInventory(
+          [
+            ['sku-a', 7],
+            ['sku-b', 13],
+          ],
+          'offline',
+        ),
+      )
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ]),
+      );
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '平台状态与库存双回读未稳定收敛',
+    );
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledOnce();
+  });
+
+  it('stops local quarantine commit when the product lock expires after remote offlining', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockRejectedValueOnce(new Error('readback timed out'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValue(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    );
+    fixture.productLocks.renew
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('product lock lost after remote offline'));
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow('自动下架隔离未确认');
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledOnce();
+    expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does not let a lost old attempt offline a newer local revision', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValue(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    );
+    fixture.productLocks.renew
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('product lock lost'));
+    fixture.productLocks.acquire
+      .mockResolvedValueOnce('product-lock')
+      .mockResolvedValueOnce('quarantine-lock');
+    fixture.prisma.publishedProduct.findUnique
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce({
+        ...item.publishedProduct,
+        status: 'online',
+        mutationRevision: 2,
+      });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '旧上架任务不能覆盖其平台状态',
+    );
+
+    expect(fixture.adapter.onlineProduct).toHaveBeenCalledOnce();
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+    expect(fixture.productLocks.release).toHaveBeenCalledWith(11n, 'quarantine-lock');
+  });
+
+  it('preserves an explicit online inconsistency even when inventory sync also failed', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.adapter.getProductInventory
+      .mockResolvedValueOnce(
+        platformInventory(
+          [
+            ['sku-a', 5],
+            ['sku-b', 8],
+          ],
+          'offline',
+        ),
+      )
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ]),
+      );
+    fixture.adapter.syncInventory.mockRejectedValueOnce(new Error('inventory mutation failed'));
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '库存同步期间平台商品状态发生变化',
+    );
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+  });
+
+  it('does not quarantine when the online transaction committed but its ACK was lost', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    const desiredInventory = inventorySnapshot([
+      ['sku-a', 7],
+      ['sku-b', 13],
+    ]);
+    const committedProduct = publishedProduct({
+      status: 'online',
+      mutationRevision: 2,
+      skuInventorySnapshot: desiredInventory,
+      inventoryFingerprint: 'b'.repeat(64),
+      inventoryTargetFingerprint: 'b'.repeat(64),
+      inventoryVersion: 4,
+      inventoryTargetVersion: 4,
+      inventorySyncStatus: 'synced',
+      task: { userId: 1n },
+    });
+    const committedItem = {
+      ...item,
+      status: 'succeeded',
+      errorCode: null,
+      result: {
+        actualStatus: 'online',
+        actualInventory: desiredInventory,
+      },
+    };
+    fixture.prepareExecution(item);
+    prepareConfirmedOnlineReadback(fixture);
+    fixture.prisma.publishedProduct.findUnique
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(committedProduct);
+    fixture.prisma.productBatchItem.findUnique
+      .mockResolvedValueOnce(item)
+      .mockResolvedValueOnce(committedItem);
+    fixture.prisma.$transaction.mockImplementation(async (callback: any) => {
+      await callback(fixture.prisma);
+      throw new Error('transaction commit acknowledgement lost');
+    });
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledOnce();
+  });
+
+  it('persists a rejected post-write state so the product cannot be previewed online again', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('rejected'))
+      .mockResolvedValueOnce(platformState('rejected'));
+    fixture.adapter.getProductInventory
+      .mockResolvedValueOnce(
+        platformInventory(
+          [
+            ['sku-a', 7],
+            ['sku-b', 13],
+          ],
+          'offline',
+        ),
+      )
+      .mockResolvedValueOnce(
+        platformInventory(
+          [
+            ['sku-a', 7],
+            ['sku-b', 13],
+          ],
+          'offline',
+        ),
+      )
+      .mockResolvedValueOnce({
+        ...platformState('rejected'),
+        items: inventorySnapshot([
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ]).items,
+      });
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'rejected',
+          mutationRevision: { increment: 1 },
+          platformCheckStatusRaw: 4,
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'ONLINE_RESULT_REJECTED',
+        }),
+      }),
+    );
+  });
+
+  it('quarantines a confirmed platform online result when the local product CAS loses', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    prepareConfirmedOnlineReadback(fixture);
+    fixture.adapter.getProductState.mockResolvedValueOnce(platformState('offline'));
+    fixture.prisma.publishedProduct.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValue({ count: 1 });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow('商品已在上架期间发生变化');
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 1 }),
+        data: expect.objectContaining({ status: 'offline' }),
+      }),
+    );
+  });
+
+  it('quarantines when the 1688 inventory version changes after platform online', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    const changedSource = publishedProduct({
+      status: 'offline',
+      inventorySyncStatus: 'pending',
+      task: item.publishedProduct.task,
+      sourceProduct: {
+        ...item.publishedProduct.sourceProduct,
+        inventoryFingerprint: 'c'.repeat(64),
+        inventoryVersion: 5,
+      },
+    });
+    fixture.prepareExecution(item);
+    prepareConfirmedOnlineReadback(fixture);
+    fixture.adapter.getProductState.mockResolvedValueOnce(platformState('offline'));
+    fixture.prisma.publishedProduct.findUnique
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce(changedSource)
+      .mockResolvedValueOnce(item.publishedProduct);
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '1688 货源、商品状态或库存快照已变化',
+    );
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
   });
 
   it('updates only the title and atomically commits the confirmed draft readback', async () => {
@@ -2190,6 +3871,7 @@ describe('ProductBatchService', () => {
 
 function createFixture() {
   const adapter = {
+    onlineProduct: vi.fn(),
     offlineProduct: vi.fn(),
     getProductState: vi.fn(),
     updateProductTitle: vi.fn(),
@@ -2266,10 +3948,7 @@ function createFixture() {
     productLocks,
     prepareExecution(item: ProductBatchExecutionRecord) {
       prisma.productBatchItem.findUnique.mockResolvedValue(item);
-      prisma.publishedProduct.findUnique.mockResolvedValue({
-        platformProductId: item.publishedProduct.platformProductId,
-        mutationRevision: item.expectedMutationRevision,
-      });
+      prisma.publishedProduct.findUnique.mockResolvedValue(item.publishedProduct);
       prisma.productBatchTask.findUnique.mockResolvedValue({
         id: item.taskId,
         status: 'running',
@@ -2477,6 +4156,69 @@ function inventoryExecutionRecord(overrides: Record<string, unknown> = {}) {
   } as unknown as ProductBatchExecutionRecord;
 }
 
+function onlineExecutionRecord(overrides: Record<string, unknown> = {}) {
+  const record = executionRecord();
+  return {
+    ...record,
+    beforeSnapshot: {
+      status: 'offline',
+      platformProductId: '998877',
+      shopId: '21',
+      inventoryFingerprint: 'a'.repeat(64),
+      inventoryVersion: 3,
+      skuInventory: inventorySnapshot([
+        ['sku-a', 5],
+        ['sku-b', 8],
+      ]),
+    },
+    desiredSnapshot: {
+      status: 'online',
+      inventoryFingerprint: 'b'.repeat(64),
+      inventoryVersion: 4,
+      skuInventory: inventorySnapshot([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    },
+    task: { ...record.task, action: 'online' },
+    publishedProduct: publishedProduct({
+      status: 'offline',
+      inventorySyncStatus: 'pending',
+      task: {
+        userId: 1n,
+        skuSnapshot: {
+          douyin: {
+            skus: [
+              { sourceSkuId: 'sku-a', stock: 5 },
+              { sourceSkuId: 'sku-b', stock: 8 },
+            ],
+          },
+        },
+      },
+    }),
+    ...overrides,
+  } as unknown as ProductBatchExecutionRecord;
+}
+
+function unknownOnlineExecutionRecord(
+  onlineWriteStartedAt: string,
+  overrides: Record<string, unknown> = {},
+) {
+  const record = onlineExecutionRecord();
+  return {
+    ...record,
+    status: 'failed',
+    errorCode: 'ONLINE_RESULT_UNKNOWN',
+    errorMessage: '上架写入结果未知',
+    result: { phase: 'platform_write_started', onlineWriteStartedAt },
+    lockedAt: null,
+    lockedBy: null,
+    finishedAt: NOW,
+    task: { ...record.task, status: 'failed' },
+    ...overrides,
+  } as unknown as ProductBatchExecutionRecord;
+}
+
 function priceSnapshot(items: Array<[string, number]>) {
   return {
     version: 1,
@@ -2500,12 +4242,75 @@ function platformPrices(items: Array<[string, number]>) {
   };
 }
 
-function platformInventory(items: Array<[string, number]>) {
+function platformInventory(items: Array<[string, number]>, state: 'online' | 'offline' = 'online') {
   return {
-    state: 'online' as const,
-    status: 0,
+    state,
+    status: state === 'online' ? 0 : 1,
     checkStatus: 3,
     items: inventorySnapshot(items).items,
+  };
+}
+
+function prepareConfirmedOnlineReadback(fixture: ReturnType<typeof createFixture>) {
+  fixture.adapter.getProductState
+    .mockResolvedValueOnce(platformState('offline'))
+    .mockResolvedValueOnce(platformState('offline'))
+    .mockResolvedValueOnce(platformState('online'))
+    .mockResolvedValueOnce(platformState('online'));
+  fixture.adapter.getProductInventory
+    .mockResolvedValueOnce(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    )
+    .mockResolvedValueOnce(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    )
+    .mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    );
+}
+
+function platformState(
+  state:
+    | 'online'
+    | 'offline'
+    | 'deleted'
+    | 'draft'
+    | 'reviewing'
+    | 'rejected'
+    | 'blocked'
+    | 'approved_pending_online'
+    | 'unknown',
+) {
+  return {
+    state,
+    status: state === 'online' ? 0 : state === 'deleted' ? 2 : 1,
+    checkStatus:
+      state === 'draft'
+        ? 1
+        : state === 'reviewing'
+          ? 2
+          : state === 'rejected'
+            ? 4
+            : state === 'blocked'
+              ? 5
+              : state === 'approved_pending_online'
+                ? 7
+                : 3,
   };
 }
 
@@ -2532,6 +4337,8 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
     mainImage: null,
     salePrice: 29.9,
     status: 'online',
+    platformStatusRaw: null,
+    platformCheckStatusRaw: null,
     mutationRevision: 1,
     inventorySyncStatus: 'synced',
     skuInventorySnapshot: inventorySnapshot([

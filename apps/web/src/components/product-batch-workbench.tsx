@@ -16,6 +16,7 @@ import { useAuthStorageIdentity } from './auth-provider';
 import {
   clearProductBatchSessionForTask,
   clearProductBatchWorkbenchSession,
+  hasValidOnlineCandidateState,
   productBatchWorkbenchStorageKey,
   readProductBatchWorkbenchSession,
   shouldRestoreProductBatchPreview,
@@ -40,6 +41,7 @@ const PAGE_SIZE = 50;
 const MAX_SELECTION = 100;
 const TARGET_PAGE_SIZE = 20;
 const ACTIVE_TASK_STATUSES = new Set(['queued', 'running', 'cancelling']);
+const ONLINE_RESULT_UNKNOWN_CODES = new Set(['ONLINE_WRITE_STARTED', 'ONLINE_RESULT_UNKNOWN']);
 const CURRENCY_FORMATTER = new Intl.NumberFormat('zh-CN', {
   style: 'currency',
   currency: 'CNY',
@@ -67,6 +69,7 @@ type PriceDirection = Extract<ProductBatchPriceRule, { mode: 'percentage' }>['di
 type TargetPriceValidation = { value: string | null; error: string };
 type TargetTitleValidation = { value: string | null; error: string };
 type ProductBatchPreviewInput =
+  | Omit<Extract<ProductBatchPreviewRequest, { action: 'online' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'offline' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_title' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_price' }>, 'clientRequestId'>
@@ -406,7 +409,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
   const chooseAction = (nextAction: ProductBatchAction) => {
     if (nextAction === action) return;
     setAction(nextAction);
-    setStatus('online');
+    setStatus(nextAction === 'online' ? 'offline' : 'online');
     setPage(1);
     setSelected(new Map());
     setTargetInputs({});
@@ -559,6 +562,21 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
             <span className="batch-safety-chip">平台回读确认</span>
           </div>
           <div className="batch-action-grid" role="group" aria-label="经营动作">
+            <button
+              type="button"
+              className={`batch-action-card ${action === 'online' ? 'is-active' : ''}`}
+              aria-pressed={action === 'online'}
+              onClick={() => chooseAction('online')}
+            >
+              <span className="batch-action-icon" aria-hidden="true">
+                ↑
+              </span>
+              <span>
+                <strong>批量上架</strong>
+                <small>已下架商品 → 库存核验 → 在线</small>
+              </span>
+              <em>已开放</em>
+            </button>
             <button
               type="button"
               className={`batch-action-card ${action === 'offline' ? 'is-active' : ''}`}
@@ -751,6 +769,20 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
               </span>
             </div>
           ) : null}
+          {action === 'online' ? (
+            <div className="batch-inventory-notice" role="note">
+              <span className="batch-action-icon" aria-hidden="true">
+                ✓
+              </span>
+              <span>
+                <strong>上架前锁定并核对 1688 当前 SKU 库存</strong>
+                <small>
+                  系统会先补齐平台库存，再执行上架并同时回读在线状态与逐 SKU
+                  库存；结果未知时必须先核验，不能直接重试。
+                </small>
+              </span>
+            </div>
+          ) : null}
         </div>
       </section>
 
@@ -824,14 +856,22 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
                   <th>商品</th>
                   <th>店铺 / 平台</th>
                   <th>
-                    {action === 'sync_inventory'
-                      ? '1688 权威库存'
-                      : action === 'edit_title'
-                        ? '标题状态'
-                        : '起售价 / SKU'}
+                    {action === 'online'
+                      ? '1688 上架库存'
+                      : action === 'sync_inventory'
+                        ? '1688 权威库存'
+                        : action === 'edit_title'
+                          ? '标题状态'
+                          : '起售价 / SKU'}
                   </th>
                   <th>货源</th>
-                  <th>{action === 'sync_inventory' ? '最近同步' : '库存同步'}</th>
+                  <th>
+                    {action === 'online'
+                      ? '平台库存基线'
+                      : action === 'sync_inventory'
+                        ? '最近同步'
+                        : '库存同步'}
+                  </th>
                   <th>当前状态</th>
                 </tr>
               </thead>
@@ -1038,7 +1078,7 @@ function CandidateRow({
         <small className="batch-cell-secondary">{platformLabel(item.platform)}</small>
       </td>
       <td className="batch-mono">
-        {action === 'sync_inventory' ? (
+        {action === 'sync_inventory' || action === 'online' ? (
           <InventorySummary
             totalStock={item.sourceTotalStock}
             skuCount={item.sourceSkuCount}
@@ -1072,21 +1112,29 @@ function CandidateRow({
             打开待核验任务
           </Link>
         ) : null}
+        {action === 'online' && item.onlineVerificationTaskId ? (
+          <Link
+            className="batch-row-link"
+            href={`/published/batch?task=${encodeURIComponent(item.onlineVerificationTaskId)}`}
+          >
+            打开待核验上架任务
+          </Link>
+        ) : null}
       </td>
       <td>
         <StatusPill value={item.sourceAvailability} />
       </td>
       <td>
         <StatusPill value={item.inventorySyncStatus} />
-        {action === 'sync_inventory' ? (
+        {action === 'sync_inventory' || action === 'online' ? (
           <>
             <small className="batch-cell-secondary">
-              已同步 v{item.syncedInventoryVersion}
+              {action === 'online' ? '平台记录' : '已同步'} v{item.syncedInventoryVersion}
               {item.inventoryLastSyncedAt
                 ? ` · ${new Date(item.inventoryLastSyncedAt).toLocaleString('zh-CN')}`
                 : ' · 尚无成功时间'}
             </small>
-            {!selectable && unavailableReason ? (
+            {action === 'sync_inventory' && !selectable && unavailableReason ? (
               <small className="batch-row-note">{unavailableReason}</small>
             ) : item.inventorySyncError ? (
               <small className="batch-row-note">上次错误：{item.inventorySyncError}</small>
@@ -1448,8 +1496,16 @@ function BatchTask({
     mutationFn: (itemId: string) => api.verifyProductBatchTitle(taskId, itemId),
     onSuccess: refresh,
   });
+  const verifyOnline = useMutation({
+    mutationFn: (itemId: string) => api.verifyProductBatchOnline(taskId, itemId),
+    onSuccess: refresh,
+  });
   const taskMutationPending =
-    execute.isPending || cancel.isPending || retry.isPending || verifyTitle.isPending;
+    execute.isPending ||
+    cancel.isPending ||
+    retry.isPending ||
+    verifyTitle.isPending ||
+    verifyOnline.isPending;
 
   useEffect(() => {
     if (task.data && task.data.status !== 'preview') {
@@ -1460,10 +1516,11 @@ function BatchTask({
   if (task.isLoading && !task.data) return <BatchLoading />;
   if (!task.data) return <BatchError error={task.error} />;
   const value = task.data;
+  const onlineAction = value.action === 'online';
   const titleAction = value.action === 'edit_title';
   const priceAction = value.action === 'edit_price';
   const inventoryAction = value.action === 'sync_inventory';
-  const verifiedAction = titleAction || priceAction || inventoryAction;
+  const verifiedAction = onlineAction || titleAction || priceAction || inventoryAction;
   const active = ACTIVE_TASK_STATUSES.has(value.status);
   const preview = value.status === 'preview';
   const retryableFailedIds = value.items
@@ -1471,6 +1528,12 @@ function BatchTask({
     .map((item) => item.itemId);
   const unknownTitleResultCount = value.items.filter(
     (item) => item.status === 'failed' && item.errorCode === 'TITLE_RESULT_UNKNOWN',
+  ).length;
+  const unknownOnlineResultCount = value.items.filter(
+    (item) =>
+      item.status === 'failed' &&
+      item.errorCode !== null &&
+      ONLINE_RESULT_UNKNOWN_CODES.has(item.errorCode),
   ).length;
   const canRetry = ['failed', 'partial'].includes(value.status) && retryableFailedIds.length > 0;
   const pendingExecution = value.summary.pending + value.summary.retryWait;
@@ -1503,15 +1566,17 @@ function BatchTask({
           </div>
           <p className="batch-section-description">
             {preview
-              ? titleAction
-                ? '确认前请逐件检查当前标题和目标标题；执行后将回读平台标题核验。'
-                : priceAction
-                  ? '确认前请检查每件商品的起售价、SKU 价格区间和调整方向。'
-                  : inventoryAction
-                    ? '确认前请检查同步前库存、1688 权威目标快照及库存版本；执行后将逐 SKU 回读平台核验。'
-                    : '确认前请检查每件商品的当前状态与执行后状态。'
+              ? onlineAction
+                ? '确认前请检查上架前状态、1688 目标库存与版本；执行后只有平台在线且逐 SKU 库存一致才会成功。'
+                : titleAction
+                  ? '确认前请逐件检查当前标题和目标标题；执行后将回读平台标题核验。'
+                  : priceAction
+                    ? '确认前请检查每件商品的起售价、SKU 价格区间和调整方向。'
+                    : inventoryAction
+                      ? '确认前请检查同步前库存、1688 权威目标快照及库存版本；执行后将逐 SKU 回读平台核验。'
+                      : '确认前请检查每件商品的当前状态与执行后状态。'
               : active
-                ? `任务按商品独立${titleAction ? '改标题并回读平台标题' : priceAction ? '改价并回读平台价格' : inventoryAction ? '同步并回读平台库存' : '执行'}；停止只影响尚未开始的条目。`
+                ? `任务按商品独立${onlineAction ? '补齐库存、上架并回读平台状态与库存' : titleAction ? '改标题并回读平台标题' : priceAction ? '改价并回读平台价格' : inventoryAction ? '同步并回读平台库存' : '执行'}；停止只影响尚未开始的条目。`
                 : '任务结果已持久化，可安全刷新或稍后返回查看。'}
           </p>
         </div>
@@ -1595,7 +1660,9 @@ function BatchTask({
                       ? '改价前'
                       : inventoryAction
                         ? '同步前'
-                        : '当前'}
+                        : onlineAction
+                          ? '上架前'
+                          : '当前'}
                 </th>
                 <th>
                   {titleAction
@@ -1604,7 +1671,9 @@ function BatchTask({
                       ? '目标价格'
                       : inventoryAction
                         ? '1688 目标'
-                        : '执行后'}
+                        : onlineAction
+                          ? '上架目标'
+                          : '执行后'}
                 </th>
                 {verifiedAction ? <th>平台回读</th> : null}
                 <th>执行状态</th>
@@ -1617,9 +1686,11 @@ function BatchTask({
                   key={item.itemId}
                   item={item}
                   action={value.action}
-                  verifying={verifyTitle.isPending}
+                  verifyingTitle={verifyTitle.isPending}
+                  verifyingOnline={verifyOnline.isPending}
                   verificationDisabled={taskMutationPending}
                   onVerifyTitle={() => verifyTitle.mutate(item.itemId)}
+                  onVerifyOnline={() => verifyOnline.mutate(item.itemId)}
                 />
               ))}
             </tbody>
@@ -1692,10 +1763,18 @@ function BatchTask({
             </>
           )}
         </div>
-        {[execute.error, cancel.error, retry.error, verifyTitle.error].find(Boolean) ? (
+        {[execute.error, cancel.error, retry.error, verifyTitle.error, verifyOnline.error].find(
+          Boolean,
+        ) ? (
           <p className="batch-bar-error" role="alert">
             {errorMessage(
-              [execute.error, cancel.error, retry.error, verifyTitle.error].find(Boolean),
+              [
+                execute.error,
+                cancel.error,
+                retry.error,
+                verifyTitle.error,
+                verifyOnline.error,
+              ].find(Boolean),
             )}
           </p>
         ) : null}
@@ -1703,6 +1782,12 @@ function BatchTask({
           <p className="batch-bar-error" role="alert">
             {unknownTitleResultCount}{' '}
             个标题更新结果未知。请等待平台处理完成，再逐项执行“核验平台标题”。
+          </p>
+        ) : null}
+        {unknownOnlineResultCount > 0 ? (
+          <p className="batch-bar-error" role="alert">
+            {unknownOnlineResultCount}{' '}
+            个上架结果未知。不要直接重试，请逐项执行“核验平台上架结果”，确认平台在线状态和库存。
           </p>
         ) : null}
       </section>
@@ -1713,16 +1798,21 @@ function BatchTask({
 function TaskItemRow({
   item,
   action,
-  verifying,
+  verifyingTitle,
+  verifyingOnline,
   verificationDisabled,
   onVerifyTitle,
+  onVerifyOnline,
 }: {
   item: ProductBatchItem;
   action: ProductBatchAction;
-  verifying: boolean;
+  verifyingTitle: boolean;
+  verifyingOnline: boolean;
   verificationDisabled: boolean;
   onVerifyTitle: () => void;
+  onVerifyOnline: () => void;
 }) {
+  const onlineAction = action === 'online';
   const titleAction = action === 'edit_title';
   const priceAction = action === 'edit_price';
   const inventoryAction = action === 'sync_inventory';
@@ -1733,11 +1823,16 @@ function TaskItemRow({
     item.desiredPriceRange !== null &&
     !samePriceRange(item.actualPriceRange, item.desiredPriceRange);
   const actualInventoryMismatch =
-    inventoryAction &&
+    (onlineAction || inventoryAction) &&
     item.status === 'succeeded' &&
     item.actualInventory !== null &&
     item.desiredInventory !== null &&
     !sameInventorySnapshot(item.actualInventory, item.desiredInventory);
+  const actualStatusMismatch =
+    onlineAction &&
+    item.status === 'succeeded' &&
+    item.actualStatus !== null &&
+    item.actualStatus !== item.desiredStatus;
   const actualTitleMismatch =
     titleAction &&
     item.status === 'succeeded' &&
@@ -1764,7 +1859,46 @@ function TaskItemRow({
         <strong className="batch-cell-primary">{item.shopName ?? '未命名店铺'}</strong>
         <small className="batch-cell-secondary">{platformLabel(item.platform)}</small>
       </td>
-      {titleAction ? (
+      {onlineAction ? (
+        <>
+          <td className="batch-mono">
+            <StatusPill value={item.beforeStatus} />
+            <InventorySnapshotSummary
+              value={item.beforeInventory}
+              inventoryVersion={item.beforeInventoryVersion}
+              emptyLabel="上架前库存快照缺失"
+            />
+          </td>
+          <td className="batch-mono">
+            <StatusPill value={item.desiredStatus} />
+            <InventorySnapshotSummary
+              value={item.desiredInventory}
+              inventoryVersion={item.desiredInventoryVersion}
+              emptyLabel="1688 上架库存待核验"
+            />
+          </td>
+          <td className="batch-mono">
+            {item.actualStatus ? (
+              <StatusPill value={item.actualStatus} />
+            ) : (
+              <span className="batch-cell-secondary">
+                {item.status === 'succeeded' ? '状态回读待核验' : '执行后回读'}
+              </span>
+            )}
+            <InventorySnapshotSummary
+              value={item.actualInventory}
+              inventoryVersion={item.actualInventory === null ? null : item.desiredInventoryVersion}
+              emptyLabel={item.status === 'succeeded' ? '库存回读待核验' : '执行后回读库存'}
+            />
+            {actualStatusMismatch ? (
+              <small className="batch-row-error">平台状态与上架目标不一致</small>
+            ) : null}
+            {actualInventoryMismatch ? (
+              <small className="batch-row-error">平台库存与 1688 上架快照不一致</small>
+            ) : null}
+          </td>
+        </>
+      ) : titleAction ? (
         <>
           <td>
             <TitleValue value={item.beforeTitle} emptyLabel="修改前标题缺失" />
@@ -1853,7 +1987,19 @@ function TaskItemRow({
             disabled={verificationDisabled}
             onClick={onVerifyTitle}
           >
-            {verifying ? '核验中…' : '核验平台标题'}
+            {verifyingTitle ? '核验中…' : '核验平台标题'}
+          </button>
+        ) : null}
+        {item.status === 'failed' &&
+        item.errorCode !== null &&
+        ONLINE_RESULT_UNKNOWN_CODES.has(item.errorCode) ? (
+          <button
+            type="button"
+            className="batch-inline-action"
+            disabled={verificationDisabled}
+            onClick={onVerifyOnline}
+          >
+            {verifyingOnline ? '核验中…' : '核验平台上架结果'}
           </button>
         ) : null}
       </td>
@@ -1997,6 +2143,10 @@ function statusLabel(value: string): string {
     offline: '已下架',
     draft: '待审核',
     rejected: '已驳回',
+    reviewing: '审核中',
+    approved_pending_online: '审核通过待上架',
+    blocked: '已受限',
+    deleted: '已删除',
     available: '可售',
     out_of_stock: '缺货',
     unknown: '待核验',
@@ -2033,6 +2183,7 @@ function matchesResultFilter(status: string, filter: string): boolean {
 }
 
 function batchActionLabel(action: ProductBatchAction): string {
+  if (action === 'online') return '批量上架';
   if (action === 'edit_title') return '批量改标题';
   if (action === 'edit_price') return '批量改价';
   if (action === 'sync_inventory') return '同步并核验库存';
@@ -2040,6 +2191,7 @@ function batchActionLabel(action: ProductBatchAction): string {
 }
 
 function batchActionVerb(action: ProductBatchAction): string {
+  if (action === 'online') return '上架';
   if (action === 'edit_title') return '改标题';
   if (action === 'edit_price') return '改价';
   if (action === 'sync_inventory') return '同步库存';
@@ -2047,6 +2199,9 @@ function batchActionVerb(action: ProductBatchAction): string {
 }
 
 function batchActionDescription(action: ProductBatchAction): string {
+  if (action === 'online') {
+    return '只选择可安全恢复销售的已下架商品；先锁定 1688 库存，上架后同时回读平台状态与逐 SKU 库存。';
+  }
   if (action === 'edit_title') {
     return '逐件填写目标标题，执行后回读平台确认；可恢复失败项单独重试，结果未知项必须先核验。';
   }
@@ -2063,6 +2218,9 @@ export function isCandidateSelectable(
   item: ProductBatchCandidate,
   action: ProductBatchAction,
 ): boolean {
+  if (action === 'online') {
+    return hasValidOnlineCandidateState(item) && item.onlineEligible === true;
+  }
   if (action === 'edit_title') return item.titleEditable;
   if (action === 'edit_price') return item.priceEditable;
   if (action === 'sync_inventory') return item.inventorySyncEligible;
@@ -2074,6 +2232,12 @@ export function candidateUnavailableReason(
   action: ProductBatchAction,
 ): string | null {
   if (isCandidateSelectable(item, action)) return null;
+  if (action === 'online') {
+    if (!hasValidOnlineCandidateState(item)) {
+      return '商品上架安全状态异常，请刷新商品后再操作';
+    }
+    return item.onlineReason ?? '当前商品不能安全上架，请刷新后重试';
+  }
   if (action === 'edit_title') return item.titleEditReason ?? '当前商品不能安全修改标题';
   if (action === 'edit_price') return item.priceEditReason ?? '当前商品缺少可核对的 SKU 价格';
   if (action === 'sync_inventory') {

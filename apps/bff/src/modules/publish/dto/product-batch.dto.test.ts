@@ -67,6 +67,16 @@ describe('CreateProductBatchPreviewDto', () => {
     await expect(validate(dto)).resolves.toHaveLength(0);
   });
 
+  it('accepts an online preview without edit payloads', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'online',
+      publishedProductIds: ['1', '2'],
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
   it('accepts exact per-product title targets', async () => {
     const dto = plainToInstance(CreateProductBatchPreviewDto, {
       clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
@@ -137,7 +147,7 @@ describe('CreateProductBatchPreviewDto', () => {
 
   it.each([
     ['a duplicate product ID', { action: 'offline', publishedProductIds: ['1', '1'] }],
-    ['an unsupported action', { action: 'online', publishedProductIds: ['1'] }],
+    ['an unsupported action', { action: 'change_source', publishedProductIds: ['1'] }],
     ['a zero product ID', { action: 'offline', publishedProductIds: ['0'] }],
     ['a non-numeric product ID', { action: 'offline', publishedProductIds: ['not-an-id'] }],
     [

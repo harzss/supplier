@@ -245,10 +245,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       { product_id: productId, show_draft: 'true' },
     );
     if (!data) throw new Error('Douyin product detail returned an invalid response');
-    const returnedProductId = stringValue(data.product_id_str ?? data.product_id).trim();
-    if (returnedProductId && returnedProductId !== productId) {
-      throw new Error('Douyin product detail returned a mismatched product ID');
-    }
+    assertProductDetailId(data, productId);
     const title = stringValue(data.name).trim();
     if (!title || title.length > 60) {
       throw new Error('Douyin product detail returned an invalid product title');
@@ -293,10 +290,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       { product_id: productId },
     );
     if (!data) throw new Error('Douyin product detail returned an invalid response');
-    const returnedProductId = stringValue(data.product_id_str ?? data.product_id).trim();
-    if (returnedProductId && returnedProductId !== productId) {
-      throw new Error('Douyin product detail returned a mismatched product ID');
-    }
+    assertProductDetailId(data, productId);
     const status = optionalInteger(data.status);
     const checkStatus = optionalInteger(data.check_status);
     return {
@@ -320,10 +314,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       { product_id: productId },
     );
     if (!data) throw new Error('Douyin product detail returned an invalid response');
-    const returnedProductId = stringValue(data.product_id_str ?? data.product_id).trim();
-    if (returnedProductId && returnedProductId !== productId) {
-      throw new Error('Douyin product detail returned a mismatched product ID');
-    }
+    assertProductDetailId(data, productId);
     const status = optionalInteger(data.status);
     const checkStatus = optionalInteger(data.check_status);
     return {
@@ -344,6 +335,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       { product_id: productId },
     );
     if (!data) throw new Error('Douyin product detail returned an invalid response');
+    assertProductDetailId(data, productId);
     const status = optionalInteger(data.status);
     const checkStatus = optionalInteger(data.check_status);
     return { state: mapProductState(status, checkStatus), status, checkStatus };
@@ -432,6 +424,26 @@ export class DouyinAdapter extends BasePlatformAdapter {
         'isv.business-failed:2010064',
       ],
     );
+  }
+
+  async onlineProduct(token: string, productIdValue: string): Promise<void> {
+    const productId = positiveNumericId(productIdValue, 'product ID');
+    try {
+      await this.requestApi<undefined>(
+        '/product/setOnline',
+        'product.setOnline',
+        'product online',
+        token,
+        { product_id: productId },
+      );
+    } catch (error) {
+      if (mutationResultIsUnknown(error, 'product online')) {
+        throw new PlatformMutationResultUnknownError(
+          error instanceof Error ? error.message : 'Douyin product online result is unknown',
+        );
+      }
+      throw error;
+    }
   }
 
   async getCategoryTree(token: string): Promise<CategoryNode[]> {
@@ -867,6 +879,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | '/product/GetRecommendCategory'
       | '/product/getCatePropertyV2'
       | '/product/qualificationConfig'
+      | '/product/setOnline'
       | '/product/setOffline'
       | '/shop/getShopCategory'
       | '/sku/editPrice'
@@ -886,6 +899,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | 'product.GetRecommendCategory'
       | 'product.getCatePropertyV2'
       | 'product.qualificationConfig'
+      | 'product.setOnline'
       | 'product.setOffline'
       | 'shop.getShopCategory'
       | 'sku.editPrice'
@@ -906,6 +920,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | 'category attributes'
       | 'category qualifications'
       | 'category tree'
+      | 'product online'
       | 'product offline'
       | 'product price update'
       | 'inventory sync'
@@ -1421,10 +1436,19 @@ function mapProductState(
   if (checkStatus === 4) return 'rejected';
   if (checkStatus === 5) return 'blocked';
   if (checkStatus === 7) return 'approved_pending_online';
-  if (status === 0) return 'online';
-  if (status === 1) return 'offline';
-  if (status === 2) return 'deleted';
+  if (checkStatus === 3) {
+    if (status === 0) return 'online';
+    if (status === 1) return 'offline';
+    if (status === 2) return 'deleted';
+  }
   return 'unknown';
+}
+
+function assertProductDetailId(data: DouyinProductDetailData, productId: string): void {
+  const returnedProductId = stringValue(data.product_id_str ?? data.product_id).trim();
+  if (!returnedProductId || returnedProductId !== productId) {
+    throw new Error('Douyin product detail returned a mismatched product ID');
+  }
 }
 
 function parseProductPrices(value: unknown): PlatformProductPriceState['items'] {
@@ -1663,7 +1687,12 @@ function booleanValue(value: unknown): boolean | null {
 }
 
 function optionalInteger(value: unknown): number | null {
-  const number = Number(value);
+  const number =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^-?\d+$/.test(value.trim())
+        ? Number(value.trim())
+        : Number.NaN;
   return Number.isSafeInteger(number) ? number : null;
 }
 

@@ -44,11 +44,16 @@ const TERMINAL_TASK_STATUSES = ['cancelled', 'partial', 'succeeded', 'failed'] a
 const TITLE_WRITE_STARTED_CODE = 'TITLE_WRITE_STARTED';
 const TITLE_RESULT_UNKNOWN_CODE = 'TITLE_RESULT_UNKNOWN';
 const UNRESOLVED_TITLE_CODES = [TITLE_WRITE_STARTED_CODE, TITLE_RESULT_UNKNOWN_CODE] as const;
+const ONLINE_WRITE_STARTED_CODE = 'ONLINE_WRITE_STARTED';
+const ONLINE_RESULT_UNKNOWN_CODE = 'ONLINE_RESULT_UNKNOWN';
+const UNRESOLVED_ONLINE_CODES = [ONLINE_WRITE_STARTED_CODE, ONLINE_RESULT_UNKNOWN_CODE] as const;
 const RETRYABLE_FAILED_CODES = new Set([
   'ITEM_OWNERSHIP_LOST',
   'PLATFORM_ERROR',
   'PRICE_NOT_CONFIRMED',
   'STATUS_NOT_OFFLINE',
+  'STATUS_NOT_ONLINE',
+  'ONLINE_RESULT_NOT_APPLIED',
   'TITLE_WRITE_GUARD_LOST',
   'TITLE_READBACK_FAILED',
   'WORKER_STALE',
@@ -104,6 +109,10 @@ export interface ProductBatchCandidatePage {
     titleEditReason: string | null;
     titleVerificationTaskId: string | null;
     titleVerificationItemId: string | null;
+    onlineEligible: boolean;
+    onlineReason: string | null;
+    onlineVerificationTaskId: string | null;
+    onlineVerificationItemId: string | null;
     sourceProductId: string;
     sourceAvailability: string;
     sourceTotalStock: number;
@@ -155,6 +164,7 @@ export interface ProductBatchItemView {
   platformProductId: string | null;
   beforeStatus: string;
   desiredStatus: string;
+  actualStatus: string | null;
   beforeTitle: string;
   desiredTitle: string | null;
   actualTitle: string | null;
@@ -224,6 +234,7 @@ export interface ProductBatchSummary {
 export class ProductBatchService {
   private readonly demoMode: boolean;
   private lastTaskReconcileAt = 0;
+  private lastTaskReconcileCursor: bigint | null = null;
 
   constructor(
     private readonly config: ConfigService,
@@ -289,12 +300,29 @@ export class ProductBatchService {
         unresolvedTitleByProduct.set(item.publishedProductId, item);
       }
     }
+    const unresolvedOnlineItems = await this.prisma.productBatchItem.findMany({
+      where: {
+        publishedProductId: { in: records.map((record) => record.id) },
+        status: { in: ['running', 'retry_wait', 'failed'] },
+        errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
+        task: { userId: user.userId, action: 'online' },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, taskId: true, publishedProductId: true },
+    });
+    const unresolvedOnlineByProduct = new Map<bigint, (typeof unresolvedOnlineItems)[number]>();
+    for (const item of unresolvedOnlineItems) {
+      if (!unresolvedOnlineByProduct.has(item.publishedProductId)) {
+        unresolvedOnlineByProduct.set(item.publishedProductId, item);
+      }
+    }
     return {
       items: records.map((record) => {
+        const rawDeleted = isRawDeletedProduct(record);
         const prices =
           parseSkuPriceSnapshot(record.skuPriceSnapshot) ??
           priceSnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
-        const priceEditable = record.status === 'online' && !!prices;
+        const priceEditable = !rawDeleted && record.status === 'online' && !!prices;
         const titleEditReason = titleEditUnavailableReason(
           record,
           unresolvedTitleByProduct.has(record.id),
@@ -313,6 +341,14 @@ export class ProductBatchService {
           beforeInventory,
           desiredInventory,
         );
+        const onlineVerification = unresolvedOnlineByProduct.get(record.id);
+        const onlineReason = onlineUnavailableReason(
+          record,
+          beforeInventory,
+          desiredInventory,
+          unresolvedTitleByProduct.has(record.id),
+          Boolean(onlineVerification),
+        );
         return {
           publishedProductId: record.id.toString(),
           title: record.title,
@@ -321,20 +357,26 @@ export class ProductBatchService {
           shopName: record.shop.shopName,
           platform: record.shop.platform,
           platformProductId: record.platformProductId!,
-          status: record.status,
+          status: rawDeleted ? 'rejected' : record.status,
           salePrice: Number(record.salePrice),
           priceRange: prices ? snapshotPriceRange(prices) : null,
           skuCount: prices?.items.length ?? 0,
           priceEditable,
           priceEditReason: priceEditable
             ? null
-            : record.status !== 'online'
-              ? '只有在线商品可以改价'
-              : '缺少可核对的 SKU 价格快照',
+            : rawDeleted
+              ? '平台商品已删除，不能继续操作，请重新铺货'
+              : record.status !== 'online'
+                ? '只有在线商品可以改价'
+                : '缺少可核对的 SKU 价格快照',
           titleEditable: titleEditReason === null,
           titleEditReason,
           titleVerificationTaskId: unresolvedTitle?.taskId.toString() ?? null,
           titleVerificationItemId: unresolvedTitle?.id.toString() ?? null,
+          onlineEligible: onlineReason === null,
+          onlineReason,
+          onlineVerificationTaskId: onlineVerification?.taskId.toString() ?? null,
+          onlineVerificationItemId: onlineVerification?.id.toString() ?? null,
           sourceProductId: record.sourceProduct.productId1688,
           sourceAvailability: record.sourceProduct.availability,
           sourceTotalStock: desiredInventory
@@ -423,6 +465,28 @@ export class ProductBatchService {
       );
       if (staleTarget) {
         throw new ConflictException('商品已在选择后发生变化，请刷新列表并重新确认目标标题');
+      }
+    }
+    if (dto.action === 'online') {
+      const unresolved = await this.prisma.productBatchItem.findFirst({
+        where: {
+          publishedProductId: { in: ids },
+          status: { in: ['running', 'retry_wait', 'failed'] },
+          OR: [
+            {
+              errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
+              task: { userId: user.userId, action: 'edit_title' },
+            },
+            {
+              errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
+              task: { userId: user.userId, action: 'online' },
+            },
+          ],
+        },
+        select: { id: true },
+      });
+      if (unresolved) {
+        throw new ConflictException('所选商品存在结果待核验的平台写入，请先在原批量任务完成核验');
       }
     }
     const byId = new Map(records.map((record) => [record.id.toString(), record]));
@@ -591,11 +655,18 @@ export class ProductBatchService {
     if (retryItems.some((item) => item.errorCode === TITLE_RESULT_UNKNOWN_CODE)) {
       throw new BadRequestException('标题更新结果未知，请先在原批量任务核验平台实际标题');
     }
+    if (retryItems.some((item) => item.errorCode === ONLINE_RESULT_UNKNOWN_CODE)) {
+      throw new BadRequestException('上架结果未知，请先在原批量任务核验平台状态与库存');
+    }
     if (retryItems.some((item) => !isRetryableFailedError(item.errorCode))) {
       throw new BadRequestException('所选条目包含需要重新预览或人工处理的失败项');
     }
     const stale = retryItems.find(
-      (item) => item.publishedProduct.mutationRevision !== item.expectedMutationRevision,
+      (item) =>
+        item.publishedProduct.mutationRevision !==
+        (task.action === 'online'
+          ? onlineBaseMutationRevision(item)
+          : item.expectedMutationRevision),
     );
     if (stale) {
       throw new ConflictException(`商品「${stale.publishedProduct.title}」已变化，请新建批量预览`);
@@ -620,22 +691,47 @@ export class ProductBatchService {
       if (taskUpdated.count !== 1) {
         throw new ConflictException('批量任务状态已变化，请刷新');
       }
-      const itemsUpdated = await tx.productBatchItem.updateMany({
-        where: { id: { in: retryItems.map((item) => item.id) }, status: 'failed' },
-        data: {
-          status: 'pending',
-          attempts: 0,
-          nextRunAt: now,
-          lockedAt: null,
-          lockedBy: null,
-          errorCode: null,
-          errorMessage: null,
-          result: Prisma.JsonNull,
-          startedAt: null,
-          finishedAt: null,
-        },
-      });
-      if (itemsUpdated.count !== retryItems.length) {
+      const resetData = {
+        status: 'pending' as const,
+        attempts: 0,
+        nextRunAt: now,
+        lockedAt: null,
+        lockedBy: null,
+        errorCode: null,
+        errorMessage: null,
+        result: Prisma.JsonNull,
+        startedAt: null,
+        finishedAt: null,
+      };
+      const updatedCount =
+        task.action === 'online'
+          ? (
+              await Promise.all(
+                retryItems.map((item) => {
+                  const baseRevision = onlineBaseMutationRevision(item);
+                  return tx.productBatchItem.updateMany({
+                    where: {
+                      id: item.id,
+                      status: 'failed',
+                      errorCode: item.errorCode,
+                      expectedMutationRevision: item.expectedMutationRevision,
+                      publishedProduct: { mutationRevision: baseRevision },
+                    },
+                    data: {
+                      ...resetData,
+                      expectedMutationRevision: baseRevision,
+                    },
+                  });
+                }),
+              )
+            ).reduce((total, result) => total + result.count, 0)
+          : (
+              await tx.productBatchItem.updateMany({
+                where: { id: { in: retryItems.map((item) => item.id) }, status: 'failed' },
+                data: resetData,
+              })
+            ).count;
+      if (updatedCount !== retryItems.length) {
         throw new ConflictException('失败项状态已变化，请刷新');
       }
     });
@@ -710,6 +806,201 @@ export class ProductBatchService {
     }
   }
 
+  async verifyOnlineResult(
+    user: CurrentUser,
+    taskIdValue: string,
+    itemIdValue: string,
+  ): Promise<ProductBatchTaskView> {
+    this.entitlement.assertFeature(user.plan, 'catalog.batch');
+    const taskId = parsePositiveId(taskIdValue, '批量任务 ID');
+    const itemId = parsePositiveId(itemIdValue, '批量条目 ID');
+    const initial = await this.prisma.productBatchItem.findFirst({
+      where: {
+        id: itemId,
+        taskId,
+        status: 'failed',
+        errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
+        task: { userId: user.userId, action: 'online' },
+      },
+      include: EXECUTION_INCLUDE,
+    });
+    if (!initial) throw new NotFoundException('待核验的上架批量条目不存在');
+
+    const lock = await this.platformProductLocks.acquire(initial.publishedProductId);
+    try {
+      const item = await this.prisma.productBatchItem.findFirst({
+        where: {
+          id: itemId,
+          taskId,
+          status: 'failed',
+          errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
+          task: { userId: user.userId, action: 'online' },
+        },
+        include: EXECUTION_INCLUDE,
+      });
+      if (!item) throw new ConflictException('上架核验状态已变化，请刷新任务');
+      const product = item.publishedProduct;
+      if (!product.platformProductId) throw new BadRequestException('平台商品 ID 不存在');
+      const desiredRecord = jsonRecord(item.desiredSnapshot);
+      const desiredInventory = parseSkuInventorySnapshot(desiredRecord?.skuInventory);
+      const desiredFingerprint = inventoryFingerprintValue(desiredRecord?.inventoryFingerprint);
+      const desiredVersion = positiveIntegerOrNull(desiredRecord?.inventoryVersion);
+      if (!desiredInventory || !desiredFingerprint || !desiredVersion) {
+        throw new ConflictException('上架任务快照不完整，无法自动核验');
+      }
+      const adapter = this.adapters.create(product.shop);
+      if (!adapter.getProductState || !adapter.getProductInventory) {
+        throw new BadRequestException('当前平台无法回读商品状态与库存');
+      }
+      const token = isDemoShop(product.shop)
+        ? 'mock-token'
+        : await this.shopTokens.getAccessToken(product.shop.id, user.userId);
+      await this.platformProductLocks.renew(product.id, lock);
+      const platformState = await adapter.getProductState(token, product.platformProductId);
+
+      if (platformState.state === 'online') {
+        let inventoryState: PlatformProductInventoryState;
+        let confirmedState: PlatformProductState;
+        let actualInventory: ProductBatchInventorySnapshot;
+        try {
+          inventoryState = await adapter.getProductInventory(token, product.platformProductId);
+          confirmedState = await adapter.getProductState(token, product.platformProductId);
+          actualInventory = platformSkuInventorySnapshot(inventoryState);
+        } catch {
+          await this.quarantineOnlineProduct(item, adapter, token, platformState, lock);
+          throw new ConflictException(
+            '平台在线结果回读失败，已下架隔离；核验栅栏保持不变，请稍后再次核验',
+          );
+        }
+        if (inventoryState.state !== 'online' || confirmedState.state !== 'online') {
+          await this.quarantineOnlineProduct(
+            item,
+            adapter,
+            token,
+            confirmedState.state === 'online' ? confirmedState : platformState,
+            lock,
+          );
+          throw new ConflictException(
+            '平台状态与库存回读的售卖状态不一致，已下架隔离，请稍后再次核验',
+          );
+        }
+        if (onlineBaseMutationRevision(item) > item.expectedMutationRevision) {
+          await this.quarantineOnlineProduct(item, adapter, token, confirmedState, lock);
+          await this.platformProductLocks.renew(product.id, lock);
+          await this.resolveOnlineVerificationFailure(
+            item,
+            'ONLINE_LATE_APPLY_QUARANTINED',
+            '已隔离的上架请求延迟生效，商品已再次下架，请重新生成预览',
+            confirmedState,
+            actualInventory,
+          );
+          return toTaskView(await this.requireTask(user.userId, taskId));
+        }
+        try {
+          await this.platformProductLocks.renew(product.id, lock);
+          await this.assertOnlineSnapshotCurrent(
+            item,
+            desiredInventory,
+            desiredFingerprint,
+            desiredVersion,
+          );
+          if (!sameSkuInventory(actualInventory, desiredInventory)) {
+            throw new ProductBatchItemError(
+              'ONLINE_INVENTORY_DRIFT',
+              '平台在线库存与上架目标不一致',
+              false,
+            );
+          }
+          await this.persistVerifiedOnlineResult(
+            item,
+            desiredInventory,
+            desiredFingerprint,
+            desiredVersion,
+            confirmedState,
+          );
+        } catch (error) {
+          await this.quarantineOnlineProduct(item, adapter, token, confirmedState, lock);
+          await this.resolveOnlineVerificationFailure(
+            item,
+            'ONLINE_VERIFICATION_UNSAFE',
+            error instanceof Error ? error.message : '平台上架结果不安全，已下架隔离',
+            confirmedState,
+            actualInventory,
+          );
+        }
+        return toTaskView(await this.requireTask(user.userId, taskId));
+      }
+
+      if (platformState.state === 'offline') {
+        const inventoryState = await adapter.getProductInventory(token, product.platformProductId);
+        const confirmedState = await adapter.getProductState(token, product.platformProductId);
+        if (inventoryState.state !== 'offline' || confirmedState.state !== 'offline') {
+          if (inventoryState.state === 'online' || confirmedState.state === 'online') {
+            await this.quarantineOnlineProduct(
+              item,
+              adapter,
+              token,
+              confirmedState.state === 'online' ? confirmedState : inventoryState,
+              lock,
+            );
+          }
+          throw new ConflictException('平台状态与库存回读尚未稳定确认下架，请稍后再次核验');
+        }
+        if (!onlineVerificationWindowElapsed(item.result)) {
+          throw new ConflictException('平台仍未显示商品在线，请在写入开始 5 分钟后再次核验');
+        }
+        await this.platformProductLocks.renew(product.id, lock);
+        await this.resolveOnlineVerificationFailure(
+          item,
+          'ONLINE_RESULT_NOT_APPLIED',
+          '平台持续确认商品未上架，可重新执行或新建预览',
+          confirmedState,
+        );
+        return toTaskView(await this.requireTask(user.userId, taskId));
+      }
+
+      if (
+        platformState.state === 'rejected' ||
+        platformState.state === 'blocked' ||
+        platformState.state === 'deleted'
+      ) {
+        const inventoryState = await adapter.getProductInventory(token, product.platformProductId);
+        const confirmedState = await adapter.getProductState(token, product.platformProductId);
+        if (
+          confirmedState.state !== platformState.state ||
+          inventoryState.state !== platformState.state
+        ) {
+          if (inventoryState.state === 'online' || confirmedState.state === 'online') {
+            await this.quarantineOnlineProduct(
+              item,
+              adapter,
+              token,
+              confirmedState.state === 'online' ? confirmedState : inventoryState,
+              lock,
+            );
+          }
+          throw new ConflictException('平台终态尚未稳定，请稍后再次核验');
+        }
+        await this.platformProductLocks.renew(product.id, lock);
+        await this.resolveOnlineVerificationFailure(
+          item,
+          'ONLINE_RESULT_REJECTED',
+          confirmedState.state === 'deleted'
+            ? '平台商品已删除，无法重新上架，请重新铺货'
+            : `平台商品状态为 ${confirmedState.state}，请按平台提示处理`,
+          confirmedState,
+        );
+        return toTaskView(await this.requireTask(user.userId, taskId));
+      }
+
+      throw new ConflictException(
+        `平台仍在处理或无法确认上架结果，当前状态为 ${platformState.state}，请稍后再次核验`,
+      );
+    } finally {
+      await this.platformProductLocks.release(initial.publishedProductId, lock);
+    }
+  }
+
   async claimNext(workerId: string): Promise<ProductBatchExecutionRecord | null> {
     await this.recoverStaleItems(new Date());
     await this.reconcileFinishedTasks();
@@ -758,7 +1049,11 @@ export class ProductBatchService {
   }
 
   async executeClaimed(item: ProductBatchExecutionRecord): Promise<'processed' | 'stale'> {
-    if (!['offline', 'edit_title', 'edit_price', 'sync_inventory'].includes(item.task.action)) {
+    if (
+      !['online', 'offline', 'edit_title', 'edit_price', 'sync_inventory'].includes(
+        item.task.action,
+      )
+    ) {
       throw new ProductBatchItemError('ACTION_UNSUPPORTED', '当前批量动作尚未实现', false);
     }
     if (item.task.cancelRequestedAt) return this.cancelClaimedItem(item);
@@ -782,20 +1077,28 @@ export class ProductBatchService {
         return this.completeClaimedItem(current, { reason: 'already_offline' });
       }
       const titleAction = current.task.action === 'edit_title';
+      const onlineAction = current.task.action === 'online';
       if (
         (titleAction && product.status !== 'online' && product.status !== 'offline') ||
-        (!titleAction && product.status !== 'online')
+        (onlineAction && product.status !== 'offline' && product.status !== 'online') ||
+        (!titleAction && !onlineAction && product.status !== 'online')
       ) {
         const actionLabel =
           current.task.action === 'offline'
             ? '下架'
-            : titleAction
-              ? '改标题'
-              : current.task.action === 'edit_price'
-                ? '改价'
-                : '同步库存';
+            : onlineAction
+              ? '上架'
+              : titleAction
+                ? '改标题'
+                : current.task.action === 'edit_price'
+                  ? '改价'
+                  : '同步库存';
         throw new ProductBatchItemError(
-          titleAction ? 'PRODUCT_NOT_PUBLISHED' : 'PRODUCT_NOT_ONLINE',
+          titleAction
+            ? 'PRODUCT_NOT_PUBLISHED'
+            : onlineAction
+              ? 'PRODUCT_NOT_OFFLINE'
+              : 'PRODUCT_NOT_ONLINE',
           `商品当前状态为 ${product.status}，未执行${actionLabel}`,
           false,
         );
@@ -803,7 +1106,7 @@ export class ProductBatchService {
       if (product.mutationRevision !== current.expectedMutationRevision) {
         throw new ProductBatchItemError('PRODUCT_CHANGED', '商品已在预览后发生变化', false);
       }
-      if (titleAction) {
+      if (titleAction || onlineAction) {
         const unresolvedTitleMutation = await this.prisma.productBatchItem.findFirst({
           where: {
             id: { not: current.id },
@@ -821,6 +1124,23 @@ export class ProductBatchService {
             false,
           );
         }
+      }
+      const unresolvedOnlineMutation = await this.prisma.productBatchItem.findFirst({
+        where: {
+          id: { not: current.id },
+          publishedProductId: product.id,
+          status: { in: ['running', 'retry_wait', 'failed'] },
+          errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
+          task: { userId: current.task.userId, action: 'online' },
+        },
+        select: { id: true },
+      });
+      if (unresolvedOnlineMutation) {
+        throw new ProductBatchItemError(
+          'ONLINE_VERIFICATION_REQUIRED',
+          '同一商品存在结果待核验的上架操作，请先核验原任务并重新生成预览',
+          false,
+        );
       }
       const snapshot = jsonRecord(current.beforeSnapshot);
       if (
@@ -848,9 +1168,12 @@ export class ProductBatchService {
         const result = await this.executeInventoryClaimed(current, adapter, token, lock);
         return result;
       }
+      if (current.task.action === 'online') {
+        return this.executeOnlineClaimed(current, adapter, token, lock);
+      }
 
       let recovered = false;
-      let platformState: Record<string, unknown> | null = null;
+      let platformState: PlatformProductState | null = null;
       const demoShop = isDemoShop(product.shop);
       if (!demoShop && !adapter.getProductState) {
         throw new ProductBatchItemError(
@@ -864,7 +1187,7 @@ export class ProductBatchService {
         const state = await adapter.getProductState!(token, product.platformProductId);
         if (isOfflineState(state.state)) {
           recovered = true;
-          platformState = state as unknown as Record<string, unknown>;
+          platformState = state;
         }
       }
 
@@ -876,7 +1199,7 @@ export class ProductBatchService {
           const state = await adapter.getProductState!(token, product.platformProductId);
           if (!isOfflineState(state.state)) throw error;
           recovered = true;
-          platformState = state as unknown as Record<string, unknown>;
+          platformState = state;
         }
       }
 
@@ -889,11 +1212,12 @@ export class ProductBatchService {
             true,
           );
         }
-        platformState = state as unknown as Record<string, unknown>;
+        platformState = state;
       }
 
       await this.platformProductLocks.renew(product.id, lock);
       if (!(await this.assertItemOwned(current))) return 'stale';
+      const persistedStatus = platformState?.state === 'deleted' ? 'rejected' : 'offline';
       const updated = await this.prisma.publishedProduct.updateMany({
         where: {
           id: product.id,
@@ -902,19 +1226,22 @@ export class ProductBatchService {
           status: 'online',
         },
         data: {
-          status: 'offline',
+          status: persistedStatus,
           mutationRevision: { increment: 1 },
           inventorySyncStatus: 'synced',
           inventoryNextRunAt: null,
           inventoryLockedAt: null,
           inventoryLockedBy: null,
-          inventorySyncReason: 'manual_batch_offline',
+          inventorySyncReason:
+            platformState?.state === 'deleted'
+              ? 'platform_product_deleted'
+              : 'manual_batch_offline',
           inventorySyncError: null,
           platformStatusError: null,
           ...(platformState
             ? {
-                platformStatusRaw: integerOrNull(platformState.status),
-                platformCheckStatusRaw: integerOrNull(platformState.checkStatus),
+                platformStatusRaw: platformState.status,
+                platformCheckStatusRaw: platformState.checkStatus,
                 platformStatusSyncedAt: new Date(),
               }
             : {}),
@@ -922,7 +1249,7 @@ export class ProductBatchService {
       });
       if (updated.count !== 1) {
         const latest = await this.prisma.publishedProduct.findUnique({ where: { id: product.id } });
-        if (latest?.status !== 'offline') {
+        if (latest?.status !== persistedStatus) {
           throw new ProductBatchItemError(
             'PRODUCT_CHANGED',
             '商品状态已变化，请新建批量预览',
@@ -931,12 +1258,1094 @@ export class ProductBatchService {
         }
       }
       return this.completeClaimedItem(current, {
-        reason: recovered ? 'platform_result_recovered' : 'offline_confirmed',
+        reason:
+          platformState?.state === 'deleted'
+            ? 'platform_product_deleted'
+            : recovered
+              ? 'platform_result_recovered'
+              : 'offline_confirmed',
         recovered,
         platformState,
       });
     } finally {
       await this.platformProductLocks.release(item.publishedProductId, lock);
+    }
+  }
+
+  private async executeOnlineClaimed(
+    item: ProductBatchExecutionRecord,
+    adapter: PlatformAdapter,
+    token: string,
+    lock: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    const desiredRecord = jsonRecord(item.desiredSnapshot);
+    const desiredInventory = parseSkuInventorySnapshot(desiredRecord?.skuInventory);
+    const desiredFingerprint = inventoryFingerprintValue(desiredRecord?.inventoryFingerprint);
+    const desiredVersion = positiveIntegerOrNull(desiredRecord?.inventoryVersion);
+    if (
+      desiredRecord?.status !== 'online' ||
+      !desiredInventory ||
+      !desiredFingerprint ||
+      !desiredVersion ||
+      inventoryTotalStock(desiredInventory) <= 0
+    ) {
+      throw new ProductBatchItemError(
+        'ONLINE_SNAPSHOT_INVALID',
+        '批量上架快照不完整或没有可售库存，请重新生成预览',
+        false,
+      );
+    }
+    if (!adapter.onlineProduct || !adapter.getProductState || !adapter.getProductInventory) {
+      throw new ProductBatchItemError(
+        'ONLINE_UNSUPPORTED',
+        '当前平台不支持库存可回读的安全上架',
+        false,
+      );
+    }
+
+    await this.assertOnlineSnapshotCurrent(
+      item,
+      desiredInventory,
+      desiredFingerprint,
+      desiredVersion,
+    );
+    const platformBefore = await adapter.getProductState(token, product.platformProductId!);
+    if (platformBefore.state === 'online') {
+      if (!(await this.markOnlineVerificationRequired(item))) {
+        await this.quarantineOnlineProduct(item, adapter, token, platformBefore, lock);
+        return 'stale';
+      }
+      let inventoryState: PlatformProductInventoryState;
+      let confirmedState: PlatformProductState;
+      let actualInventory: ProductBatchInventorySnapshot;
+      try {
+        inventoryState = await adapter.getProductInventory(token, product.platformProductId!);
+        confirmedState = await adapter.getProductState(token, product.platformProductId!);
+        actualInventory = platformSkuInventorySnapshot(inventoryState);
+      } catch (error) {
+        await this.quarantineOnlineWithFence(
+          item,
+          adapter,
+          token,
+          '平台在线商品回读失败',
+          platformBefore,
+          lock,
+          true,
+        );
+        throw new ProductBatchItemError(
+          'ONLINE_PLATFORM_READBACK_FAILED_QUARANTINED',
+          `平台在线商品回读失败，已下架隔离：${safeErrorMessage(error)}`,
+          false,
+        );
+      }
+      if (inventoryState.state !== 'online' || confirmedState.state !== 'online') {
+        await this.quarantineOnlineWithFence(
+          item,
+          adapter,
+          token,
+          '平台在线商品状态与库存回读不一致',
+          confirmedState.state === 'online' ? confirmedState : platformBefore,
+          lock,
+          true,
+        );
+        throw new ProductBatchItemError(
+          'ONLINE_READBACK_INCONSISTENT',
+          '平台状态与库存回读的售卖状态不一致，已下架隔离',
+          false,
+        );
+      }
+      if (!sameSkuInventory(actualInventory, desiredInventory)) {
+        await this.quarantineOnlineWithFence(
+          item,
+          adapter,
+          token,
+          '平台在线商品库存与目标不一致',
+          platformBefore,
+          lock,
+          true,
+        );
+        throw new ProductBatchItemError(
+          'ONLINE_PLATFORM_DRIFT_QUARANTINED',
+          '平台商品已意外在线且库存不一致，已重新下架，请核验库存后再预览',
+          false,
+        );
+      }
+      try {
+        return await this.persistOnlineResult(
+          item,
+          desiredInventory,
+          desiredFingerprint,
+          desiredVersion,
+          confirmedState,
+          true,
+          lock,
+          adapter,
+          token,
+        );
+      } catch (error) {
+        await this.quarantineOnlineWithFence(
+          item,
+          adapter,
+          token,
+          '平台在线恢复结果无法安全提交',
+          confirmedState,
+          lock,
+          true,
+        );
+        throw error;
+      }
+    }
+    if (
+      platformBefore.state === 'rejected' ||
+      platformBefore.state === 'blocked' ||
+      platformBefore.state === 'deleted'
+    ) {
+      return this.persistRejectedOnlineResult(item, platformBefore, lock);
+    }
+    if (platformBefore.state !== 'offline') {
+      await this.quarantineOnlineWithFence(
+        item,
+        adapter,
+        token,
+        `平台商品状态为 ${platformBefore.state}`,
+        platformBefore,
+        lock,
+      );
+      throw new ProductBatchItemError(
+        'ONLINE_STATE_INVALID',
+        `平台商品状态为 ${platformBefore.state}，已下架隔离并停止批量上架`,
+        false,
+      );
+    }
+
+    let platformInventoryState = await adapter.getProductInventory(
+      token,
+      product.platformProductId!,
+    );
+    if (platformInventoryState.state !== 'offline') {
+      await this.quarantineOnlineWithFence(
+        item,
+        adapter,
+        token,
+        '平台状态与库存回读不一致',
+        platformInventoryState,
+        lock,
+      );
+      throw new ProductBatchItemError(
+        'ONLINE_READBACK_INCONSISTENT',
+        '平台状态与库存回读不一致，已下架隔离并停止上架',
+        false,
+      );
+    }
+    let actualInventory = platformSkuInventorySnapshot(platformInventoryState);
+    if (!sameInventorySkuIds(actualInventory, desiredInventory)) {
+      throw new ProductBatchItemError(
+        'ONLINE_SKU_MISMATCH',
+        '平台与 1688 的 SKU 集合不一致，不能安全上架',
+        false,
+      );
+    }
+    const pendingInventory = pendingInventoryItems(actualInventory, desiredInventory);
+    if (pendingInventory.length > 0) {
+      await this.assertOnlineSnapshotCurrent(
+        item,
+        desiredInventory,
+        desiredFingerprint,
+        desiredVersion,
+      );
+      await this.platformProductLocks.renew(product.id, lock);
+      if (!(await this.assertItemOwned(item))) return 'stale';
+      let inventoryMutationError: unknown;
+      try {
+        await adapter.syncInventory(token, {
+          platformProductId: product.platformProductId!,
+          idempotencyKey: batchOnlineInventoryIdempotencyKey(
+            item.id,
+            desiredVersion,
+            desiredFingerprint,
+            pendingInventory,
+          ),
+          items: pendingInventory,
+        });
+      } catch (error) {
+        inventoryMutationError = error;
+      }
+      try {
+        platformInventoryState = await adapter.getProductInventory(
+          token,
+          product.platformProductId!,
+        );
+      } catch (readbackError) {
+        if (inventoryMutationError) throw inventoryMutationError;
+        throw readbackError;
+      }
+      if (platformInventoryState.state !== 'offline') {
+        await this.quarantineOnlineWithFence(
+          item,
+          adapter,
+          token,
+          '库存补齐后平台商品状态发生变化',
+          platformInventoryState,
+          lock,
+        );
+        throw new ProductBatchItemError(
+          'ONLINE_READBACK_INCONSISTENT',
+          '库存同步期间平台商品状态发生变化',
+          false,
+        );
+      }
+      actualInventory = platformSkuInventorySnapshot(platformInventoryState);
+      if (!sameSkuInventory(actualInventory, desiredInventory)) {
+        throw new ProductBatchItemError(
+          isPlatformMutationResultUnknown(inventoryMutationError)
+            ? 'ONLINE_INVENTORY_RESULT_UNKNOWN'
+            : 'ONLINE_INVENTORY_NOT_CONFIRMED',
+          isPlatformMutationResultUnknown(inventoryMutationError)
+            ? '库存写入结果未知，商品保持下架；请核验库存后重新预览'
+            : '平台尚未确认上架所需的全部 SKU 库存，商品保持下架',
+          false,
+        );
+      }
+    }
+
+    await this.assertOnlineSnapshotCurrent(
+      item,
+      desiredInventory,
+      desiredFingerprint,
+      desiredVersion,
+    );
+    const stateBeforeWrite = await adapter.getProductState(token, product.platformProductId!);
+    if (
+      stateBeforeWrite.state === 'rejected' ||
+      stateBeforeWrite.state === 'blocked' ||
+      stateBeforeWrite.state === 'deleted'
+    ) {
+      return this.persistRejectedOnlineResult(item, stateBeforeWrite, lock);
+    }
+    if (stateBeforeWrite.state !== 'offline') {
+      await this.quarantineOnlineWithFence(
+        item,
+        adapter,
+        token,
+        '上架写入前平台商品状态发生变化',
+        stateBeforeWrite,
+        lock,
+      );
+      throw new ProductBatchItemError(
+        'ONLINE_STATE_CHANGED',
+        '平台商品状态在上架前发生变化，已下架隔离并停止执行',
+        false,
+      );
+    }
+    platformInventoryState = await adapter.getProductInventory(token, product.platformProductId!);
+    actualInventory = platformSkuInventorySnapshot(platformInventoryState);
+    if (platformInventoryState.state !== 'offline') {
+      await this.quarantineOnlineWithFence(
+        item,
+        adapter,
+        token,
+        '上架写入前平台库存状态未确认',
+        platformInventoryState,
+        lock,
+      );
+      throw new ProductBatchItemError(
+        'ONLINE_PREFLIGHT_NOT_CONFIRMED',
+        '上架前平台离线状态未能再次确认，已停止执行',
+        false,
+      );
+    }
+    if (!sameSkuInventory(actualInventory, desiredInventory)) {
+      throw new ProductBatchItemError(
+        'ONLINE_PREFLIGHT_NOT_CONFIRMED',
+        '上架前平台 SKU 库存未能再次确认，已停止执行',
+        false,
+      );
+    }
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.markOnlineWriteStarted(item, desiredFingerprint, desiredVersion))) {
+      return this.cancelClaimedItem(item);
+    }
+    try {
+      await this.platformProductLocks.renew(product.id, lock);
+    } catch (_error) {
+      throw new ProductBatchItemError(
+        'ONLINE_WRITE_GUARD_LOST',
+        '上架写入前商品锁已失效，平台请求尚未提交',
+        true,
+      );
+    }
+    if (!(await this.assertItemOwned(item))) {
+      throw new ProductBatchItemError(
+        'ONLINE_WRITE_GUARD_LOST',
+        '上架写入前任务所有权已变化，平台请求尚未提交',
+        true,
+      );
+    }
+    await this.assertOnlineSnapshotCurrent(
+      item,
+      desiredInventory,
+      desiredFingerprint,
+      desiredVersion,
+    );
+
+    let mutationError: unknown;
+    try {
+      await adapter.onlineProduct(token, product.platformProductId!);
+    } catch (error) {
+      mutationError = error;
+    }
+
+    try {
+      await this.platformProductLocks.renew(product.id, lock);
+    } catch (_error) {
+      return this.quarantineUnknownOnlineResult(item, adapter, token, '上架请求后商品锁失效');
+    }
+    if (!(await this.renewClaimedItemLease(item, false))) {
+      return this.quarantineUnknownOnlineResult(
+        item,
+        adapter,
+        token,
+        '上架请求后批量任务执行权失效',
+        undefined,
+        lock,
+      );
+    }
+
+    let platformAfter: PlatformProductState;
+    let confirmedAfter: PlatformProductState;
+    let inventoryState: PlatformProductInventoryState;
+    let inventoryAfter: ProductBatchInventorySnapshot;
+    try {
+      platformAfter = await adapter.getProductState(token, product.platformProductId!);
+      inventoryState = await adapter.getProductInventory(token, product.platformProductId!);
+      confirmedAfter = await adapter.getProductState(token, product.platformProductId!);
+      inventoryAfter = platformSkuInventorySnapshot(inventoryState);
+    } catch (_error) {
+      return this.quarantineUnknownOnlineResult(
+        item,
+        adapter,
+        token,
+        '上架写入后无法可靠回读平台状态与库存',
+        undefined,
+        lock,
+      );
+    }
+    if (
+      platformAfter.state !== confirmedAfter.state ||
+      inventoryState.state !== confirmedAfter.state
+    ) {
+      const knownOnlineState =
+        confirmedAfter.state === 'online'
+          ? confirmedAfter
+          : platformAfter.state === 'online'
+            ? platformAfter
+            : inventoryState.state === 'online'
+              ? inventoryState
+              : undefined;
+      return this.quarantineUnknownOnlineResult(
+        item,
+        adapter,
+        token,
+        '平台状态与库存双回读未稳定收敛',
+        knownOnlineState,
+        lock,
+      );
+    }
+    platformAfter = confirmedAfter;
+
+    if (platformAfter.state === 'online') {
+      try {
+        await this.assertOnlineSnapshotCurrent(
+          item,
+          desiredInventory,
+          desiredFingerprint,
+          desiredVersion,
+        );
+        if (!sameSkuInventory(inventoryAfter, desiredInventory)) {
+          throw new ProductBatchItemError(
+            'ONLINE_INVENTORY_DRIFT',
+            '平台上架后的 SKU 库存与 1688 目标不一致',
+            false,
+          );
+        }
+        return await this.persistOnlineResult(
+          item,
+          desiredInventory,
+          desiredFingerprint,
+          desiredVersion,
+          platformAfter,
+          Boolean(mutationError),
+          lock,
+          adapter,
+          token,
+        );
+      } catch (error) {
+        await this.quarantineOnlineProduct(item, adapter, token, platformAfter, lock);
+        if (error instanceof ProductBatchItemError) throw error;
+        throw new ProductBatchItemError(
+          'ONLINE_COMMIT_FAILED',
+          '平台已上架但本地结果未能安全提交，已重新下架，请重新预览',
+          false,
+        );
+      }
+    }
+    if (
+      platformAfter.state === 'reviewing' ||
+      platformAfter.state === 'approved_pending_online' ||
+      platformAfter.state === 'draft' ||
+      platformAfter.state === 'unknown'
+    ) {
+      return this.quarantineUnknownOnlineResult(
+        item,
+        adapter,
+        token,
+        `平台上架结果尚未收敛，当前状态为 ${platformAfter.state}`,
+        platformAfter,
+        lock,
+      );
+    }
+    if (platformAfter.state === 'offline') {
+      if (mutationError && !isPlatformMutationResultUnknown(mutationError)) {
+        throw new ProductBatchItemError(
+          'ONLINE_UPDATE_FAILED',
+          safeErrorMessage(mutationError),
+          false,
+        );
+      }
+      return this.quarantineUnknownOnlineResult(
+        item,
+        adapter,
+        token,
+        '平台仍显示商品下架，上架请求结果尚未收敛',
+        undefined,
+        lock,
+      );
+    }
+    return this.persistRejectedOnlineResult(item, platformAfter, lock);
+  }
+
+  private async markOnlineWriteStarted(
+    item: ProductBatchExecutionRecord,
+    desiredFingerprint: string,
+    desiredVersion: number,
+  ): Promise<boolean> {
+    const now = new Date();
+    const updated = await this.prisma.productBatchItem.updateMany({
+      where: {
+        ...ownedItemWhere(item),
+        task: { cancelRequestedAt: null },
+      },
+      data: {
+        lockedAt: now,
+        result: {
+          phase: 'platform_write_started',
+          onlineWriteStartedAt: now.toISOString(),
+          inventoryFingerprint: desiredFingerprint,
+          inventoryVersion: desiredVersion,
+        } as Prisma.InputJsonValue,
+        errorCode: ONLINE_WRITE_STARTED_CODE,
+        errorMessage: '平台上架写入已开始，正在回读确认状态与库存',
+      },
+    });
+    return updated.count === 1;
+  }
+
+  private async markOnlineVerificationRequired(
+    item: ProductBatchExecutionRecord,
+  ): Promise<boolean> {
+    const now = new Date();
+    const updated = await this.prisma.productBatchItem.updateMany({
+      where: ownedItemWhere(item),
+      data: {
+        lockedAt: now,
+        result: {
+          ...(jsonRecord(item.result) ?? {}),
+          phase: 'platform_online_detected',
+          onlineWriteStartedAt: now.toISOString(),
+        } as Prisma.InputJsonValue,
+        errorCode: ONLINE_RESULT_UNKNOWN_CODE,
+        errorMessage: '平台商品已在线，必须完成状态与库存强回读或下架隔离',
+      },
+    });
+    return updated.count === 1;
+  }
+
+  private async quarantineUnknownOnlineResult(
+    item: ProductBatchExecutionRecord,
+    adapter: PlatformAdapter,
+    token: string,
+    reason: string,
+    knownState?: PlatformProductState,
+    lock?: string,
+  ): Promise<never> {
+    try {
+      await this.quarantineOnlineProduct(item, adapter, token, knownState, lock);
+    } catch (error) {
+      throw new ProductBatchItemError(
+        ONLINE_RESULT_UNKNOWN_CODE,
+        `${reason}，且自动下架隔离未确认：${safeErrorMessage(error)}`,
+        false,
+      );
+    }
+    throw new ProductBatchItemError(
+      ONLINE_RESULT_UNKNOWN_CODE,
+      `${reason}，已下架隔离；请在核验窗口结束后确认平台实际状态`,
+      false,
+    );
+  }
+
+  private async quarantineOnlineWithFence(
+    item: ProductBatchExecutionRecord,
+    adapter: PlatformAdapter,
+    token: string,
+    reason: string,
+    knownState: PlatformProductState | undefined,
+    lock: string,
+    fenceAlreadyMarked = false,
+  ): Promise<void> {
+    if (!fenceAlreadyMarked && !(await this.markOnlineVerificationRequired(item))) {
+      throw new ProductBatchItemError(
+        ONLINE_RESULT_UNKNOWN_CODE,
+        `${reason}，但批量任务核验栅栏建立失败，请立即人工核验`,
+        false,
+      );
+    }
+    try {
+      await this.quarantineOnlineProduct(item, adapter, token, knownState, lock);
+    } catch (error) {
+      throw new ProductBatchItemError(
+        ONLINE_RESULT_UNKNOWN_CODE,
+        `${reason}，且自动下架隔离未确认：${safeErrorMessage(error)}`,
+        false,
+      );
+    }
+  }
+
+  private async assertOnlineSnapshotCurrent(
+    item: ProductBatchExecutionRecord,
+    desiredInventory: ProductBatchInventorySnapshot,
+    desiredFingerprint: string,
+    desiredVersion: number,
+  ): Promise<void> {
+    const expectedRevision = onlineBaseMutationRevision(item);
+    const current = await this.prisma.publishedProduct.findUnique({
+      where: { id: item.publishedProductId },
+      include: { sourceProduct: true },
+    });
+    const currentInventory = parseSkuInventorySnapshot(current?.skuInventorySnapshot);
+    if (
+      !current ||
+      current.platformProductId !== item.publishedProduct.platformProductId ||
+      (current.status !== 'offline' && current.status !== 'online') ||
+      current.mutationRevision !== expectedRevision ||
+      current.inventorySyncStatus === 'syncing' ||
+      current.sourceProduct.availability !== 'available' ||
+      current.sourceProduct.inventoryFingerprint !== desiredFingerprint ||
+      current.sourceProduct.inventoryVersion !== desiredVersion ||
+      !currentInventory ||
+      !sameInventorySkuIds(currentInventory, desiredInventory)
+    ) {
+      throw new ProductBatchItemError(
+        'ONLINE_SOURCE_CHANGED',
+        '1688 货源、商品状态或库存快照已变化，不能继续上架',
+        false,
+      );
+    }
+  }
+
+  private async persistOnlineResult(
+    item: ProductBatchExecutionRecord,
+    desiredInventory: ProductBatchInventorySnapshot,
+    desiredFingerprint: string,
+    desiredVersion: number,
+    platformState: PlatformProductState,
+    recovered: boolean,
+    lock: string,
+    adapter: PlatformAdapter,
+    token: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    const expectedRevision = onlineBaseMutationRevision(item);
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.assertItemOwned(item))) {
+      await this.quarantineOnlineProduct(item, adapter, token, platformState, lock);
+      return 'stale';
+    }
+    const now = new Date();
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const productUpdated = await tx.publishedProduct.updateMany({
+          where: {
+            id: product.id,
+            platformProductId: product.platformProductId,
+            mutationRevision: expectedRevision,
+            status: { in: ['offline', 'online'] },
+            sourceProduct: {
+              availability: 'available',
+              inventoryFingerprint: desiredFingerprint,
+              inventoryVersion: desiredVersion,
+            },
+          },
+          data: {
+            status: 'online',
+            skuInventorySnapshot: desiredInventory as unknown as Prisma.InputJsonValue,
+            inventoryFingerprint: desiredFingerprint,
+            inventoryTargetFingerprint: desiredFingerprint,
+            inventoryVersion: desiredVersion,
+            inventoryTargetVersion: desiredVersion,
+            inventorySyncStatus: 'synced',
+            inventorySyncReason: 'manual_batch_online',
+            inventorySyncError: null,
+            inventoryNextRunAt: null,
+            inventoryLockedAt: null,
+            inventoryLockedBy: null,
+            inventoryLastSyncedAt: now,
+            mutationRevision: { increment: 1 },
+            platformStatusRaw: platformState.status,
+            platformCheckStatusRaw: platformState.checkStatus,
+            platformStatusSyncedAt: now,
+            platformStatusError: null,
+          },
+        });
+        if (productUpdated.count !== 1) {
+          throw new ProductBatchItemError(
+            'ONLINE_COMMIT_CONFLICT',
+            '商品已在上架期间发生变化，不能提交本地结果',
+            false,
+          );
+        }
+        const itemUpdated = await tx.productBatchItem.updateMany({
+          where: ownedItemWhere(item),
+          data: {
+            status: 'succeeded',
+            result: {
+              reason: recovered ? 'platform_online_recovered' : 'online_confirmed',
+              recovered,
+              actualStatus: 'online',
+              actualInventory: desiredInventory,
+              platformState,
+            } as unknown as Prisma.InputJsonValue,
+            errorCode: null,
+            errorMessage: null,
+            lockedAt: null,
+            lockedBy: null,
+            finishedAt: now,
+          },
+        });
+        if (itemUpdated.count !== 1) {
+          throw new ProductBatchItemError(
+            'ONLINE_COMMIT_CONFLICT',
+            '批量任务执行权已变化，不能提交上架结果',
+            false,
+          );
+        }
+      });
+    } catch (error) {
+      if (
+        !(await this.onlineCommitWasPersisted(
+          item,
+          desiredInventory,
+          desiredFingerprint,
+          desiredVersion,
+        ))
+      ) {
+        throw error;
+      }
+    }
+    try {
+      await this.refreshTask(item.taskId);
+    } catch {
+      // 条目与商品已原子提交；后续 worker 对账会修复任务汇总，不能反向下架平台商品。
+    }
+    return 'processed';
+  }
+
+  private async persistRejectedOnlineResult(
+    item: ProductBatchExecutionRecord,
+    platformState: PlatformProductState,
+    lock: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    const expectedRevision = onlineBaseMutationRevision(item);
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.assertItemOwned(item))) return 'stale';
+    const now = new Date();
+    const errorMessage = `平台商品状态为 ${platformState.state}，上架未生效，请按平台提示处理`;
+    await this.prisma.$transaction(async (tx) => {
+      const productUpdated = await tx.publishedProduct.updateMany({
+        where: {
+          id: product.id,
+          platformProductId: product.platformProductId,
+          mutationRevision: expectedRevision,
+          status: { in: ['offline', 'online'] },
+        },
+        data: {
+          status: 'rejected',
+          mutationRevision: { increment: 1 },
+          platformStatusRaw: platformState.status,
+          platformCheckStatusRaw: platformState.checkStatus,
+          platformStatusSyncedAt: now,
+          platformStatusError: errorMessage,
+        },
+      });
+      if (productUpdated.count !== 1) {
+        throw new ProductBatchItemError(
+          'ONLINE_COMMIT_CONFLICT',
+          '商品已在上架驳回结果提交期间发生变化，请刷新后核验',
+          false,
+        );
+      }
+      const itemUpdated = await tx.productBatchItem.updateMany({
+        where: ownedItemWhere(item),
+        data: {
+          status: 'failed',
+          result: {
+            reason: 'platform_online_rejected',
+            actualStatus: platformState.state,
+            platformState,
+          } as unknown as Prisma.InputJsonValue,
+          errorCode: 'ONLINE_RESULT_REJECTED',
+          errorMessage,
+          lockedAt: null,
+          lockedBy: null,
+          finishedAt: now,
+        },
+      });
+      if (itemUpdated.count !== 1) {
+        throw new ProductBatchItemError(
+          'ONLINE_COMMIT_CONFLICT',
+          '批量任务执行权已变化，不能提交平台驳回结果',
+          false,
+        );
+      }
+    });
+    try {
+      await this.refreshTask(item.taskId);
+    } catch {
+      // 商品与条目已原子提交，后续 worker 会恢复任务汇总。
+    }
+    return 'processed';
+  }
+
+  private async persistVerifiedOnlineResult(
+    item: ProductBatchExecutionRecord,
+    desiredInventory: ProductBatchInventorySnapshot,
+    desiredFingerprint: string,
+    desiredVersion: number,
+    platformState: PlatformProductState,
+  ): Promise<void> {
+    const now = new Date();
+    const expectedRevision = onlineBaseMutationRevision(item);
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const productUpdated = await tx.publishedProduct.updateMany({
+          where: {
+            id: item.publishedProductId,
+            platformProductId: item.publishedProduct.platformProductId,
+            mutationRevision: expectedRevision,
+            status: { in: ['offline', 'online'] },
+            sourceProduct: {
+              availability: 'available',
+              inventoryFingerprint: desiredFingerprint,
+              inventoryVersion: desiredVersion,
+            },
+          },
+          data: {
+            status: 'online',
+            skuInventorySnapshot: desiredInventory as unknown as Prisma.InputJsonValue,
+            inventoryFingerprint: desiredFingerprint,
+            inventoryTargetFingerprint: desiredFingerprint,
+            inventoryVersion: desiredVersion,
+            inventoryTargetVersion: desiredVersion,
+            inventorySyncStatus: 'synced',
+            inventorySyncReason: 'manual_batch_online_verified',
+            inventorySyncError: null,
+            inventoryNextRunAt: null,
+            inventoryLockedAt: null,
+            inventoryLockedBy: null,
+            inventoryLastSyncedAt: now,
+            mutationRevision: { increment: 1 },
+            platformStatusRaw: platformState.status,
+            platformCheckStatusRaw: platformState.checkStatus,
+            platformStatusSyncedAt: now,
+            platformStatusError: null,
+          },
+        });
+        if (productUpdated.count !== 1) {
+          throw new ConflictException('商品已在核验期间变化，已停止提交上架结果');
+        }
+        const itemUpdated = await tx.productBatchItem.updateMany({
+          where: {
+            id: item.id,
+            taskId: item.taskId,
+            status: 'failed',
+            errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
+          },
+          data: {
+            status: 'succeeded',
+            result: {
+              ...(jsonRecord(item.result) ?? {}),
+              reason: 'platform_online_verified',
+              recovered: true,
+              actualStatus: 'online',
+              actualInventory: desiredInventory,
+              platformState,
+            } as unknown as Prisma.InputJsonValue,
+            errorCode: null,
+            errorMessage: null,
+            finishedAt: now,
+          },
+        });
+        if (itemUpdated.count !== 1) throw new ConflictException('上架核验状态已变化，请刷新');
+      });
+    } catch (error) {
+      if (
+        !(await this.onlineCommitWasPersisted(
+          item,
+          desiredInventory,
+          desiredFingerprint,
+          desiredVersion,
+        ))
+      ) {
+        throw error;
+      }
+    }
+    try {
+      await this.refreshTask(item.taskId);
+    } catch {
+      // 核验结果已原子提交；任务汇总可由后续对账恢复。
+    }
+  }
+
+  private async onlineCommitWasPersisted(
+    item: ProductBatchExecutionRecord,
+    desiredInventory: ProductBatchInventorySnapshot,
+    desiredFingerprint: string,
+    desiredVersion: number,
+  ): Promise<boolean> {
+    const expectedRevision = onlineBaseMutationRevision(item);
+    const [product, batchItem] = await Promise.all([
+      this.prisma.publishedProduct.findUnique({ where: { id: item.publishedProductId } }),
+      this.prisma.productBatchItem.findUnique({ where: { id: item.id } }),
+    ]);
+    const actualInventory = parseSkuInventorySnapshot(product?.skuInventorySnapshot);
+    const result = jsonRecord(batchItem?.result);
+    const resultInventory = parseSkuInventorySnapshot(result?.actualInventory);
+    return (
+      product?.platformProductId === item.publishedProduct.platformProductId &&
+      product.status === 'online' &&
+      product.mutationRevision === expectedRevision + 1 &&
+      product.inventoryFingerprint === desiredFingerprint &&
+      product.inventoryTargetFingerprint === desiredFingerprint &&
+      product.inventoryVersion === desiredVersion &&
+      product.inventoryTargetVersion === desiredVersion &&
+      product.inventorySyncStatus === 'synced' &&
+      !!actualInventory &&
+      sameSkuInventory(actualInventory, desiredInventory) &&
+      batchItem?.taskId === item.taskId &&
+      batchItem.status === 'succeeded' &&
+      batchItem.errorCode === null &&
+      result?.actualStatus === 'online' &&
+      !!resultInventory &&
+      sameSkuInventory(resultInventory, desiredInventory)
+    );
+  }
+
+  private async resolveOnlineVerificationFailure(
+    item: ProductBatchExecutionRecord,
+    errorCode: string,
+    errorMessage: string,
+    platformState: PlatformProductState,
+    actualInventory?: ProductBatchInventorySnapshot,
+  ): Promise<void> {
+    const now = new Date();
+    const expectedRevision = onlineBaseMutationRevision(item);
+    const latestItem = await this.prisma.productBatchItem.findUnique({
+      where: { id: item.id },
+      select: { result: true },
+    });
+    const existingResult = jsonRecord(latestItem?.result) ?? jsonRecord(item.result) ?? {};
+    await this.prisma.$transaction(async (tx) => {
+      if (
+        platformState.state === 'rejected' ||
+        platformState.state === 'blocked' ||
+        platformState.state === 'deleted'
+      ) {
+        const productUpdated = await tx.publishedProduct.updateMany({
+          where: {
+            id: item.publishedProductId,
+            platformProductId: item.publishedProduct.platformProductId,
+            mutationRevision: expectedRevision,
+          },
+          data: {
+            status: 'rejected',
+            mutationRevision: { increment: 1 },
+            platformStatusRaw: platformState.status,
+            platformCheckStatusRaw: platformState.checkStatus,
+            platformStatusSyncedAt: now,
+            platformStatusError: errorMessage,
+          },
+        });
+        if (productUpdated.count !== 1) {
+          throw new ConflictException(
+            '商品已在上架核验期间发生变化，驳回状态未提交且核验栅栏保持不变',
+          );
+        }
+      }
+      const itemUpdated = await tx.productBatchItem.updateMany({
+        where: {
+          id: item.id,
+          taskId: item.taskId,
+          status: 'failed',
+          errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
+        },
+        data: {
+          result: {
+            ...existingResult,
+            actualStatus: platformState.state,
+            ...(actualInventory ? { actualInventory } : {}),
+            platformState,
+          } as unknown as Prisma.InputJsonValue,
+          errorCode,
+          errorMessage,
+          finishedAt: now,
+        },
+      });
+      if (itemUpdated.count !== 1) throw new ConflictException('上架核验状态已变化，请刷新');
+    });
+    await this.refreshTask(item.taskId);
+  }
+
+  private async quarantineOnlineProduct(
+    item: ProductBatchExecutionRecord,
+    adapter: PlatformAdapter,
+    token: string,
+    knownState?: PlatformProductState,
+    lock?: string,
+  ): Promise<number> {
+    const product = item.publishedProduct;
+    const expectedRevision = onlineBaseMutationRevision(item);
+    if (!adapter.getProductState) {
+      throw new ProductBatchItemError(
+        'ONLINE_QUARANTINE_UNSUPPORTED',
+        '平台无法回读商品状态，不能确认安全下架',
+        false,
+      );
+    }
+    const quarantineLock = lock ?? (await this.platformProductLocks.acquire(product.id));
+    const acquiredQuarantineLock = !lock;
+    try {
+      await this.platformProductLocks.renew(product.id, quarantineLock);
+      const [current, currentItem] = await Promise.all([
+        this.prisma.publishedProduct.findUnique({
+          where: { id: product.id },
+          select: { platformProductId: true, mutationRevision: true, status: true },
+        }),
+        this.prisma.productBatchItem.findUnique({
+          where: { id: item.id },
+          select: {
+            id: true,
+            taskId: true,
+            publishedProductId: true,
+            status: true,
+            errorCode: true,
+            result: true,
+          },
+        }),
+      ]);
+      if (
+        !current ||
+        current.platformProductId !== product.platformProductId ||
+        current.mutationRevision !== expectedRevision ||
+        (current.status !== 'online' && current.status !== 'offline') ||
+        !currentItem ||
+        currentItem.taskId !== item.taskId ||
+        currentItem.publishedProductId !== item.publishedProductId ||
+        (currentItem.status !== 'running' && currentItem.status !== 'failed')
+      ) {
+        throw new ProductBatchItemError(
+          'ONLINE_QUARANTINE_GUARD_LOST',
+          '商品已由后续操作接管，旧上架任务不能覆盖其平台状态，请立即人工核验',
+          false,
+        );
+      }
+      let state = knownState;
+      if (!state || !isOfflineState(state.state)) {
+        let offlineError: unknown;
+        try {
+          await adapter.offlineProduct(token, product.platformProductId!);
+        } catch (error) {
+          offlineError = error;
+        }
+        state = await adapter.getProductState(token, product.platformProductId!);
+        if (!isOfflineState(state.state)) {
+          if (offlineError) throw offlineError;
+          throw new ProductBatchItemError(
+            'ONLINE_QUARANTINE_FAILED',
+            '平台未确认商品下架，必须立即人工处理',
+            false,
+          );
+        }
+      }
+      await this.platformProductLocks.renew(product.id, quarantineLock);
+      const quarantinedAt = new Date();
+      const quarantineRevision = expectedRevision + 1;
+      const quarantinedStatus = state.state === 'deleted' ? 'rejected' : 'offline';
+      await this.prisma.$transaction(async (tx) => {
+        const productUpdated = await tx.publishedProduct.updateMany({
+          where: {
+            id: product.id,
+            platformProductId: product.platformProductId,
+            mutationRevision: expectedRevision,
+            status: { in: ['online', 'offline'] },
+          },
+          data: {
+            status: quarantinedStatus,
+            mutationRevision: { increment: 1 },
+            inventorySyncReason: 'online_result_quarantined',
+            platformStatusRaw: state.status,
+            platformCheckStatusRaw: state.checkStatus,
+            platformStatusSyncedAt: quarantinedAt,
+            platformStatusError: null,
+          },
+        });
+        if (productUpdated.count !== 1) {
+          throw new ProductBatchItemError(
+            'ONLINE_QUARANTINE_COMMIT_CONFLICT',
+            '平台已确认下架，但本地商品状态提交冲突，请立即刷新核验',
+            false,
+          );
+        }
+        const itemUpdated = await tx.productBatchItem.updateMany({
+          where: {
+            id: currentItem.id,
+            taskId: currentItem.taskId,
+            publishedProductId: currentItem.publishedProductId,
+            status: currentItem.status,
+            errorCode: currentItem.errorCode,
+          },
+          data: {
+            result: {
+              ...(jsonRecord(currentItem.result) ?? {}),
+              quarantineRevision,
+              quarantinedAt: quarantinedAt.toISOString(),
+            } as Prisma.InputJsonValue,
+          },
+        });
+        if (itemUpdated.count !== 1) {
+          throw new ProductBatchItemError(
+            'ONLINE_QUARANTINE_COMMIT_CONFLICT',
+            '平台已确认下架，但批量任务隔离版本提交冲突，请立即刷新核验',
+            false,
+          );
+        }
+      });
+      return quarantineRevision;
+    } finally {
+      if (acquiredQuarantineLock) {
+        await this.platformProductLocks.release(product.id, quarantineLock);
+      }
     }
   }
 
@@ -1972,7 +3381,7 @@ export class ProductBatchService {
     const ownsPlatformLock = await this.tryRenewPlatformProductLock(product.id, lock);
     const now = new Date();
     const quarantineData = {
-      status: 'offline' as const,
+      status: platformState.state === 'deleted' ? ('rejected' as const) : ('offline' as const),
       inventorySyncStatus: 'pending' as const,
       inventorySyncAttempts: 0,
       inventoryNextRunAt: now,
@@ -2199,6 +3608,29 @@ export class ProductBatchService {
         return 'failed';
       }
     }
+    if (
+      item.task.action === 'online' &&
+      (isUnknownOnlineExecutionError(error) || !isResolvedOnlineExecutionError(error))
+    ) {
+      const unknown = await this.prisma.productBatchItem.updateMany({
+        where: {
+          ...ownedItemWhere(item),
+          errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
+        },
+        data: {
+          status: 'failed',
+          lockedAt: null,
+          lockedBy: null,
+          errorCode: ONLINE_RESULT_UNKNOWN_CODE,
+          errorMessage: '上架写入已经开始，但未能可靠收敛平台结果，请稍后核验状态与库存',
+          finishedAt: new Date(),
+        },
+      });
+      if (unknown.count === 1) {
+        await this.refreshTask(item.taskId);
+        return 'failed';
+      }
+    }
     const cancelled = await this.prisma.productBatchItem.updateMany({
       where: {
         ...ownedItemWhere(item),
@@ -2294,7 +3726,13 @@ export class ProductBatchService {
       const titleResultUnknown =
         item.task.action === 'edit_title' &&
         UNRESOLVED_TITLE_CODES.includes(item.errorCode as (typeof UNRESOLVED_TITLE_CODES)[number]);
-      const failed = titleResultUnknown || (!cancelled && item.attempts >= item.maxAttempts);
+      const onlineResultUnknown =
+        item.task.action === 'online' &&
+        UNRESOLVED_ONLINE_CODES.includes(
+          item.errorCode as (typeof UNRESOLVED_ONLINE_CODES)[number],
+        );
+      const unresolvedMutation = titleResultUnknown || onlineResultUnknown;
+      const failed = unresolvedMutation || (!cancelled && item.attempts >= item.maxAttempts);
       const updated = await this.prisma.productBatchItem.updateMany({
         where: {
           id: item.id,
@@ -2303,7 +3741,7 @@ export class ProductBatchService {
           lockedBy: item.lockedBy,
         },
         data: {
-          status: titleResultUnknown
+          status: unresolvedMutation
             ? 'failed'
             : cancelled
               ? 'cancelled'
@@ -2313,17 +3751,21 @@ export class ProductBatchService {
           nextRunAt: now,
           lockedAt: null,
           lockedBy: null,
-          errorCode: titleResultUnknown
-            ? TITLE_RESULT_UNKNOWN_CODE
+          errorCode: unresolvedMutation
+            ? titleResultUnknown
+              ? TITLE_RESULT_UNKNOWN_CODE
+              : ONLINE_RESULT_UNKNOWN_CODE
             : cancelled
               ? null
               : 'WORKER_STALE',
-          errorMessage: titleResultUnknown
-            ? '标题写入期间 worker 中断，请核验平台实际标题'
+          errorMessage: unresolvedMutation
+            ? titleResultUnknown
+              ? '标题写入期间 worker 中断，请核验平台实际标题'
+              : '上架写入期间 worker 中断，请核验平台实际状态与库存'
             : cancelled
               ? null
               : '批量任务 worker 超时，已安全恢复',
-          ...((cancelled || failed || titleResultUnknown) && { finishedAt: now }),
+          ...((cancelled || failed || unresolvedMutation) && { finishedAt: now }),
         },
       });
       if (updated.count === 1) taskIds.add(item.taskId);
@@ -2358,6 +3800,9 @@ export class ProductBatchService {
           status = 'failed';
         else status = 'partial';
       }
+      const finishedStateMatches =
+        finishedAt === null ? task.finishedAt == null : task.finishedAt != null;
+      if (task.status === status && finishedStateMatches) return;
       const updated = await this.prisma.productBatchTask.updateMany({
         where: { id: task.id, stateRevision: task.stateRevision },
         data: { status, stateRevision: { increment: 1 }, finishedAt },
@@ -2372,14 +3817,18 @@ export class ProductBatchService {
     this.lastTaskReconcileAt = now;
     const tasks = await this.prisma.productBatchTask.findMany({
       where: {
-        status: { in: ['queued', 'running', 'cancelling'] },
-        items: { none: { status: { in: ['pending', 'running', 'retry_wait'] } } },
+        ...(this.lastTaskReconcileCursor ? { id: { gt: this.lastTaskReconcileCursor } } : {}),
+        confirmedAt: { not: null },
+        status: {
+          in: ['queued', 'running', 'cancelling', ...TERMINAL_TASK_STATUSES],
+        },
       },
-      orderBy: { updatedAt: 'asc' },
+      orderBy: { id: 'asc' },
       take: 100,
       select: { id: true },
     });
     for (const task of tasks) await this.refreshTask(task.id);
+    this.lastTaskReconcileCursor = tasks.length === 100 ? (tasks.at(-1)?.id ?? null) : null;
   }
 
   private async requireTask(userId: bigint, taskId: bigint): Promise<ProductBatchTaskRecord> {
@@ -2469,6 +3918,9 @@ function toTaskView(task: ProductBatchTaskRecord): ProductBatchTaskView {
         platformProductId: item.publishedProduct.platformProductId,
         beforeStatus,
         desiredStatus: stringValue(desired?.status) ?? beforeStatus,
+        actualStatus:
+          stringValue(result?.actualStatus) ??
+          stringValue(jsonRecord(result?.platformState)?.state),
         beforeTitle,
         desiredTitle: stringValue(desired?.title),
         actualTitle: stringValue(result?.actualTitle),
@@ -2549,8 +4001,12 @@ function previewForAction(
     skuPriceSnapshot: Prisma.JsonValue | null;
     skuInventorySnapshot: Prisma.JsonValue | null;
     inventoryFingerprint: string | null;
+    inventoryTargetFingerprint: string | null;
     inventoryVersion: number;
+    inventoryTargetVersion: number;
     inventorySyncStatus: string;
+    platformStatusRaw: number | null;
+    platformCheckStatusRaw: number | null;
     shop: { platform: string; platformShopId: string };
     task: { skuSnapshot: Prisma.JsonValue | null };
     sourceProduct: {
@@ -2564,8 +4020,59 @@ function previewForAction(
   priceRule: NormalizedPriceRule | null,
 ) {
   const before = beforeSnapshot(record);
+  if (action === 'online') {
+    const beforeInventory =
+      parseSkuInventorySnapshot(record.skuInventorySnapshot) ??
+      inventorySnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
+    const desiredInventory = inventorySnapshotFromSource(
+      record.task.skuSnapshot,
+      record.shop.platform,
+      record.sourceProduct.skuList,
+    );
+    const beforeWithInventory = {
+      ...before,
+      inventoryFingerprint: record.inventoryFingerprint,
+      inventoryVersion: record.inventoryVersion,
+      ...(beforeInventory ? { skuInventory: beforeInventory } : {}),
+    };
+    const desiredSnapshot = {
+      status: 'online',
+      inventoryFingerprint: record.sourceProduct.inventoryFingerprint,
+      inventoryVersion: record.sourceProduct.inventoryVersion,
+      ...(desiredInventory ? { skuInventory: desiredInventory } : {}),
+    };
+    if (record.status === 'online') {
+      return {
+        status: 'skipped' as const,
+        result: { reason: 'already_online', actualStatus: 'online' },
+        errorCode: null,
+        errorMessage: null,
+        beforeSnapshot: beforeWithInventory,
+        desiredSnapshot,
+      };
+    }
+    const unavailableReason = onlineUnavailableReason(record, beforeInventory, desiredInventory);
+    if (unavailableReason) {
+      return {
+        status: 'skipped' as const,
+        result: { reason: 'online_unavailable', status: record.status },
+        errorCode: 'ONLINE_UNAVAILABLE',
+        errorMessage: unavailableReason,
+        beforeSnapshot: beforeWithInventory,
+        desiredSnapshot,
+      };
+    }
+    return {
+      status: 'pending' as const,
+      result: undefined,
+      errorCode: null,
+      errorMessage: null,
+      beforeSnapshot: beforeWithInventory,
+      desiredSnapshot,
+    };
+  }
   if (action === 'offline') {
-    const status = previewOfflineStatus(record.status, record.platformProductId);
+    const status = previewOfflineStatus(record);
     return {
       ...status,
       beforeSnapshot: before,
@@ -2642,6 +4149,14 @@ function previewForAction(
         '商品缺少平台商品 ID，不能同步库存',
       );
     }
+    if (isRawDeletedProduct(record)) {
+      return skippedInventoryPreview(
+        beforeWithInventory,
+        desiredSnapshot,
+        'PRODUCT_DELETED',
+        '平台商品已删除，不能同步库存，请重新铺货',
+      );
+    }
     if (record.status !== 'online') {
       return skippedInventoryPreview(
         beforeWithInventory,
@@ -2701,6 +4216,14 @@ function previewForAction(
   }
   if (!record.platformProductId) {
     return skippedPricePreview(before, record.status, 'PLATFORM_ID_MISSING', '商品缺少平台商品 ID');
+  }
+  if (isRawDeletedProduct(record)) {
+    return skippedPricePreview(
+      before,
+      'rejected',
+      'PRODUCT_DELETED',
+      '平台商品已删除，不能改价，请重新铺货',
+    );
   }
   if (record.status !== 'online') {
     return skippedPricePreview(
@@ -2809,8 +4332,13 @@ function skippedPricePreview(
   };
 }
 
-function previewOfflineStatus(status: string, platformProductId: string | null) {
-  if (!platformProductId) {
+function previewOfflineStatus(record: {
+  status: string;
+  platformProductId: string | null;
+  platformStatusRaw: number | null;
+  platformCheckStatusRaw: number | null;
+}) {
+  if (!record.platformProductId) {
     return {
       status: 'skipped' as const,
       result: { reason: 'platform_id_missing' },
@@ -2818,7 +4346,15 @@ function previewOfflineStatus(status: string, platformProductId: string | null) 
       errorMessage: '商品缺少平台商品 ID，已跳过',
     };
   }
-  if (status === 'offline') {
+  if (isRawDeletedProduct(record)) {
+    return {
+      status: 'skipped' as const,
+      result: { reason: 'product_deleted', actualStatus: 'deleted' },
+      errorCode: 'PRODUCT_DELETED',
+      errorMessage: '平台商品已删除，无需下架且不能重新上架，请重新铺货',
+    };
+  }
+  if (record.status === 'offline') {
     return {
       status: 'skipped' as const,
       result: { reason: 'already_offline' },
@@ -2826,12 +4362,12 @@ function previewOfflineStatus(status: string, platformProductId: string | null) 
       errorMessage: null,
     };
   }
-  if (status !== 'online') {
+  if (record.status !== 'online') {
     return {
       status: 'skipped' as const,
-      result: { reason: 'status_not_online', status },
+      result: { reason: 'status_not_online', status: record.status },
       errorCode: 'PRODUCT_NOT_ONLINE',
-      errorMessage: `商品当前状态为 ${status}，无需执行下架`,
+      errorMessage: `商品当前状态为 ${record.status}，无需执行下架`,
     };
   }
   return {
@@ -2852,9 +4388,11 @@ function normalizePriceRule(
       const message =
         action === 'offline'
           ? '批量下架不能携带改价规则'
-          : action === 'sync_inventory'
-            ? '库存同步不能携带改价规则'
-            : '批量改标题不能携带改价规则';
+          : action === 'online'
+            ? '批量上架不能携带改价规则'
+            : action === 'sync_inventory'
+              ? '库存同步不能携带改价规则'
+              : '批量改标题不能携带改价规则';
       throw new BadRequestException(message);
     }
     return null;
@@ -3273,6 +4811,8 @@ function inventorySyncUnavailableReason(
   record: {
     platformProductId: string | null;
     status: string;
+    platformStatusRaw: number | null;
+    platformCheckStatusRaw: number | null;
     inventorySyncStatus: string;
     sourceProduct: { availability: string; inventoryFingerprint: string; inventoryVersion: number };
   },
@@ -3280,6 +4820,7 @@ function inventorySyncUnavailableReason(
   desired: ProductBatchInventorySnapshot | null,
 ): string | null {
   if (!record.platformProductId) return '商品缺少平台商品 ID';
+  if (isRawDeletedProduct(record)) return '平台商品已删除，不能同步库存，请重新铺货';
   if (record.status !== 'online') return '只有在线商品可以同步库存';
   if (record.sourceProduct.availability !== 'available') {
     return '1688 货源缺货、下架或库存待核验';
@@ -3297,15 +4838,58 @@ function inventorySyncUnavailableReason(
   return null;
 }
 
+function onlineUnavailableReason(
+  record: {
+    platformProductId: string | null;
+    status: string;
+    platformStatusRaw: number | null;
+    platformCheckStatusRaw: number | null;
+    inventorySyncStatus: string;
+    inventoryFingerprint: string | null;
+    inventoryTargetFingerprint: string | null;
+    inventoryVersion: number;
+    inventoryTargetVersion: number;
+    shop: { platform: string; platformShopId: string };
+    sourceProduct: { availability: string; inventoryFingerprint: string; inventoryVersion: number };
+  },
+  before: ProductBatchInventorySnapshot | null,
+  desired: ProductBatchInventorySnapshot | null,
+  unresolvedTitleResult = false,
+  unresolvedOnlineResult = false,
+): string | null {
+  if (!record.platformProductId) return '商品缺少平台商品 ID';
+  if (isRawDeletedProduct(record)) return '平台商品已删除，不能重新上架，请重新铺货';
+  if (unresolvedOnlineResult) return '存在结果待核验的上架操作，请先在原批量任务核验';
+  if (unresolvedTitleResult) return '存在结果待核验的标题更新，请先在原批量任务核验';
+  if (record.status !== 'offline') return '只有已下架商品可以重新上架';
+  if (!isDemoShop(record.shop) && record.shop.platform !== 'douyin') {
+    return '当前仅支持抖店商品批量上架';
+  }
+  if (record.sourceProduct.availability !== 'available') {
+    return '1688 货源缺货、下架或库存待核验';
+  }
+  if (record.inventorySyncStatus === 'syncing') return '商品库存正在由后台任务同步';
+  const fingerprint = inventoryFingerprintValue(record.sourceProduct.inventoryFingerprint);
+  if (!fingerprint || record.sourceProduct.inventoryVersion <= 0) return '1688 库存版本无效';
+  if (!before || !desired || !sameInventorySkuIds(before, desired)) {
+    return '缺少可核对的 SKU 库存快照或 SKU 结构已变化';
+  }
+  if (inventoryTotalStock(desired) <= 0) return '1688 货源当前没有可售库存';
+  return null;
+}
+
 function titleEditUnavailableReason(
   record: {
     platformProductId: string | null;
     status: string;
+    platformStatusRaw: number | null;
+    platformCheckStatusRaw: number | null;
     shop: { platform: string; platformShopId: string };
   },
   unresolvedTitleResult = false,
 ): string | null {
   if (!record.platformProductId) return '商品缺少平台商品 ID';
+  if (isRawDeletedProduct(record)) return '平台商品已删除，不能改标题，请重新铺货';
   if (unresolvedTitleResult) return '存在结果待核验的标题更新，请先在原批量任务核验';
   if (record.status !== 'online' && record.status !== 'offline') {
     return '只有已发布的在线或下架商品可以改标题';
@@ -3342,6 +4926,19 @@ function batchInventoryIdempotencyKey(
   return `batch-inventory-${itemId.toString()}-v${version}-${fingerprint.slice(0, 24)}-${remainingFingerprint}`;
 }
 
+function batchOnlineInventoryIdempotencyKey(
+  itemId: bigint,
+  version: number,
+  fingerprint: string,
+  items: Array<{ sourceSkuId: string; stock: number }>,
+): string {
+  const remainingFingerprint = createHash('sha256')
+    .update(JSON.stringify(items))
+    .digest('hex')
+    .slice(0, 16);
+  return `batch-online-${itemId.toString()}-v${version}-${fingerprint.slice(0, 24)}-${remainingFingerprint}`;
+}
+
 function inventoryFingerprintValue(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const fingerprint = value.trim();
@@ -3354,6 +4951,15 @@ function nonNegativeIntegerOrNull(value: unknown): number | null {
 
 function positiveIntegerOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function onlineBaseMutationRevision(
+  item: Pick<ProductBatchItem, 'expectedMutationRevision' | 'result'>,
+): number {
+  const quarantineRevision = positiveIntegerOrNull(jsonRecord(item.result)?.quarantineRevision);
+  return quarantineRevision && quarantineRevision >= item.expectedMutationRevision
+    ? quarantineRevision
+    : item.expectedMutationRevision;
 }
 
 function parsePositiveId(value: string, label: string): bigint {
@@ -3394,6 +5000,13 @@ function titleVerificationWindowElapsed(result: Prisma.JsonValue | null): boolea
   return Number.isFinite(timestamp) && Date.now() - timestamp >= STALE_ITEM_MS;
 }
 
+function onlineVerificationWindowElapsed(result: Prisma.JsonValue | null): boolean {
+  const startedAt = stringValue(jsonRecord(result)?.onlineWriteStartedAt);
+  if (!startedAt) return false;
+  const timestamp = Date.parse(startedAt);
+  return Number.isFinite(timestamp) && Date.now() - timestamp >= STALE_ITEM_MS;
+}
+
 function shouldWaitForTitleVerification(
   state: PlatformProductTitleState,
   beforeTitle: string,
@@ -3417,6 +5030,13 @@ function shouldWaitForTitleVerification(
 
 function isOfflineState(state: string): boolean {
   return state === 'offline' || state === 'deleted';
+}
+
+function isRawDeletedProduct(record: {
+  platformStatusRaw: number | null;
+  platformCheckStatusRaw: number | null;
+}): boolean {
+  return record.platformStatusRaw === 2;
 }
 
 function assertTitleEditState(state: PlatformProductTitleState, stage: string): void {
@@ -3451,7 +5071,8 @@ function localStatusFromTitleState(
   fallback: string,
 ): 'online' | 'offline' | 'draft' | 'rejected' {
   if (state.state === 'online') return 'online';
-  if (state.state === 'offline' || state.state === 'deleted') return 'offline';
+  if (state.state === 'offline') return 'offline';
+  if (state.state === 'deleted') return 'rejected';
   if (
     state.state === 'draft' ||
     state.state === 'reviewing' ||
@@ -3495,6 +5116,25 @@ function isResolvedTitleExecutionError(error: unknown): boolean {
 
 function isUnknownTitleExecutionError(error: unknown): boolean {
   return error instanceof ProductBatchItemError && error.code === TITLE_RESULT_UNKNOWN_CODE;
+}
+
+function isResolvedOnlineExecutionError(error: unknown): boolean {
+  return (
+    error instanceof ProductBatchItemError &&
+    [
+      'ONLINE_COMMIT_CONFLICT',
+      'ONLINE_COMMIT_FAILED',
+      'ONLINE_INVENTORY_DRIFT',
+      'ONLINE_RESULT_REJECTED',
+      'ONLINE_SOURCE_CHANGED',
+      'ONLINE_UPDATE_FAILED',
+      'ONLINE_WRITE_GUARD_LOST',
+    ].includes(error.code)
+  );
+}
+
+function isUnknownOnlineExecutionError(error: unknown): boolean {
+  return error instanceof ProductBatchItemError && error.code === ONLINE_RESULT_UNKNOWN_CODE;
 }
 
 function isPlatformMutationResultUnknown(error: unknown): boolean {

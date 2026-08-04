@@ -20,6 +20,7 @@ import {
 import { IsPositiveInt64String } from './create-publish-task.dto';
 
 export const PRODUCT_BATCH_ACTIONS = [
+  'online',
   'offline',
   'edit_title',
   'edit_price',

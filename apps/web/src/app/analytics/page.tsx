@@ -330,9 +330,19 @@ function ProductPerformance({ data }: { data: AnalyticsOverview['productPerforma
         </div>
 
         <div className="border-t border-[var(--line)] pt-7 lg:border-0 lg:pl-7 lg:pt-0">
-          <div className="mb-5 flex items-baseline justify-between gap-3">
-            <h3 className="text-lg font-semibold">滞销风险榜</h3>
-            <span className="text-[10px] text-[var(--muted)]">{summary.graceDays} 天观察期</span>
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-semibold">滞销风险榜</h3>
+              <span className="mt-1 block text-[10px] text-[var(--muted)]">
+                {summary.graceDays} 天观察期
+              </span>
+            </div>
+            <Link
+              href="/published/batch?action=cleanup"
+              className="secondary-button min-h-10 shrink-0 px-3 text-xs"
+            >
+              进入安全清理
+            </Link>
           </div>
           {data.slow.length ? (
             <div className="divide-y divide-[var(--line)]">
@@ -361,6 +371,10 @@ function ProductPerformance({ data }: { data: AnalyticsOverview['productPerforma
               当前没有“上架满 {summary.graceDays} 天且区间零成交”的商品。
             </ProductPerformanceEmpty>
           )}
+          <p className="mt-4 text-xs leading-5 text-[var(--muted)]">
+            清理工作台会按固定 30
+            天的已同步订单重新核验；只会安全下架，不会永久删除，之后可重新上架。
+          </p>
         </div>
       </div>
 

@@ -1627,6 +1627,17 @@ describe('PublishService', () => {
 
     expect(fixture.platformProductLocks.acquire).not.toHaveBeenCalled();
     expect(fixture.updateProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              errorCode: { in: ['OFFLINE_WRITE_STARTED', 'OFFLINE_RESULT_UNKNOWN'] },
+            }),
+          ]),
+        }),
+      }),
+    );
   });
 
   it('rechecks unresolved title mutations after taking the product lock', async () => {
@@ -2003,11 +2014,22 @@ describe('PublishService', () => {
     fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 51n });
 
     await expect(fixture.service.syncPublishedProductStatus(USER, '7')).rejects.toThrow(
-      '存在结果待核验的上架操作',
+      '存在结果待核验的上下架操作',
     );
 
     expect(fixture.platformProductLocks.acquire).not.toHaveBeenCalled();
     expect(fixture.getProductState).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              errorCode: { in: ['OFFLINE_WRITE_STARTED', 'OFFLINE_RESULT_UNKNOWN'] },
+            }),
+          ]),
+        }),
+      }),
+    );
   });
 
   it('rechecks the online verification fence after taking the status-sync lock', async () => {
@@ -2018,7 +2040,7 @@ describe('PublishService', () => {
       .mockResolvedValueOnce({ id: 51n });
 
     await expect(fixture.service.syncPublishedProductStatus(USER, '7')).rejects.toThrow(
-      '存在结果待核验的上架操作',
+      '存在结果待核验的上下架操作',
     );
 
     expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);

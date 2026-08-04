@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { ProductBatchCandidate } from '../lib/api';
+import type { ProductBatchCandidate, ProductBatchCleanupEvidence } from '../lib/api';
 import {
   candidateUnavailableReason,
   isCandidateSelectable,
   normalizeTargetPrice,
   normalizeTargetTitle,
   productBatchPreviewFingerprint,
+  requiresProductBatchOfflineVerification,
   sameInventorySnapshot,
   shouldAcceptProductBatchPreviewResponse,
   summarizeInventorySnapshot,
@@ -181,6 +182,34 @@ describe('product batch price inputs', () => {
     ).toBe(true);
   });
 
+  it('keeps cleanup fingerprints stable and rejects a late response from another action', () => {
+    const left = productBatchPreviewFingerprint({
+      action: 'cleanup',
+      publishedProductIds: ['2', '1'],
+    });
+    const request = {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'cleanup' as const,
+      publishedProductIds: ['1', '2'],
+    };
+
+    expect(left).toBe(
+      productBatchPreviewFingerprint({ action: 'cleanup', publishedProductIds: ['1', '2'] }),
+    );
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        request,
+      ),
+    ).toBe(true);
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        { ...request, action: 'offline' as const },
+      ),
+    ).toBe(false);
+  });
+
   it('keeps title-edit fingerprints stable across selection order and rejects stale intent', () => {
     const left = productBatchPreviewFingerprint({
       action: 'edit_title',
@@ -269,6 +298,8 @@ describe('product batch price inputs', () => {
       status: 'offline',
       onlineEligible: true,
       onlineReason: null,
+      cleanupEligible: false,
+      cleanupReason: '只有在线商品可以进入滞销安全下架',
     };
     const blocked = {
       ...candidate('12', '待核验商品'),
@@ -315,6 +346,72 @@ describe('product batch price inputs', () => {
         '商品上架安全状态异常，请刷新商品后再操作',
       );
     }
+  });
+
+  it('selects only cleanup candidates with complete server evidence', () => {
+    const eligible = candidate('11', '可清理商品');
+    const blocked = {
+      ...candidate('12', '不可清理商品'),
+      cleanupEligible: false,
+      cleanupReason: '近 30 天已有 2 笔有效订单',
+      cleanupEvidence: {
+        ...cleanupEvidence(),
+        validOrderCount: 2,
+        lastPaidAt: '2026-08-03T08:00:00.000Z',
+      },
+    };
+    const malformed = {
+      ...eligible,
+      cleanupEvidence: null,
+    } as ProductBatchCandidate;
+
+    expect(isCandidateSelectable(eligible, 'cleanup')).toBe(true);
+    expect(candidateUnavailableReason(eligible, 'cleanup')).toBeNull();
+    expect(isCandidateSelectable(blocked, 'cleanup')).toBe(false);
+    expect(candidateUnavailableReason(blocked, 'cleanup')).toBe(blocked.cleanupReason);
+    expect(isCandidateSelectable(malformed, 'cleanup')).toBe(false);
+    expect(candidateUnavailableReason(malformed, 'cleanup')).toBe(
+      '商品清理证据异常，请刷新商品后再操作',
+    );
+  });
+
+  it('blocks every product mutation while an offline result awaits verification', () => {
+    const fenced = {
+      ...candidate('11', '待核验下架商品'),
+      cleanupEligible: false,
+      cleanupReason: '上一次下架结果未知，请先核验平台状态',
+      offlineVerificationTaskId: '41',
+      offlineVerificationItemId: '52',
+    };
+
+    for (const action of [
+      'online',
+      'offline',
+      'edit_title',
+      'edit_price',
+      'sync_inventory',
+      'cleanup',
+    ] as const) {
+      expect(isCandidateSelectable(fenced, action)).toBe(false);
+      expect(candidateUnavailableReason(fenced, action)).toContain('核验');
+    }
+  });
+
+  it('requires platform verification for unknown offline writes in both offline flows', () => {
+    for (const action of ['offline', 'cleanup'] as const) {
+      expect(
+        requiresProductBatchOfflineVerification(action, 'failed', 'OFFLINE_WRITE_STARTED'),
+      ).toBe(true);
+      expect(
+        requiresProductBatchOfflineVerification(action, 'failed', 'OFFLINE_RESULT_UNKNOWN'),
+      ).toBe(true);
+      expect(
+        requiresProductBatchOfflineVerification(action, 'succeeded', 'OFFLINE_RESULT_UNKNOWN'),
+      ).toBe(false);
+    }
+    expect(
+      requiresProductBatchOfflineVerification('online', 'failed', 'OFFLINE_RESULT_UNKNOWN'),
+    ).toBe(false);
   });
 
   it('summarizes and compares authoritative inventory snapshots by SKU', () => {
@@ -420,6 +517,8 @@ describe('product batch workbench session recovery', () => {
       status: 'offline',
       onlineEligible: true,
       onlineReason: null,
+      cleanupEligible: false,
+      cleanupReason: '只有在线商品可以进入滞销安全下架',
     };
     const onlineSession: ProductBatchWorkbenchSession = {
       ...session,
@@ -436,48 +535,67 @@ describe('product batch workbench session recovery', () => {
     expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(onlineSession);
   });
 
-  it.each(['offline', 'edit_price'] as const)(
-    'migrates legacy v1 %s drafts without losing their preview identity',
-    (action) => {
-      const storage = new MemoryStorage();
-      const key = productBatchWorkbenchStorageKey(scope);
-      const preview = { ...session.preview!, taskId: '42' };
-      const selected = legacyCandidate('11', '旧版会话商品');
-      storage.setItem(
-        key,
-        JSON.stringify({
-          version: 1,
-          ...scope,
-          draft: { ...session.draft, action, selected: [selected] },
-          preview,
-        }),
-      );
+  it('restores cleanup only with its frozen eligibility and evidence', () => {
+    const storage = new MemoryStorage();
+    const cleanupSession: ProductBatchWorkbenchSession = {
+      ...session,
+      draft: {
+        ...session.draft,
+        status: 'online',
+        action: 'cleanup',
+        targetInputs: {},
+        selected: [candidate('11', '待安全下架商品')],
+      },
+    };
 
-      const restored = readProductBatchWorkbenchSession(scope, storage);
+    expect(writeProductBatchWorkbenchSession(scope, cleanupSession, storage)).toBe(true);
+    expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(cleanupSession);
+  });
 
-      expect(restored?.preview).toEqual(preview);
-      expect(restored?.draft.selected).toEqual([
-        {
-          ...selected,
-          sourceTotalStock: 0,
-          sourceSkuCount: 0,
-          sourceInventoryVersion: 0,
-          syncedInventoryVersion: 0,
-          inventoryLastSyncedAt: null,
-          inventorySyncError: null,
-          inventorySyncEligible: false,
-          inventorySyncReason: '旧版会话缺少库存快照，请刷新商品后再同步库存',
-          titleEditable: false,
-          titleEditReason: '旧版会话缺少标题编辑状态，请刷新商品后再修改标题',
-          onlineEligible: false,
-          onlineReason: '旧版会话缺少安全上架状态，请刷新商品后再上架',
-          onlineVerificationTaskId: null,
-          onlineVerificationItemId: null,
-        },
-      ]);
-      expect(isCandidateSelectable(restored!.draft.selected[0]!, 'sync_inventory')).toBe(false);
-    },
-  );
+  it('migrates a legacy v1 edit_price draft without losing its preview identity', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    const preview = { ...session.preview!, taskId: '42' };
+    const selected = legacyCandidate('11', '旧版会话商品');
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: { ...session.draft, action: 'edit_price', selected: [selected] },
+        preview,
+      }),
+    );
+
+    const restored = readProductBatchWorkbenchSession(scope, storage);
+
+    expect(restored?.preview).toEqual(preview);
+    expect(restored?.draft.selected).toEqual([
+      {
+        ...selected,
+        sourceTotalStock: 0,
+        sourceSkuCount: 0,
+        sourceInventoryVersion: 0,
+        syncedInventoryVersion: 0,
+        inventoryLastSyncedAt: null,
+        inventorySyncError: null,
+        inventorySyncEligible: false,
+        inventorySyncReason: '旧版会话缺少库存快照，请刷新商品后再同步库存',
+        titleEditable: false,
+        titleEditReason: '旧版会话缺少标题编辑状态，请刷新商品后再修改标题',
+        onlineEligible: false,
+        onlineReason: '旧版会话缺少安全上架状态，请刷新商品后再上架',
+        onlineVerificationTaskId: null,
+        onlineVerificationItemId: null,
+        offlineVerificationTaskId: null,
+        offlineVerificationItemId: null,
+        cleanupEligible: false,
+        cleanupReason: '旧版会话缺少滞销清理证据，请刷新商品后再操作',
+        cleanupEvidence: null,
+      },
+    ]);
+    expect(isCandidateSelectable(restored!.draft.selected[0]!, 'sync_inventory')).toBe(false);
+  });
 
   it('does not migrate legacy candidates into an inventory-sync draft', () => {
     const storage = new MemoryStorage();
@@ -520,6 +638,128 @@ describe('product batch workbench session recovery', () => {
 
     expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
     expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('does not migrate a legacy candidate without evidence into a cleanup draft', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          status: 'online',
+          action: 'cleanup',
+          selected: [legacyCandidate('11', '旧版清理商品')],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('does not migrate a legacy candidate without fence fields into an offline draft', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          action: 'offline',
+          selected: [legacyCandidate('11', '旧版下架商品')],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('does not restore any mutation draft with a pending offline verification fence', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    const pendingFence = {
+      ...candidate('11', '待核验下架商品'),
+      offlineVerificationTaskId: '41',
+      offlineVerificationItemId: '52',
+    };
+    for (const action of [
+      'online',
+      'offline',
+      'edit_title',
+      'edit_price',
+      'sync_inventory',
+      'cleanup',
+    ] as const) {
+      storage.setItem(
+        key,
+        JSON.stringify({
+          version: 1,
+          ...scope,
+          draft: { ...session.draft, action, selected: [pendingFence] },
+          preview: session.preview,
+        }),
+      );
+
+      expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+      expect(storage.getItem(key)).toBeNull();
+    }
+  });
+
+  it('does not restore a draft with an incomplete offline verification pair', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    const partialFence = { ...candidate('12', '核验字段不完整商品') } as Record<string, unknown>;
+    delete partialFence.offlineVerificationItemId;
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: { ...session.draft, action: 'edit_price', selected: [partialFence] },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('fails closed when cleanup eligibility or evidence is internally inconsistent', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    for (const selected of [
+      { ...candidate('11', '缺少证据商品'), cleanupEvidence: null },
+      {
+        ...candidate('12', '窗口错误商品'),
+        cleanupEvidence: { ...cleanupEvidence(), windowDays: 7 },
+      },
+      {
+        ...candidate('13', '理由冲突商品'),
+        cleanupReason: '同时允许并阻止清理',
+      },
+    ]) {
+      storage.setItem(
+        key,
+        JSON.stringify({
+          version: 1,
+          ...scope,
+          draft: { ...session.draft, action: 'cleanup', selected: [selected] },
+          preview: session.preview,
+        }),
+      );
+
+      expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+      expect(storage.getItem(key)).toBeNull();
+    }
   });
 
   it('does not restore a blocked candidate as selected in an online draft', () => {
@@ -749,6 +989,8 @@ function candidate(publishedProductId: string, title: string) {
     onlineReason: '只有已下架商品可以上架',
     onlineVerificationTaskId: null,
     onlineVerificationItemId: null,
+    offlineVerificationTaskId: null,
+    offlineVerificationItemId: null,
     priceEditable: true,
     priceEditReason: null,
     sourceProductId: `source-${publishedProductId}`,
@@ -762,6 +1004,9 @@ function candidate(publishedProductId: string, title: string) {
     inventorySyncError: null,
     inventorySyncEligible: true,
     inventorySyncReason: null,
+    cleanupEligible: true,
+    cleanupReason: null,
+    cleanupEvidence: cleanupEvidence(),
     mutationRevision: 2,
     publishedAt: '2026-08-04T00:00:00.000Z',
   };
@@ -776,6 +1021,8 @@ function legacyCandidate(publishedProductId: string, title: string): Record<stri
     'onlineReason',
     'onlineVerificationTaskId',
     'onlineVerificationItemId',
+    'offlineVerificationTaskId',
+    'offlineVerificationItemId',
     'sourceTotalStock',
     'sourceSkuCount',
     'sourceInventoryVersion',
@@ -784,8 +1031,25 @@ function legacyCandidate(publishedProductId: string, title: string): Record<stri
     'inventorySyncError',
     'inventorySyncEligible',
     'inventorySyncReason',
+    'cleanupEligible',
+    'cleanupReason',
+    'cleanupEvidence',
   ]) {
     delete legacy[field];
   }
   return legacy;
+}
+
+function cleanupEvidence(): ProductBatchCleanupEvidence {
+  return {
+    policyVersion: 1 as const,
+    windowDays: 30,
+    graceDays: 7,
+    observedAt: '2026-08-04T10:00:00.000Z',
+    windowStartedAt: '2026-07-05T10:00:00.000Z',
+    daysOnline: 40,
+    validOrderCount: 0,
+    lastPaidAt: null,
+    orderSyncAt: '2026-08-04T09:59:00.000Z',
+  };
 }

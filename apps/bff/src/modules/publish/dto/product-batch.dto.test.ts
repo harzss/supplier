@@ -77,6 +77,16 @@ describe('CreateProductBatchPreviewDto', () => {
     await expect(validate(dto)).resolves.toHaveLength(0);
   });
 
+  it('accepts a slow-product cleanup preview without destructive options', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'cleanup',
+      publishedProductIds: ['1', '2'],
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
   it('accepts exact per-product title targets', async () => {
     const dto = plainToInstance(CreateProductBatchPreviewDto, {
       clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',

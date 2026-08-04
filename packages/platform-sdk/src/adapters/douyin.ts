@@ -412,18 +412,27 @@ export class DouyinAdapter extends BasePlatformAdapter {
 
   async offlineProduct(token: string, productIdValue: string): Promise<void> {
     const productId = positiveNumericId(productIdValue, 'product ID');
-    await this.requestApi<undefined>(
-      '/product/setOffline',
-      'product.setOffline',
-      'product offline',
-      token,
-      { product_id: productId },
-      [
-        'isv.parameter-invalid:2010021',
-        'isv.business-failed:2010058',
-        'isv.business-failed:2010064',
-      ],
-    );
+    try {
+      await this.requestApi<undefined>(
+        '/product/setOffline',
+        'product.setOffline',
+        'product offline',
+        token,
+        { product_id: productId },
+        [
+          'isv.parameter-invalid:2010021',
+          'isv.business-failed:2010058',
+          'isv.business-failed:2010064',
+        ],
+      );
+    } catch (error) {
+      if (mutationResultIsUnknown(error, 'product offline')) {
+        throw new PlatformMutationResultUnknownError(
+          error instanceof Error ? error.message : 'Douyin product offline result is unknown',
+        );
+      }
+      throw error;
+    }
   }
 
   async onlineProduct(token: string, productIdValue: string): Promise<void> {

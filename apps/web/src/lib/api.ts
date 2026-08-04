@@ -459,6 +459,18 @@ export interface PublishedProductStatusResult {
   syncedAt: string;
 }
 
+export interface ProductBatchCleanupEvidence {
+  policyVersion: 1;
+  windowDays: 30;
+  graceDays: 7;
+  observedAt: string;
+  windowStartedAt: string;
+  daysOnline: number;
+  validOrderCount: number;
+  lastPaidAt: string | null;
+  orderSyncAt: string | null;
+}
+
 export interface ProductBatchCandidate {
   publishedProductId: string;
   title: string;
@@ -479,6 +491,8 @@ export interface ProductBatchCandidate {
   onlineReason: string | null;
   onlineVerificationTaskId: string | null;
   onlineVerificationItemId: string | null;
+  offlineVerificationTaskId: string | null;
+  offlineVerificationItemId: string | null;
   priceEditable: boolean;
   priceEditReason: string | null;
   sourceProductId: string;
@@ -492,6 +506,9 @@ export interface ProductBatchCandidate {
   inventorySyncError: string | null;
   inventorySyncEligible: boolean;
   inventorySyncReason: string | null;
+  cleanupEligible: boolean;
+  cleanupReason: string | null;
+  cleanupEvidence: ProductBatchCleanupEvidence | null;
   mutationRevision: number;
   publishedAt: string;
 }
@@ -501,7 +518,8 @@ export type ProductBatchAction =
   | 'offline'
   | 'edit_title'
   | 'edit_price'
-  | 'sync_inventory';
+  | 'sync_inventory'
+  | 'cleanup';
 
 export type ProductBatchPriceRule =
   | {
@@ -544,6 +562,11 @@ export type ProductBatchPreviewRequest =
   | {
       clientRequestId: string;
       action: 'sync_inventory';
+      publishedProductIds: string[];
+    }
+  | {
+      clientRequestId: string;
+      action: 'cleanup';
       publishedProductIds: string[];
     };
 
@@ -598,6 +621,7 @@ export interface ProductBatchItem {
   actualInventory: ProductBatchInventorySnapshot | null;
   beforeInventoryVersion: number | null;
   desiredInventoryVersion: number | null;
+  cleanupEvidence: ProductBatchCleanupEvidence | null;
   retryable: boolean;
   status: string;
   attempts: number;
@@ -1293,6 +1317,13 @@ export const api = {
   verifyProductBatchOnline(taskId: string, itemId: string): Promise<ProductBatchTask> {
     return request(
       `/product-batches/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/verify-online`,
+      { method: 'POST' },
+    );
+  },
+
+  verifyProductBatchOffline(taskId: string, itemId: string): Promise<ProductBatchTask> {
+    return request(
+      `/product-batches/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/verify-offline`,
       { method: 'POST' },
     );
   },

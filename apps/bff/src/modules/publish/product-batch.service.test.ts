@@ -221,6 +221,101 @@ describe('ProductBatchService', () => {
     });
   });
 
+  it('exposes cleanup eligibility from one bounded OrderItem aggregate', async () => {
+    const fixture = createFixture();
+    const record = cleanupReadyProduct();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([record]);
+    fixture.prisma.$queryRaw.mockResolvedValue([]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'online' }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          cleanupEligible: true,
+          cleanupReason: null,
+          cleanupEvidence: {
+            policyVersion: 1,
+            windowDays: 30,
+            graceDays: 7,
+            daysOnline: 8,
+            validOrderCount: 0,
+            lastPaidAt: null,
+            orderSyncAt: expect.any(String),
+          },
+        },
+      ],
+    });
+
+    expect(fixture.prisma.$queryRaw).toHaveBeenCalledOnce();
+    const query = fixture.prisma.$queryRaw.mock.calls[0]?.[0] as { strings?: string[] };
+    expect(query.strings?.join(' ')).toContain('order_items');
+  });
+
+  it('treats a valid sale on a secondary OrderItem as cleanup activity', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([cleanupReadyProduct()]);
+    fixture.prisma.$queryRaw.mockResolvedValue([
+      { publishedProductId: 11n, validOrderCount: 1n, lastPaidAt: null },
+    ]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'online' }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          cleanupEligible: false,
+          cleanupReason: '最近 30 天已有有效订单，不能作为滞销商品清理',
+          cleanupEvidence: { validOrderCount: 1, lastPaidAt: null },
+        },
+      ],
+    });
+    const query = fixture.prisma.$queryRaw.mock.calls[0]?.[0] as { strings?: string[] };
+    expect(query.strings?.join(' ')).toContain('paid_at" IS NULL');
+  });
+
+  it.each([
+    ['background sync disabled', { DOUYIN_ORDER_SYNC_ENABLED: 'false' }, {}, '订单同步未启用'],
+    ['lookback too short', { DOUYIN_ORDER_SYNC_LOOKBACK_DAYS: '29' }, {}, '订单同步回溯不足 30 天'],
+    [
+      'history backfill is unverified',
+      { DOUYIN_ORDER_SYNC_HISTORY_VERIFIED_AT: '' },
+      {},
+      '历史订单回补尚未确认',
+    ],
+    ['sync failed', {}, { orderSyncError: 'platform unavailable' }, '店铺订单同步存在错误'],
+    [
+      'sync is running',
+      {},
+      { orderSyncAttemptAt: new Date(Date.now() + 1_000) },
+      '店铺订单正在同步',
+    ],
+    [
+      'watermark is stale',
+      {},
+      {
+        lastOrderSyncAt: new Date(Date.now() - 6 * 60_000),
+        orderSyncAttemptAt: new Date(Date.now() - 6 * 60_000),
+      },
+      '店铺订单同步水位已过期',
+    ],
+  ])('fails cleanup eligibility closed when %s', async (_label, config, shop, reason) => {
+    const fixture = createFixture(config);
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      cleanupReadyProduct({ shop: cleanupShop(shop) }),
+    ]);
+    fixture.prisma.$queryRaw.mockResolvedValue([]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'online' }),
+    ).resolves.toMatchObject({
+      items: [{ cleanupEligible: false, cleanupReason: expect.stringContaining(reason) }],
+    });
+  });
+
   it('skips an online preview when a stale local offline row has a deleted raw status', async () => {
     const fixture = createFixture();
     fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
@@ -658,6 +753,63 @@ describe('ProductBatchService', () => {
       errorCode: 'TITLE_COMPLIANCE_BLOCKED',
       desiredSnapshot: { title: '短袖' },
     });
+  });
+
+  it('materializes cleanup evidence without calling the platform', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([cleanupReadyProduct()]);
+    fixture.prisma.$queryRaw.mockResolvedValue([]);
+    fixture.prisma.productBatchTask.create.mockImplementation(async ({ data }: any) =>
+      taskRecord({
+        action: 'cleanup',
+        requestFingerprint: data.requestFingerprint,
+        items: data.items.create.map((item: any) => taskItem(item)),
+      }),
+    );
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'cleanup',
+        publishedProductIds: ['11'],
+      }),
+    ).resolves.toMatchObject({
+      action: 'cleanup',
+      items: [
+        {
+          status: 'pending',
+          desiredStatus: 'offline',
+          cleanupEvidence: {
+            policyVersion: 1,
+            windowDays: 30,
+            graceDays: 7,
+            validOrderCount: 0,
+          },
+        },
+      ],
+    });
+
+    expect(fixture.adapters.create).not.toHaveBeenCalled();
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+  });
+
+  it('does not let a cleanup preview bypass an unresolved title or online write', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([cleanupReadyProduct()]);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 99n });
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'cleanup',
+        publishedProductIds: ['11'],
+      }),
+    ).rejects.toThrow('存在结果待核验的平台写入');
+
+    expect(fixture.prisma.$queryRaw).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
   });
 
   it('rejects target prices that do not exactly cover the selected products', async () => {
@@ -1890,6 +2042,42 @@ describe('ProductBatchService', () => {
     );
   });
 
+  it('turns a stale cleanup write into an offline verification fence even after cancellation', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchItem.findMany.mockResolvedValue([
+      {
+        id: 51n,
+        taskId: 41n,
+        status: 'running',
+        attempts: 1,
+        maxAttempts: 3,
+        lockedBy: 'dead-worker',
+        errorCode: 'OFFLINE_WRITE_STARTED',
+        task: { action: 'cleanup', cancelRequestedAt: NOW },
+      },
+    ]);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(null);
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'cancelling',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: NOW,
+      items: [{ status: 'failed' }],
+    });
+
+    await expect(fixture.service.claimNext('worker-2')).resolves.toBeNull();
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'OFFLINE_RESULT_UNKNOWN',
+        }),
+      }),
+    );
+  });
+
   it('settles a cancelled running item instead of leaving it in an unreachable retry wait', async () => {
     const fixture = createFixture();
     const item = executionRecord();
@@ -2019,16 +2207,15 @@ describe('ProductBatchService', () => {
     const item = executionRecord();
     fixture.prepareExecution(item);
     fixture.adapter.offlineProduct.mockResolvedValue(undefined);
-    fixture.adapter.getProductState.mockResolvedValue({
-      state: 'offline',
-      status: 1,
-      checkStatus: 3,
-    });
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
 
     await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
 
     expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
-    expect(fixture.adapter.getProductState).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(3);
     expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -2113,7 +2300,7 @@ describe('ProductBatchService', () => {
 
     await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
 
-    expect(fixture.adapter.getProductState).toHaveBeenCalledOnce();
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(2);
     expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
     expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2141,15 +2328,14 @@ describe('ProductBatchService', () => {
     const item = executionRecord();
     fixture.prepareExecution(item);
     fixture.adapter.offlineProduct.mockRejectedValue(new Error('request timed out'));
-    fixture.adapter.getProductState.mockResolvedValue({
-      state: 'offline',
-      status: 1,
-      checkStatus: 3,
-    });
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
 
     await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
 
-    expect(fixture.adapter.getProductState).toHaveBeenCalledOnce();
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(3);
     expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -2158,6 +2344,247 @@ describe('ProductBatchService', () => {
             reason: 'platform_result_recovered',
             recovered: true,
           }),
+        }),
+      }),
+    );
+  });
+
+  it('keeps a definite adapter rejection out of the offline unknown-result fence', async () => {
+    const fixture = createFixture();
+    const item = executionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.offlineProduct.mockRejectedValue(new Error('HTTP 400 invalid product state'));
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'));
+
+    let failure: unknown;
+    try {
+      await fixture.service.executeClaimed(item);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ code: 'OFFLINE_UPDATE_FAILED', retryable: true });
+    await expect(fixture.service.failClaimedItem(item, failure)).resolves.toBe('retry_wait');
+
+    const failureWrites = fixture.prisma.productBatchItem.updateMany.mock.calls.filter(
+      ([args]: any[]) => args.data?.status === 'retry_wait' || args.data?.status === 'failed',
+    );
+    expect(failureWrites.at(-1)?.[0]).toMatchObject({
+      data: expect.objectContaining({ errorCode: 'OFFLINE_UPDATE_FAILED' }),
+    });
+    expect(
+      fixture.prisma.productBatchItem.updateMany.mock.calls.some(
+        ([args]: any[]) => args.data?.errorCode === 'OFFLINE_RESULT_UNKNOWN',
+      ),
+    ).toBe(false);
+  });
+
+  it('does not call the platform when a cleanup preview has gained a valid order', async () => {
+    const fixture = createFixture();
+    const item = cleanupExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.prisma.$queryRaw.mockResolvedValue([
+      { publishedProductId: 11n, validOrderCount: 1n, lastPaidAt: new Date() },
+    ]);
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '商品在清理预览后出现有效订单',
+    );
+
+    expect(fixture.adapter.getProductState).not.toHaveBeenCalled();
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+  });
+
+  it('persists the real offline state and a manual-review failure when a sale arrives during cleanup', async () => {
+    const fixture = createFixture();
+    const item = cleanupExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.prisma.$queryRaw
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { publishedProductId: 11n, validOrderCount: 1n, lastPaidAt: new Date() },
+      ]);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'offline' }) }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'CLEANUP_SALE_DETECTED_AFTER_OFFLINE',
+          errorMessage: expect.stringContaining('人工复核'),
+        }),
+      }),
+    );
+  });
+
+  it('writes an offline fence before the platform mutation and renews both ownership guards', async () => {
+    const fixture = createFixture();
+    const item = executionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+
+    await fixture.service.executeClaimed(item);
+
+    const markerCall = fixture.prisma.productBatchItem.updateMany.mock.calls.find(
+      ([args]: any[]) => args.data?.errorCode === 'OFFLINE_WRITE_STARTED',
+    );
+    expect(markerCall).toBeDefined();
+    expect(markerCall?.[0]).toMatchObject({
+      where: { id: 51n, status: 'running', attempts: 1, lockedBy: 'worker-1' },
+      data: {
+        errorCode: 'OFFLINE_WRITE_STARTED',
+        result: expect.objectContaining({ offlineWriteStartedAt: expect.any(String) }),
+      },
+    });
+    expect(fixture.productLocks.renew).toHaveBeenCalled();
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { lockedAt: expect.any(Date) } }),
+    );
+    expect(
+      fixture.prisma.productBatchItem.updateMany.mock.invocationCallOrder.find(
+        (_order: number, index: number) =>
+          (fixture.prisma.productBatchItem.updateMany.mock.calls[index]?.[0] as any)?.data
+            ?.errorCode === 'OFFLINE_WRITE_STARTED',
+      ),
+    ).toBeLessThan(fixture.adapter.offlineProduct.mock.invocationCallOrder[0]!);
+  });
+
+  it('recovers an offline commit whose transaction acknowledgement was lost', async () => {
+    const fixture = createFixture();
+    const item = executionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+    fixture.prisma.productBatchItem.findUnique
+      .mockResolvedValueOnce(item)
+      .mockResolvedValueOnce({ ...item, status: 'succeeded', errorCode: null });
+    fixture.prisma.publishedProduct.findUnique
+      .mockResolvedValueOnce(item.publishedProduct)
+      .mockResolvedValueOnce({ ...item.publishedProduct, status: 'offline', mutationRevision: 2 });
+    fixture.prisma.$transaction.mockImplementationOnce(async (callback: any) => {
+      await callback(fixture.prisma);
+      throw new Error('transaction commit acknowledgement lost');
+    });
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledOnce();
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'succeeded' }) }),
+    );
+  });
+
+  it('keeps a started offline write as unknown when cancellation races with readback failure', async () => {
+    const fixture = createFixture();
+    const item = executionRecord({
+      errorCode: 'OFFLINE_WRITE_STARTED',
+      result: { phase: 'platform_write_started', offlineWriteStartedAt: new Date().toISOString() },
+      task: { ...executionRecord().task, cancelRequestedAt: new Date() },
+    });
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    await expect(
+      fixture.service.failClaimedItem(item, new Error('readback unavailable')),
+    ).resolves.toBe('failed');
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'OFFLINE_RESULT_UNKNOWN',
+        }),
+      }),
+    );
+  });
+
+  it('verifies an unknown cleanup result only after two offline reads agree', async () => {
+    const fixture = createFixture();
+    const item = unknownOfflineExecutionRecord(
+      new Date(Date.now() - 6 * 60_000).toISOString(),
+      'cleanup',
+    );
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.findUnique.mockResolvedValue(item);
+    fixture.prisma.publishedProduct.findUnique.mockResolvedValue(item.publishedProduct);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'failed',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: null,
+      items: [{ status: 'succeeded' }],
+    });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'cleanup', status: 'succeeded', items: [] }),
+    );
+    fixture.prisma.$queryRaw.mockResolvedValue([]);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+
+    await expect(fixture.service.verifyOfflineResult(USER, '41', '51')).resolves.toMatchObject({
+      action: 'cleanup',
+      status: 'succeeded',
+    });
+
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'succeeded', errorCode: null }),
+      }),
+    );
+  });
+
+  it('turns a stable online cleanup result into a retryable not-applied failure after five minutes', async () => {
+    const fixture = createFixture();
+    const item = unknownOfflineExecutionRecord(
+      new Date(Date.now() - 6 * 60_000).toISOString(),
+      'cleanup',
+    );
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.findUnique.mockResolvedValue(item);
+    fixture.prisma.publishedProduct.findUnique.mockResolvedValue(item.publishedProduct);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'failed',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: null,
+      items: [{ status: 'failed' }],
+    });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'cleanup', status: 'failed', items: [] }),
+    );
+    fixture.prisma.$queryRaw.mockResolvedValue([]);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('online'))
+      .mockResolvedValueOnce(platformState('online'));
+
+    await fixture.service.verifyOfflineResult(USER, '41', '51');
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'OFFLINE_RESULT_NOT_APPLIED',
         }),
       }),
     );
@@ -3869,7 +4296,7 @@ describe('ProductBatchService', () => {
   });
 });
 
-function createFixture() {
+function createFixture(configOverrides: Record<string, string> = {}) {
   const adapter = {
     onlineProduct: vi.fn(),
     offlineProduct: vi.fn(),
@@ -3882,6 +4309,7 @@ function createFixture() {
     getProductInventory: vi.fn(),
   };
   const prisma = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     $transaction: vi.fn().mockImplementation(async (operations: unknown) => {
       if (typeof operations === 'function') {
         return operations(prisma);
@@ -3929,8 +4357,13 @@ function createFixture() {
   };
   const configValues: Record<string, string> = {
     AUTH_MODE: 'supabase',
+    DOUYIN_ORDER_SYNC_ENABLED: 'true',
+    DOUYIN_ORDER_SYNC_INTERVAL_MS: '60000',
+    DOUYIN_ORDER_SYNC_LOOKBACK_DAYS: '30',
+    DOUYIN_ORDER_SYNC_HISTORY_VERIFIED_AT: '2026-08-03T00:00:00.000Z',
     PRODUCT_BATCH_ENABLED: 'true',
     PRODUCT_BATCH_MAX_ATTEMPTS: '3',
+    ...configOverrides,
   };
   const service = new ProductBatchService(
     { get: vi.fn((key: string) => configValues[key]) } as unknown as ConfigService,
@@ -4219,6 +4652,44 @@ function unknownOnlineExecutionRecord(
   } as unknown as ProductBatchExecutionRecord;
 }
 
+function cleanupExecutionRecord(overrides: Record<string, unknown> = {}) {
+  const record = executionRecord();
+  const product = cleanupReadyProduct({ task: { userId: 1n, skuSnapshot: null } });
+  return {
+    ...record,
+    beforeSnapshot: {
+      status: 'online',
+      title: product.title,
+      platformProductId: product.platformProductId,
+      shopId: product.shopId.toString(),
+      mutationRevision: 1,
+      cleanupEvidence: cleanupEvidence(product),
+    },
+    desiredSnapshot: { status: 'offline', reason: 'slow_sales_cleanup' },
+    task: { ...record.task, action: 'cleanup' },
+    publishedProduct: product,
+    ...overrides,
+  } as unknown as ProductBatchExecutionRecord;
+}
+
+function unknownOfflineExecutionRecord(
+  offlineWriteStartedAt: string,
+  action: 'offline' | 'cleanup' = 'offline',
+) {
+  const record = action === 'cleanup' ? cleanupExecutionRecord() : executionRecord();
+  return {
+    ...record,
+    status: 'failed',
+    errorCode: 'OFFLINE_RESULT_UNKNOWN',
+    errorMessage: '下架写入结果未知',
+    result: { phase: 'platform_write_started', offlineWriteStartedAt },
+    lockedAt: null,
+    lockedBy: null,
+    finishedAt: NOW,
+    task: { ...record.task, action, status: 'failed' },
+  } as unknown as ProductBatchExecutionRecord;
+}
+
 function priceSnapshot(items: Array<[string, number]>) {
   return {
     version: 1,
@@ -4360,6 +4831,9 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
       role: 'seller',
       status: 'active',
       accessTokenEnc: 'encrypted',
+      lastOrderSyncAt: NOW,
+      orderSyncAttemptAt: NOW,
+      orderSyncError: null,
     },
     sourceProduct: {
       id: 31n,
@@ -4375,6 +4849,46 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
       ],
     },
     ...overrides,
+  };
+}
+
+function cleanupShop(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 21n,
+    shopName: '真实抖店',
+    platform: 'douyin',
+    platformShopId: 'real-douyin-shop',
+    role: 'seller',
+    status: 'active',
+    accessTokenEnc: 'encrypted',
+    lastOrderSyncAt: new Date(Date.now() - 60_000),
+    orderSyncAttemptAt: new Date(Date.now() - 60_000),
+    orderSyncError: null,
+    ...overrides,
+  };
+}
+
+function cleanupReadyProduct(overrides: Record<string, unknown> = {}) {
+  return publishedProduct({
+    publishedAt: new Date(Date.now() - 8 * 24 * 60 * 60_000),
+    shop: cleanupShop(),
+    task: { skuSnapshot: null },
+    ...overrides,
+  });
+}
+
+function cleanupEvidence(product: ReturnType<typeof publishedProduct>) {
+  const observedAt = new Date();
+  return {
+    policyVersion: 1,
+    windowDays: 30,
+    graceDays: 7,
+    observedAt: observedAt.toISOString(),
+    windowStartedAt: new Date(observedAt.getTime() - 30 * 24 * 60 * 60_000).toISOString(),
+    daysOnline: 8,
+    validOrderCount: 0,
+    lastPaidAt: null,
+    orderSyncAt: (product.shop.lastOrderSyncAt as Date).toISOString(),
   };
 }
 

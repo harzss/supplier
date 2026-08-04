@@ -25,6 +25,7 @@ export const PRODUCT_BATCH_ACTIONS = [
   'edit_title',
   'edit_price',
   'sync_inventory',
+  'cleanup',
 ] as const;
 export type SupportedProductBatchAction = (typeof PRODUCT_BATCH_ACTIONS)[number];
 export const PRODUCT_BATCH_MAX_ITEMS = 100;

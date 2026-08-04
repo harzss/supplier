@@ -20,6 +20,7 @@ import {
 } from '../shop/platform-adapter.factory';
 import { ShopTokenService } from '../shop/shop-token.service';
 import { PlatformProductLockService } from './platform-product-lock.service';
+import { OFFLINE_BATCH_ACTIONS, UNRESOLVED_OFFLINE_CODES } from './product-batch-fences';
 
 const STALE_LOCK_MS = 5 * 60_000;
 
@@ -28,6 +29,7 @@ type InventoryRecord = Prisma.PublishedProductGetPayload<{
     shop: true;
     sourceProduct: true;
     task: { select: { skuSnapshot: true; userId: true } };
+    batchItems: { select: { id: true } };
   };
 }>;
 
@@ -67,6 +69,13 @@ export class InventorySyncService {
           inventoryTargetFingerprint: { not: null },
           inventoryTargetVersion: { gt: 0 },
           inventoryNextRunAt: { lte: now },
+          batchItems: {
+            none: {
+              status: { in: ['running', 'retry_wait', 'failed'] },
+              errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
+              task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+            },
+          },
           ...(this.demoMode ? {} : { shop: runtimeShopWhere(this.demoMode) }),
         },
         orderBy: [{ inventoryNextRunAt: 'asc' }, { id: 'asc' }],
@@ -80,6 +89,13 @@ export class InventorySyncService {
           inventorySyncAttempts: candidate.inventorySyncAttempts,
           inventoryTargetFingerprint: candidate.inventoryTargetFingerprint,
           inventoryTargetVersion: candidate.inventoryTargetVersion,
+          batchItems: {
+            none: {
+              status: { in: ['running', 'retry_wait', 'failed'] },
+              errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
+              task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+            },
+          },
           ...(this.demoMode ? {} : { shop: runtimeShopWhere(this.demoMode) }),
         },
         data: {
@@ -111,6 +127,15 @@ export class InventorySyncService {
           shop: true,
           sourceProduct: true,
           task: { select: { skuSnapshot: true, userId: true } },
+          batchItems: {
+            where: {
+              status: { in: ['running', 'retry_wait', 'failed'] },
+              errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
+              task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+            },
+            take: 1,
+            select: { id: true },
+          },
         },
       });
       if (!record) return 'stale';
@@ -121,6 +146,26 @@ export class InventorySyncService {
         record.inventoryTargetFingerprint !== targetFingerprint ||
         record.inventoryTargetVersion !== targetVersion
       ) {
+        return 'stale';
+      }
+      if (record.batchItems.length > 0) {
+        await this.prisma.publishedProduct.updateMany({
+          where: {
+            id: record.id,
+            inventorySyncStatus: 'syncing',
+            inventorySyncAttempts: attempts,
+            inventoryLockedBy: lockedBy,
+            inventoryTargetFingerprint: targetFingerprint,
+            inventoryTargetVersion: targetVersion,
+          },
+          data: {
+            inventorySyncStatus: 'pending',
+            inventoryNextRunAt: new Date(Date.now() + 60_000),
+            inventoryLockedAt: null,
+            inventoryLockedBy: null,
+            inventorySyncError: '商品下架结果待核验，库存同步已暂停',
+          },
+        });
         return 'stale';
       }
       if (

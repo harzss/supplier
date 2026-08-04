@@ -60,6 +60,7 @@ function inventoryRecord(overrides: Record<string, unknown> = {}) {
         },
       },
     },
+    batchItems: [],
     ...overrides,
   };
 }
@@ -105,6 +106,45 @@ describe('InventorySyncService', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           shop: { NOT: { platformShopId: { startsWith: 'demo-' } } },
+          batchItems: {
+            none: expect.objectContaining({
+              errorCode: { in: ['OFFLINE_WRITE_STARTED', 'OFFLINE_RESULT_UNKNOWN'] },
+            }),
+          },
+        }),
+      }),
+    );
+  });
+
+  it('releases a claimed inventory job when an offline result still needs verification', async () => {
+    const syncInventory = vi.fn();
+    const getProductInventory = vi.fn();
+    const prisma = {
+      publishedProduct: {
+        findUnique: vi.fn().mockResolvedValue(inventoryRecord({ batchItems: [{ id: 51n }] })),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+    } as unknown as PrismaService;
+    const adapters = {
+      create: vi.fn().mockReturnValue({ syncInventory, getProductInventory }),
+    } as unknown as PlatformAdapterFactory;
+    const service = new InventorySyncService(
+      { get: vi.fn() } as unknown as ConfigService,
+      prisma,
+      adapters,
+      {} as ShopTokenService,
+      productLocks(),
+    );
+
+    await expect(service.execute(JOB)).resolves.toBe('stale');
+
+    expect(adapters.create).not.toHaveBeenCalled();
+    expect(syncInventory).not.toHaveBeenCalled();
+    expect(prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          inventorySyncStatus: 'pending',
+          inventorySyncError: '商品下架结果待核验，库存同步已暂停',
         }),
       }),
     );

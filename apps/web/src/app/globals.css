@@ -1328,7 +1328,7 @@ button:not(:disabled),
 .batch-danger-button,
 .batch-danger-outline-button {
   display: inline-flex;
-  min-height: 2.5rem;
+  min-height: 2.75rem;
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
@@ -2214,6 +2214,52 @@ button:not(:disabled),
   font-size: 0.57rem;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.batch-row-success {
+  display: block;
+  max-width: 10rem;
+  margin-top: 0.2rem;
+  color: #28724c;
+  font-family: var(--font-sans);
+  font-size: 0.57rem;
+  line-height: 1.35;
+}
+
+.batch-cleanup-evidence,
+.batch-evidence-time {
+  display: block;
+  min-width: 0;
+}
+
+.batch-cleanup-evidence strong,
+.batch-cleanup-evidence small,
+.batch-evidence-time strong,
+.batch-evidence-time small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.batch-cleanup-evidence strong,
+.batch-evidence-time strong {
+  color: var(--ink-soft);
+  font-family: var(--font-sans);
+  font-size: 0.66rem;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.batch-cleanup-evidence small,
+.batch-evidence-time small {
+  margin-top: 0.18rem;
+  color: var(--muted-light);
+  font-family: var(--font-sans);
+  font-size: 0.57rem;
+  line-height: 1.4;
+}
+
+.batch-cleanup-evidence.is-detailed {
+  min-width: 12rem;
 }
 
 .batch-target-table {

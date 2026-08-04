@@ -1120,7 +1120,21 @@ describe('DouyinAdapter', () => {
     await expect(result).rejects.toThrow('Douyin inventory sync failed for item 1');
   });
 
-  it('offlines a product and treats an already-offline response as success', async () => {
+  it('offlines a product through the dedicated product endpoint', async () => {
+    const fetcher = vi.fn(
+      async () => new Response(JSON.stringify({ code: 10000, data: {} }), { status: 200 }),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await expect(adapter.offlineProduct('access-token', '998877')).resolves.toBeUndefined();
+    const [input, init] = fetcher.mock.calls[0]!;
+    const url = new URL(String(input));
+    expect(url.pathname).toBe('/product/setOffline');
+    expect(url.searchParams.get('method')).toBe('product.setOffline');
+    expect(JSON.parse(String(init?.body))).toEqual({ product_id: '998877' });
+  });
+
+  it('treats an already-offline response as success', async () => {
     const fetcher = vi.fn(
       async () =>
         new Response(
@@ -1138,6 +1152,34 @@ describe('DouyinAdapter', () => {
     const [input, init] = fetcher.mock.calls[0]!;
     expect(new URL(String(input)).pathname).toBe('/product/setOffline');
     expect(JSON.parse(String(init?.body))).toEqual({ product_id: '998877' });
+  });
+
+  it.each([
+    ['transport failure', vi.fn().mockRejectedValue(new Error('socket closed'))],
+    ['HTTP 408', vi.fn().mockResolvedValue(new Response('request timeout', { status: 408 }))],
+    ['HTTP 429', vi.fn().mockResolvedValue(new Response('rate limited', { status: 429 }))],
+    ['HTTP 500', vi.fn().mockResolvedValue(new Response('server error', { status: 500 }))],
+    [
+      'a malformed response',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: {} }), { status: 200 })),
+    ],
+  ])('classifies product.setOffline %s as result unknown', async (_label, fetcher) => {
+    const adapter = new DouyinAdapter(CONFIG, fetcher);
+
+    await expect(adapter.offlineProduct('access-token', '998877')).rejects.toBeInstanceOf(
+      PlatformMutationResultUnknownError,
+    );
+  });
+
+  it('keeps a definitive product.setOffline HTTP 400 response out of result-unknown recovery', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      vi.fn().mockResolvedValue(new Response('bad request', { status: 400 })),
+    );
+
+    const result = adapter.offlineProduct('access-token', '998877');
+    await expect(result).rejects.toThrow('HTTP 400');
+    await expect(result).rejects.not.toBeInstanceOf(PlatformMutationResultUnknownError);
   });
 
   it('onlines a product through the dedicated product endpoint', async () => {

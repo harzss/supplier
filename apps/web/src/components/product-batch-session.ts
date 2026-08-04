@@ -21,12 +21,19 @@ const ONLINE_CANDIDATE_FIELDS = [
   'onlineVerificationTaskId',
   'onlineVerificationItemId',
 ] as const;
+const OFFLINE_CANDIDATE_FIELDS = [
+  'offlineVerificationTaskId',
+  'offlineVerificationItemId',
+] as const;
+const CLEANUP_CANDIDATE_FIELDS = ['cleanupEligible', 'cleanupReason', 'cleanupEvidence'] as const;
 
 type LegacyProductBatchCandidate = Omit<
   ProductBatchCandidate,
   | (typeof INVENTORY_CANDIDATE_FIELDS)[number]
   | (typeof TITLE_CANDIDATE_FIELDS)[number]
   | (typeof ONLINE_CANDIDATE_FIELDS)[number]
+  | (typeof OFFLINE_CANDIDATE_FIELDS)[number]
+  | (typeof CLEANUP_CANDIDATE_FIELDS)[number]
 >;
 
 export interface ProductBatchSessionScope {
@@ -249,23 +256,36 @@ function parseProductBatchCandidate(
 ): ProductBatchCandidate | null {
   if (!isLegacyProductBatchCandidate(value)) return null;
   if (isProductBatchCandidate(value)) {
-    return action !== 'online' || value.onlineEligible === true ? value : null;
+    return (action !== 'online' || value.onlineEligible === true) &&
+      (action !== 'cleanup' || value.cleanupEligible === true) &&
+      value.offlineVerificationTaskId === null
+      ? value
+      : null;
   }
   const hasInventoryFields = INVENTORY_CANDIDATE_FIELDS.some((field) =>
     Object.hasOwn(value, field),
   );
   const hasTitleFields = TITLE_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
   const hasOnlineFields = ONLINE_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
+  const hasOfflineFields = OFFLINE_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
+  const hasCleanupFields = CLEANUP_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
   const inventoryFieldsValid = hasInventoryCandidateFields(value);
   const titleFieldsValid = hasTitleCandidateFields(value);
   const onlineFieldsValid = hasValidOnlineCandidateState(value);
+  const offlineFieldsValid = hasValidOfflineCandidateState(value);
+  const cleanupFieldsValid = hasValidCleanupCandidateState(value);
   if (
     (hasInventoryFields && !inventoryFieldsValid) ||
     (hasTitleFields && !titleFieldsValid) ||
     (hasOnlineFields && !onlineFieldsValid) ||
+    (hasOfflineFields && (!offlineFieldsValid || value.offlineVerificationTaskId !== null)) ||
+    (hasCleanupFields && !cleanupFieldsValid) ||
     (action === 'sync_inventory' && !inventoryFieldsValid) ||
     (action === 'edit_title' && !titleFieldsValid) ||
-    (action === 'online' && (!onlineFieldsValid || value.onlineEligible !== true))
+    (action === 'online' && (!onlineFieldsValid || value.onlineEligible !== true)) ||
+    (action === 'cleanup' && (!cleanupFieldsValid || value.cleanupEligible !== true)) ||
+    (['offline', 'cleanup'].includes(action) &&
+      (!offlineFieldsValid || value.offlineVerificationTaskId !== null))
   ) {
     return null;
   }
@@ -296,6 +316,19 @@ function parseProductBatchCandidate(
       : null,
     onlineVerificationItemId: onlineFieldsValid
       ? (value.onlineVerificationItemId as string | null)
+      : null,
+    offlineVerificationTaskId: offlineFieldsValid
+      ? (value.offlineVerificationTaskId as string | null)
+      : null,
+    offlineVerificationItemId: offlineFieldsValid
+      ? (value.offlineVerificationItemId as string | null)
+      : null,
+    cleanupEligible: cleanupFieldsValid ? (value.cleanupEligible as boolean) : false,
+    cleanupReason: cleanupFieldsValid
+      ? (value.cleanupReason as string | null)
+      : '旧版会话缺少滞销清理证据，请刷新商品后再操作',
+    cleanupEvidence: cleanupFieldsValid
+      ? (value.cleanupEvidence as ProductBatchCandidate['cleanupEvidence'])
       : null,
   };
 }
@@ -334,7 +367,9 @@ function isProductBatchCandidate(
   return (
     hasInventoryCandidateFields(value) &&
     hasTitleCandidateFields(value) &&
-    hasValidOnlineCandidateState(value)
+    hasValidOnlineCandidateState(value) &&
+    hasValidOfflineCandidateState(value) &&
+    hasValidCleanupCandidateState(value)
   );
 }
 
@@ -373,6 +408,51 @@ export function hasValidOnlineCandidateState(value: unknown): boolean {
   return typeof reason === 'string' && reason.trim().length > 0;
 }
 
+export function hasValidOfflineCandidateState(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const taskId = value.offlineVerificationTaskId;
+  const itemId = value.offlineVerificationItemId;
+  return (taskId === null && itemId === null) || (isPositiveId(taskId) && isPositiveId(itemId));
+}
+
+export function hasValidCleanupCandidateState(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const eligible = value.cleanupEligible;
+  const reason = value.cleanupReason;
+  const evidence = value.cleanupEvidence;
+  if (typeof eligible !== 'boolean' || (evidence !== null && !isCleanupEvidence(evidence))) {
+    return false;
+  }
+  if (eligible) {
+    return (
+      value.status === 'online' &&
+      reason === null &&
+      evidence !== null &&
+      evidence.daysOnline >= evidence.graceDays &&
+      evidence.validOrderCount === 0 &&
+      evidence.orderSyncAt !== null
+    );
+  }
+  return typeof reason === 'string' && reason.trim().length > 0;
+}
+
+function isCleanupEvidence(
+  value: unknown,
+): value is NonNullable<ProductBatchCandidate['cleanupEvidence']> {
+  if (!isRecord(value)) return false;
+  return (
+    value.policyVersion === 1 &&
+    value.windowDays === 30 &&
+    value.graceDays === 7 &&
+    isIsoDate(value.observedAt) &&
+    isIsoDate(value.windowStartedAt) &&
+    isNonNegativeInteger(value.daysOnline) &&
+    isNonNegativeInteger(value.validOrderCount) &&
+    (value.lastPaidAt === null || isIsoDate(value.lastPaidAt)) &&
+    (value.orderSyncAt === null || isIsoDate(value.orderSyncAt))
+  );
+}
+
 function isPriceRange(value: unknown): value is [number, number] | null {
   return (
     value === null ||
@@ -389,7 +469,8 @@ function isProductBatchAction(value: unknown): value is ProductBatchAction {
     value === 'offline' ||
     value === 'edit_title' ||
     value === 'edit_price' ||
-    value === 'sync_inventory'
+    value === 'sync_inventory' ||
+    value === 'cleanup'
   );
 }
 
@@ -415,6 +496,10 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) >= 0;
+}
+
+function isIsoDate(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value));
 }
 
 function isPositiveId(value: unknown): value is string {

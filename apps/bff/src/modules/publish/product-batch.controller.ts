@@ -85,4 +85,14 @@ export class ProductBatchController {
   ) {
     return this.batches.verifyOnlineResult(user, id, itemId);
   }
+
+  @Post(':id/items/:itemId/verify-offline')
+  @AuditAction('product_batch.verify_offline', 'product_batch_item')
+  verifyOffline(
+    @CurrentUser() user: CurrentUserType,
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+  ) {
+    return this.batches.verifyOfflineResult(user, id, itemId);
+  }
 }

@@ -191,7 +191,7 @@ erDiagram
 
 ## 3. 当前批量商品操作契约
 
-`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `online`（批量安全上架）、`offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）与 `sync_inventory`（同步并核验 1688 库存）；数据库 action enum 中的换源和清理仍只是预留值，不表示这些动作已经实现。
+`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `online`（批量安全上架）、`offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）、`sync_inventory`（同步并核验 1688 库存）与 `cleanup`（基于订单证据的滞销安全下架）；SKU 编辑和换源仍未实现。
 
 ### 3.1 `product_batch_tasks`
 
@@ -209,6 +209,8 @@ erDiagram
 - 上架预览只接受已下架商品，并固化当前平台库存、1688 逐 SKU 目标、货源指纹和版本。执行时先在保持下架的状态下补齐库存，再使用 `state → inventory → state` 强回读确认平台在线和全部 SKU 库存一致；其他结果均不能记为成功。
 - 上架平台写入前保存 `ONLINE_WRITE_STARTED`。超时、锁或 worker 所有权丢失、取消竞态、畸形响应、状态与库存回读不一致均收敛为不可直接重放的 `ONLINE_RESULT_UNKNOWN`，并在持有商品锁且 revision 仍属于本任务时确认下架。隔离推进后的 revision 保存在 item `result.quarantineRevision`；迟到上架再次生效时，专用核验可继续用该 revision 再次隔离。核验确认未生效后重试，会在同一事务内把 `expected_mutation_revision` 推进到隔离 revision，再开始下一次执行。
 - 标题预览保存原标题、逐商品目标标题与预期商品 revision。平台写入前先保存 `TITLE_WRITE_STARTED` 与开始时间；平台超时、锁/worker 所有权丢失、取消竞态或响应畸形时收敛为不可重放的 `TITLE_RESULT_UNKNOWN`，只有核验平台标题后才能继续。目标标题、原标题、第三方标题和驳回/封禁状态分别按明确规则原子同步商品与 item。
+- 滞销清理在 `before_snapshot.cleanupEvidence` 固化策略版本、30 天窗口、7 天观察期、订单数、最近付款时间和订单同步水位。有效订单按 `order_items.published_product_id` 聚合，避免多商品订单只读取主商品；真实店还必须启用订单同步、配置至少 30 天回溯、完成显式历史回补确认，并满足水位新鲜、无错误且未在同步。执行前与平台写入前再次评估，平台确认下架后若发现新订单或证据失效，保留真实离线状态并把 item 标记为需要人工复核。
+- 下架写入前保存 `OFFLINE_WRITE_STARTED` 与时间。transport、408/429/5xx、畸形响应、写后失锁、取消竞态或 worker 中断均收敛为不可直接重放的 `OFFLINE_RESULT_UNKNOWN`；专用核验要求两次平台状态回读稳定一致。未核验下架 fence 同时阻断后续批量动作、完整商品编辑、普通状态同步与库存 worker，避免把真实离线商品用旧快照重新写成在线。
 - 状态为 `pending / running / retry_wait / succeeded / failed / skipped / cancelled`。worker 以旧状态、attempts 和任务取消状态做 CAS 领取，并记录 `locked_at / locked_by`；超过 5 分钟的 running 项按次数恢复为等待重试或失败。
 - 失败重试只把选中的 `failed` 项重置为 `pending`；`succeeded` 与 `skipped` 不会重新执行。`result` 保存平台确认/恢复原因，错误码与脱敏信息按 item 保留。
 

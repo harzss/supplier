@@ -62,6 +62,9 @@ importers:
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
+      '@supplier/crawler':
+        specifier: workspace:*
+        version: link:../../packages/crawler
       '@supplier/db':
         specifier: workspace:*
         version: link:../../packages/db

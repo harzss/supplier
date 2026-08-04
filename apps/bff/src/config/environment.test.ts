@@ -48,6 +48,8 @@ describe('validateEnvironment', () => {
       INVENTORY_SYNC_MAX_ATTEMPTS: 3,
       PRODUCT_BATCH_POLL_MS: 2000,
       PRODUCT_BATCH_MAX_ATTEMPTS: 3,
+      SOURCE_IMPORT_POLL_MS: 2000,
+      SOURCE_IMPORT_MAX_ATTEMPTS: 3,
     });
   });
 
@@ -250,6 +252,63 @@ describe('validateEnvironment', () => {
       PRODUCT_BATCH_POLL_MS: 500,
       PRODUCT_BATCH_MAX_ATTEMPTS: 10,
     });
+  });
+
+  it('validates an independently bounded source import worker configuration', () => {
+    expect(() => validateEnvironment({ SOURCE_IMPORT_ENABLED: 'enabled' })).toThrow(
+      'SOURCE_IMPORT_ENABLED must be true or false',
+    );
+    expect(() => validateEnvironment({ SOURCE_IMPORT_POLL_MS: 499 })).toThrow(
+      'SOURCE_IMPORT_POLL_MS must be an integer between 500 and 60000',
+    );
+    expect(() => validateEnvironment({ SOURCE_IMPORT_MAX_ATTEMPTS: 11 })).toThrow(
+      'SOURCE_IMPORT_MAX_ATTEMPTS must be an integer between 1 and 10',
+    );
+    expect(
+      validateEnvironment({
+        SOURCE_IMPORT_ENABLED: true,
+        SOURCE_IMPORT_POLL_MS: '500',
+        SOURCE_IMPORT_MAX_ATTEMPTS: '10',
+      }),
+    ).toMatchObject({
+      SOURCE_IMPORT_ENABLED: 'true',
+      SOURCE_IMPORT_POLL_MS: 500,
+      SOURCE_IMPORT_MAX_ATTEMPTS: 10,
+    });
+  });
+
+  it('requires verified 1688 OAuth configuration for production source import', () => {
+    expect(() => validateEnvironment({ ...PRODUCTION_ENV, SOURCE_IMPORT_ENABLED: 'true' })).toThrow(
+      'ALIBABA_1688_APP_KEY is required in production',
+    );
+    expect(() =>
+      validateEnvironment({
+        ...PRODUCTION_PURCHASE_ENV,
+        ALIBABA_1688_PURCHASE_ENABLED: 'false',
+        SOURCE_IMPORT_ENABLED: 'true',
+        OAUTH_CALLBACK_ALLOWLIST:
+          'https://api.supplier.example.com/api/shops/oauth/alibaba_1688/callback',
+      }),
+    ).toThrow('ALIBABA_1688_SOURCE_DATA_SCOPE must be global_offer when source import is enabled');
+    expect(() =>
+      validateEnvironment({
+        ...PRODUCTION_PURCHASE_ENV,
+        ALIBABA_1688_PURCHASE_ENABLED: 'false',
+        SOURCE_IMPORT_ENABLED: 'true',
+        ALIBABA_1688_SOURCE_DATA_SCOPE: 'global_offer',
+        OAUTH_CALLBACK_ALLOWLIST: 'https://api.supplier.example.com/another/callback',
+      }),
+    ).toThrow('OAUTH_CALLBACK_ALLOWLIST must contain ALIBABA_1688_OAUTH_REDIRECT_URI');
+    expect(
+      validateEnvironment({
+        ...PRODUCTION_PURCHASE_ENV,
+        ALIBABA_1688_PURCHASE_ENABLED: 'false',
+        SOURCE_IMPORT_ENABLED: 'true',
+        ALIBABA_1688_SOURCE_DATA_SCOPE: 'global_offer',
+        OAUTH_CALLBACK_ALLOWLIST:
+          'https://api.supplier.example.com/api/shops/oauth/alibaba_1688/callback',
+      }),
+    ).toMatchObject({ SOURCE_IMPORT_ENABLED: 'true' });
   });
 });
 

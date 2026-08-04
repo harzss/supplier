@@ -21,6 +21,7 @@
     "@nestjs/throttler": "^6.2.0",
     "@prisma/client": "^5.22.0",
     "@supplier/db": "workspace:*",
+    "@supplier/crawler": "workspace:*",
     "@supplier/entitlements": "workspace:*",
     "@supplier/llm-client": "workspace:*",
     "@supplier/platform-sdk": "workspace:*",

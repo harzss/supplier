@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
+import { CrawlerError } from './adapter';
 import type { CrawledProduct } from './types';
+
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+const MAX_SKUS = 100;
+const MAX_SKU_ID_LENGTH = 128;
 
 export type SourceAvailability = 'available' | 'out_of_stock' | 'offline' | 'unknown';
 
@@ -20,17 +25,25 @@ export function inventorySnapshot(
   if (skus.length === 0) {
     return snapshot(product.productId1688, 'unknown', 0, []);
   }
+  if (skus.length > MAX_SKUS) {
+    throw new CrawlerError(`Source inventory cannot contain more than ${MAX_SKUS} SKUs`, 'parse');
+  }
 
-  const inventory = skus
-    .map((sku) => ({
-      skuId: sku.skuId.trim(),
-      stock: normalizeStock(sku.stock),
-    }))
-    .sort((left, right) => left.skuId.localeCompare(right.skuId));
-  const totalStock = inventory.reduce(
-    (total, sku) => Math.min(Number.MAX_SAFE_INTEGER, total + sku.stock),
-    0,
-  );
+  const inventory = skus.map((sku) => ({
+    skuId: validSkuId(sku.skuId),
+    stock: validStock(sku.stock),
+  }));
+  if (new Set(inventory.map((sku) => sku.skuId)).size !== inventory.length) {
+    throw new CrawlerError('Source inventory contains duplicate SKU IDs', 'parse');
+  }
+  inventory.sort((left, right) => left.skuId.localeCompare(right.skuId));
+  const totalStock = inventory.reduce((total, sku) => {
+    const next = total + sku.stock;
+    if (!Number.isSafeInteger(next) || next > POSTGRES_INTEGER_MAX) {
+      throw new CrawlerError('Source inventory total stock is invalid', 'parse');
+    }
+    return next;
+  }, 0);
   return snapshot(
     product.productId1688,
     totalStock > 0 ? 'available' : 'out_of_stock',
@@ -55,7 +68,17 @@ function snapshot(
   return { availability, totalStock, fingerprint };
 }
 
-function normalizeStock(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) return 0;
-  return Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value));
+function validSkuId(value: string): string {
+  const skuId = value.trim();
+  if (!skuId || skuId.length > MAX_SKU_ID_LENGTH || /[\u0000-\u001f\u007f]/.test(skuId)) {
+    throw new CrawlerError('Source inventory SKU ID is invalid', 'parse');
+  }
+  return skuId;
+}
+
+function validStock(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > POSTGRES_INTEGER_MAX) {
+    throw new CrawlerError('Source inventory SKU stock is invalid', 'parse');
+  }
+  return value;
 }

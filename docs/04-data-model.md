@@ -232,6 +232,19 @@ erDiagram
 
 两张批量表均启用 RLS，并撤销 `anon` / `authenticated` 对表和 sequence 的直接权限。权威定义见 `packages/db/prisma/schema.prisma` 的 `ProductBatchTask`、`ProductBatchItem`、`PublishedProduct.mutationRevision`、`PublishedProduct.skuPriceSnapshot`、`PublishedProduct.skuInventorySnapshot`，以及 migration `20260804050000_add_product_batch_operations`、`20260804120000_add_published_product_price_snapshot` 与 `20260804183000_add_published_product_inventory_snapshot`。三条 migration 均尚未应用到 staging。
 
+### 3.6 持久化批量货源采集
+
+`source_import_tasks` 与 `source_import_items` 使用独立表，不复用要求 `published_product_id` 的商品批量表；采集确认前尚不存在已发布商品。任务复用相同的 task/item 状态枚举，但拥有独立启停开关、worker 和重试配置。
+
+- `source_import_tasks` 按 `user_id + client_request_id` 唯一。`request_fingerprint` 绑定去重并排序后的 offerId 集合与本次 1688 买家店铺；同 UUID 同参恢复原任务，同 UUID 异参返回冲突。`buyer_shop_id` 只允许当前用户 active、非演示的 1688 buyer。
+- 预览阶段只解析官方 HTTPS 链接中的 offerId 或数字 offerId，并读取本地缓存判断 `existing / collected`；不请求用户 URL、不跟随重定向，也不调用 1688 商品详情 API。每个任务最多 100 个去重条目。
+- `source_import_items` 以 `task_id + offer_id` 唯一，保存首个输入引用、预览时的本地事实、attempts、下一执行时间和 worker 所有权。停止只取消 `pending / retry_wait`；运行中条目在平台只读调用后仍以任务取消状态和 item 所有权条件提交，失权不会落库。
+- 商品详情、库存快照、全局 `source_products` 更新、库存同步目标、当前用户归属与 item 成功结果在 Serializable 事务中原子提交；事务成功后进程丢失返回不会重复产生归属或覆盖新库存版本。
+- `source_products` 仍是全局 offer 缓存。`user_source_products` 以 `user_id + source_product_id` 唯一，只表达“该用户采集过”，记录首次/最近采集时间；它不等同于 `user_favorites`，也不自动触发打分、铺货或换源。
+- 真实环境只有在运营方验证价格、库存等详情不随买家账号变化并显式配置 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 后才允许启用；否则启动与运行时均 fail-closed。若验证结果为账号范围数据，必须新增用户级快照模型，不能继续写全局缓存。
+
+三张新表均启用 RLS，并撤销 `anon` / `authenticated` 对表和 sequence 的直接权限。权威定义见 `SourceImportTask`、`SourceImportItem`、`UserSourceProduct` 与 migration `20260804210000_add_source_imports`；该 migration 尚未应用到 staging。
+
 ## 4. 核心表 Schema（历史 MySQL 设计草案）
 
 本节仅保留早期字段和容量规划背景。当前应用使用 PostgreSQL、Prisma snake_case 映射和正式 migration；字段、enum、索引、外键与默认值必须从权威 schema 读取。

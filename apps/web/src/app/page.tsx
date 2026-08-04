@@ -76,22 +76,30 @@ function RecommendationPage() {
               综合采购价、销量趋势、利润与合规表现，快速找到更值得上架的商品。
             </p>
           </div>
-          <Link href="/favorites" className="secondary-button home-favorite-action shrink-0 gap-2">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              className="h-4 w-4"
-              aria-hidden="true"
+          <div className="flex flex-wrap gap-2">
+            <Link href="/sources/import" className="primary-button source-entry-button shrink-0">
+              批量采集 1688
+            </Link>
+            <Link
+              href="/favorites"
+              className="secondary-button home-favorite-action shrink-0 gap-2"
             >
-              <path d="M6 4.5A2.5 2.5 0 0 1 8.5 2h7A2.5 2.5 0 0 1 18 4.5V22l-6-4-6 4V4.5Z" />
-            </svg>
-            收藏对比
-            <span className="home-favorite-count rounded-full px-2 py-0.5 text-[11px] tabular-nums">
-              {favorites.data?.total ?? 0}
-            </span>
-          </Link>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                className="h-4 w-4"
+                aria-hidden="true"
+              >
+                <path d="M6 4.5A2.5 2.5 0 0 1 8.5 2h7A2.5 2.5 0 0 1 18 4.5V22l-6-4-6 4V4.5Z" />
+              </svg>
+              收藏对比
+              <span className="home-favorite-count rounded-full px-2 py-0.5 text-[11px] tabular-nums">
+                {favorites.data?.total ?? 0}
+              </span>
+            </Link>
+          </div>
         </header>
 
         <dl className="home-metric-grid mt-8 grid grid-cols-1 sm:grid-cols-3">

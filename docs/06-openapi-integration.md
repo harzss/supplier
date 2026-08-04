@@ -46,6 +46,9 @@
 
 - 买家货源采集使用 `com.alibaba.fenxiao:cross.keywords.search-1` 与 `cross.productInfo.get-1`；必须先订购官方跨境代采解决方案并取得买家 OAuth Token
 - `alibaba.product.get` 的官方权限范围是“只能查询自己所有的产品”，不能作为买家通用货源详情接口
+- Web 批量采集只接受最多 100 个数字 offerId 或官方 HTTPS offer 详情链接；预览只提取并去重 offerId，不请求、解析或跟随用户 URL。确认后由持久 worker 使用任务所属用户当前有效的 1688 buyer Token 调用 `cross.productInfo.get-1`
+- `source_products` 当前是全局 offer 缓存。真实环境只有在用多个受控买家账号证明详情、分销价与库存不因账号变化，并显式设置 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 后才能开启 `SOURCE_IMPORT_ENABLED=true`；否则启动与执行均拒绝。若平台数据实际按买家变化，必须先改为用户级快照模型
+- 采集任务按 `userId + clientRequestId + requestFingerprint` 幂等；同键同参恢复，同键异参冲突。详情、库存版本、已发布商品库存目标、用户“我的货源”归属与 item 结果在同一 Serializable 事务内提交；停止只取消未开始项，失败项可单独重试且不重跑成功项
 - 价格优先读取代销场景的 `consignPrice`；有 SKU 时逐规格读取，抖店 `outer_sku_id` 使用 1688 `specId`，保证后续真实采购可映射回源规格
 - 官方主图相对路径统一补为 `https://cbu01.alicdn.com/`，详情图同时读取智能详情图和 HTML 图片
 - `scripts/crawl-products.mjs` 在 AppKey/AppSecret/AccessToken 全部存在时自动使用真实适配器；完全未配置时继续使用 Mock，部分配置时安全失败
@@ -221,15 +224,16 @@
 
 生产式 OAuth 还必须配置可用的 `REDIS_URL`、至少 32 字符随机 `ENCRYPTION_KEY` 和 60–900 秒的 `OAUTH_STATE_TTL_SECONDS`。Redis 保存一次性 state 和短期用户绑定结果 token，数据库只保存 AES-256-GCM 加密后的平台 Token；截图、日志、提交、工单和聊天中均不得出现 AppSecret、access token、refresh token、收货地址明文或完整手机号。
 
-| 平台 / 阶段           | 必填环境变量                                                                                                                                                        | 开关顺序与安全约束                                                                                                                                    |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 抖店授权与发布        | `DOUYIN_APP_KEY`、`DOUYIN_APP_SECRET`、`DOUYIN_SERVICE_ID`、`DOUYIN_CUSTOMER_MOBILE`、`DOUYIN_OAUTH_REDIRECT_URI`、`DOUYIN_OAUTH_SANDBOX=false`                     | 先写密钥并完成 OAuth；当前使用正式网关 + 测试店，不虚构独立 sandbox 域名                                                                              |
-| 抖店订单同步          | `DOUYIN_ORDER_SYNC_ENABLED`、`DOUYIN_ORDER_SYNC_INTERVAL_MS`、`DOUYIN_ORDER_SYNC_LOOKBACK_DAYS`、`DOUYIN_ORDER_SYNC_OVERLAP_SECONDS`、`DOUYIN_ORDER_SYNC_MAX_PAGES` | 凭证、真实店和订单读取权限未通过前保持 `false`；首次手工同步成功后再开启 worker                                                                       |
-| 抖店库存同步          | `INVENTORY_SYNC_ENABLED`、`INVENTORY_SYNC_POLL_MS`、`INVENTORY_SYNC_MAX_ATTEMPTS`                                                                                   | 真实商品、`outer_sku_id = 1688 specId` 和库存权限验证前保持 `false`                                                                                   |
-| 1688 OAuth 与人工支付 | `ALIBABA_1688_APP_KEY`、`ALIBABA_1688_APP_SECRET`、`ALIBABA_1688_OAUTH_REDIRECT_URI`、`ALIBABA_1688_PAYMENT_MODE=manual`                                            | 首期禁止免密自动扣款；必须由授权付款人到 1688 核对 offer、SKU、数量、地址和金额后付款                                                                 |
-| 1688 真实采购         | `ALIBABA_1688_PURCHASE_ENABLED`                                                                                                                                     | 初始保持 `false`；其余 7 项 1688 readiness 通过、预算获批并完成创建前人工复核后，才由工程负责人显式改为 `true`                                        |
-| 1688 已履约巡检       | `ALIBABA_1688_PURCHASE_AUDIT_ENABLED`、`ALIBABA_1688_PURCHASE_AUDIT_INTERVAL_MS`、`ALIBABA_1688_PURCHASE_AUDIT_BATCH_SIZE`                                          | 只有真实采购已开启且首笔已发货订单对账完成后才启用；首次 E2E 不把巡检开关当成前置条件                                                                 |
-| 1688 货源采集 CLI     | 临时进程变量 `ALIBABA_1688_APP_KEY`、`ALIBABA_1688_APP_SECRET`、`ALIBABA_1688_ACCESS_TOKEN`；可选 `ALIBABA_1688_SEARCH_SCENARIO`、`ALIBABA_1688_SEARCH_FILTERS`     | 当前 `scripts/crawl-products.mjs` 不直接读取 BFF 加密 Token；R1-02 运行时短时注入并在结束后清除，不写入仓库、命令历史或证据。长期应改为受控服务内调用 |
+| 平台 / 阶段           | 必填环境变量                                                                                                                                                        | 开关顺序与安全约束                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 抖店授权与发布        | `DOUYIN_APP_KEY`、`DOUYIN_APP_SECRET`、`DOUYIN_SERVICE_ID`、`DOUYIN_CUSTOMER_MOBILE`、`DOUYIN_OAUTH_REDIRECT_URI`、`DOUYIN_OAUTH_SANDBOX=false`                     | 先写密钥并完成 OAuth；当前使用正式网关 + 测试店，不虚构独立 sandbox 域名                                                                                  |
+| 抖店订单同步          | `DOUYIN_ORDER_SYNC_ENABLED`、`DOUYIN_ORDER_SYNC_INTERVAL_MS`、`DOUYIN_ORDER_SYNC_LOOKBACK_DAYS`、`DOUYIN_ORDER_SYNC_OVERLAP_SECONDS`、`DOUYIN_ORDER_SYNC_MAX_PAGES` | 凭证、真实店和订单读取权限未通过前保持 `false`；首次手工同步成功后再开启 worker                                                                           |
+| 抖店库存同步          | `INVENTORY_SYNC_ENABLED`、`INVENTORY_SYNC_POLL_MS`、`INVENTORY_SYNC_MAX_ATTEMPTS`                                                                                   | 真实商品、`outer_sku_id = 1688 specId` 和库存权限验证前保持 `false`                                                                                       |
+| 1688 OAuth 与人工支付 | `ALIBABA_1688_APP_KEY`、`ALIBABA_1688_APP_SECRET`、`ALIBABA_1688_OAUTH_REDIRECT_URI`、`ALIBABA_1688_PAYMENT_MODE=manual`                                            | 首期禁止免密自动扣款；必须由授权付款人到 1688 核对 offer、SKU、数量、地址和金额后付款                                                                     |
+| 1688 真实采购         | `ALIBABA_1688_PURCHASE_ENABLED`                                                                                                                                     | 初始保持 `false`；其余 7 项 1688 readiness 通过、预算获批并完成创建前人工复核后，才由工程负责人显式改为 `true`                                            |
+| 1688 已履约巡检       | `ALIBABA_1688_PURCHASE_AUDIT_ENABLED`、`ALIBABA_1688_PURCHASE_AUDIT_INTERVAL_MS`、`ALIBABA_1688_PURCHASE_AUDIT_BATCH_SIZE`                                          | 只有真实采购已开启且首笔已发货订单对账完成后才启用；首次 E2E 不把巡检开关当成前置条件                                                                     |
+| 1688 持久货源采集     | `SOURCE_IMPORT_ENABLED`、`SOURCE_IMPORT_POLL_MS`、`SOURCE_IMPORT_MAX_ATTEMPTS`、`ALIBABA_1688_SOURCE_DATA_SCOPE`、1688 OAuth 凭证                                   | 初始保持 `false`；应用最新 migration、验证买家 Token/配额/曝光回传和跨买家数据一致后，才设置 `global_offer` 并启用 worker；Redis 限流不可用时 fail-closed |
+| 1688 货源采集 CLI     | 临时进程变量 `ALIBABA_1688_APP_KEY`、`ALIBABA_1688_APP_SECRET`、`ALIBABA_1688_ACCESS_TOKEN`；可选搜索场景与筛选变量                                                 | 只保留为受控联调/诊断入口，不作为 SaaS 用户工作流；短时注入 Token 并在结束后清除，不写入仓库、命令历史或证据                                              |
 
 ### 4.4 测试商品、订单、金额与物流数据
 

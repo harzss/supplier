@@ -62,7 +62,7 @@ node --env-file=packages/db/.env.staging.local \
    1. 停止 BFF、队列和全部 worker 写入，记录 Git SHA、审计输出和维护窗口。
    2. 确认 Supabase 当前套餐的快照/PITR 能力；如果不能恢复，使用 PostgreSQL 17 `pg_dump --format=custom --schema=public --no-owner --no-privileges` 创建强制 TLS 的一致性备份。
    3. 使用 `pg_restore --list` 校验归档，并先恢复到隔离 PostgreSQL 17 数据库完成恢复演练。
-   4. 为隔离库创建不入 Git 的 `packages/db/.env.restore.local`，只填写指向隔离库的 `DATABASE_URL` 和 `DIRECT_URL`，并用单引号包住完整 URL，使文件可被 Node 与 shell 安全加载。在隔离恢复库实际执行待发布 migration，再验证 migration status、schema diff、关键数据量和数据回填；只有全部通过，才允许对 staging 执行一次 `migrate deploy`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～38 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表、唯一索引、RLS 以及表/sequence 权限。
+   4. 为隔离库创建不入 Git 的 `packages/db/.env.restore.local`，只填写指向隔离库的 `DATABASE_URL` 和 `DIRECT_URL`，并用单引号包住完整 URL，使文件可被 Node 与 shell 安全加载。在隔离恢复库实际执行待发布 migration，再验证 migration status、schema diff、关键数据量和数据回填；只有全部通过，才允许对 staging 执行一次 `migrate deploy`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～39 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表，以及 `source_import_tasks`、`source_import_items`、`user_source_products` 的唯一索引、外键、RLS 和表/sequence 权限。
 
 ```bash
 set -a
@@ -114,7 +114,7 @@ pnpm audit:supabase-boundary
 
 完成标准：仓库 migration 全部 applied，0 unfinished、0 rolled back、checksum 全匹配，live schema diff 为空。BFF/Redis readiness 属于下一节环境 smoke，不作为数据库审计的循环前置条件。
 
-2026-08-03 审计快照：PostgreSQL 17.6，当时仓库与 staging 为 33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。当前仓库共有 38 个 migration，尚无第 34～38 个已应用的实时证据，因此当前候选发布账面为 33/38（5 个待应用）。部署新代码前必须重新完成本节只读审计、备份和隔离预检，由单一 migration-once 一次应用第 34～38 个，再完成 38/38、checksum、schema diff、RLS/ACL 审计；不得写成已迁移。
+2026-08-03 审计快照：PostgreSQL 17.6，当时仓库与 staging 为 33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。当前仓库共有 39 个 migration，尚无第 34～39 个已应用的实时证据，因此当前候选发布账面为 33/39（6 个待应用）。部署新代码前必须重新完成本节只读审计、备份和隔离预检，由单一 migration-once 一次应用第 34～39 个，再完成 39/39、checksum、schema diff、RLS/ACL 审计；不得写成已迁移。
 
 ## 4. 部署 Cloudflare staging gateway
 
@@ -155,6 +155,10 @@ ALIBABA_1688_PURCHASE_AUDIT_ENABLED=false
 PRODUCT_BATCH_ENABLED=false
 PRODUCT_BATCH_POLL_MS=2000
 PRODUCT_BATCH_MAX_ATTEMPTS=3
+SOURCE_IMPORT_ENABLED=false
+SOURCE_IMPORT_POLL_MS=2000
+SOURCE_IMPORT_MAX_ATTEMPTS=3
+ALIBABA_1688_SOURCE_DATA_SCOPE=
 ```
 
 构建并以独立环境文件启动：
@@ -171,7 +175,9 @@ curl -fsS http://127.0.0.1:3001/api/health/live
 curl -fsS http://127.0.0.1:3001/api/health/ready
 ```
 
-当前 Redis `supplier-staging-redis` 仅监听 `127.0.0.1:6379`，使用 `supplier-staging-redis-data` 命名卷、AOF 和 `unless-stopped`。BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检和批量商品执行五项开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本已前移到 `20260804183000_add_published_product_inventory_snapshot`，因此第 38 个 migration 未应用时新 BFF 必须保持 503，不能绕过后接流量。
+当前 Redis `supplier-staging-redis` 仅监听 `127.0.0.1:6379`，使用 `supplier-staging-redis-data` 命名卷、AOF 和 `unless-stopped`。BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、批量商品执行和批量货源采集六项开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本已前移到 `20260804210000_add_source_imports`，因此第 39 个 migration 未应用时新 BFF 必须保持 503，不能绕过后接流量。
+
+批量货源采集不得仅因页面可见就开启。先保持 `SOURCE_IMPORT_ENABLED=false`，用两个受控 1688 买家账号对同一组 offer 分别取证标题、SKU、分销价和库存；只有确认这些字段不随账号变化，并完成方案配额、限流和曝光回传要求核验后，才在维护窗口写入 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 并开启 worker。开启后至少用两个 Supabase 测试用户分别验证任务列表、按 client request 恢复和“我的货源”互不可见；再演练 BFF 重启、Redis 不可用、停止未开始项、单个失败项重试、相同 UUID 同参恢复和异参 409。任何一项失败都应重新关闭开关，不得回退 Mock。
 
 ## 6. 启动 Quick Tunnel 并更新 Worker
 

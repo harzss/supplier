@@ -47,6 +47,8 @@ model User {
   publishDraft                  PublishDraft?
   publishTasks                  PublishTask[]
   productBatchTasks             ProductBatchTask[]
+  sourceImportTasks             SourceImportTask[]
+  userSourceProducts            UserSourceProduct[]
   favorites                     UserFavorite[]
   aiUsageLogs                   AiUsageLog[]
   subscriptions                 Subscription[]
@@ -104,6 +106,7 @@ model Shop {
   publishedProducts             PublishedProduct[]
   orders                        Order[]
   buyerPurchaseOrders           PurchaseOrder[]                       @relation("PurchaseBuyerShop")
+  sourceImportTasks             SourceImportTask[]                    @relation("SourceImportBuyerShop")
   categoryCatalog               ShopCategory[]
   categoryPropertyMappings      ProductCategoryPropertyMapping[]
   categoryQualificationMappings ProductCategoryQualificationMapping[]
@@ -184,6 +187,8 @@ model SourceProduct {
   categoryPropertyMappings      ProductCategoryPropertyMapping[]
   categoryQualificationMappings ProductCategoryQualificationMapping[]
   skuMappings                   ProductSkuMapping[]
+  sourceImportItems             SourceImportItem[]
+  userSourceProducts            UserSourceProduct[]
 
   @@index([categoryL1])
   @@index([availability])
@@ -221,6 +226,27 @@ model UserFavorite {
 
   @@unique([userId, sourceProductId])
   @@map("user_favorites")
+}
+
+// 用户采集箱归属。SourceProduct 仍是全局 offer 缓存；本表只表达哪个用户采集过该货源，
+// 不代表收藏，也不自动触发评分。
+model UserSourceProduct {
+  id               BigInt   @id @default(autoincrement())
+  userId           BigInt   @map("user_id")
+  sourceProductId  BigInt   @map("source_product_id")
+  firstCollectedAt DateTime @default(now()) @map("first_collected_at")
+  lastCollectedAt  DateTime @default(now()) @map("last_collected_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceProduct     SourceProduct      @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+  sourceImportItems SourceImportItem[]
+
+  @@unique([userId, sourceProductId], name: "uk_user_source_product", map: "user_source_products_user_source_product_key")
+  @@index([userId, lastCollectedAt(sort: Desc)])
+  @@index([sourceProductId])
+  @@map("user_source_products")
 }
 
 // 用户确认的平台叶子类目映射；避免把单个用户的选择写回全局货源 attributes。
@@ -557,6 +583,72 @@ model ProductBatchItem {
   @@index([status, nextRunAt])
   @@index([lockedAt])
   @@map("product_batch_items")
+}
+
+// ----- 1688 批量货源采集 -----
+
+// 采集任务复用批量商品任务/条目状态枚举，但使用独立表：采集条目在执行前并不存在
+// PublishedProduct，不能复用 product_batch_items 的强外键语义。
+model SourceImportTask {
+  id                 BigInt                 @id @default(autoincrement())
+  userId             BigInt                 @map("user_id")
+  buyerShopId        BigInt?                @map("buyer_shop_id")
+  clientRequestId    String                 @map("client_request_id") @db.Uuid
+  requestFingerprint String                 @map("request_fingerprint") @db.VarChar(64)
+  status             ProductBatchTaskStatus @default(preview)
+  stateRevision      Int                    @default(1) @map("state_revision")
+  previewRevision    Int                    @default(1) @map("preview_revision")
+  cancelRequestedAt  DateTime?              @map("cancel_requested_at")
+  confirmedAt        DateTime?              @map("confirmed_at")
+  startedAt          DateTime?              @map("started_at")
+  finishedAt         DateTime?              @map("finished_at")
+  createdAt          DateTime               @default(now()) @map("created_at")
+  updatedAt          DateTime               @updatedAt @map("updated_at")
+
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  buyerShop Shop?              @relation("SourceImportBuyerShop", fields: [buyerShopId], references: [id], onDelete: Restrict)
+  items     SourceImportItem[]
+
+  @@unique([userId, clientRequestId], name: "uk_source_import_user_client_request", map: "source_import_tasks_user_client_request_key")
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@index([buyerShopId])
+  @@map("source_import_tasks")
+}
+
+model SourceImportItem {
+  id                  BigInt                 @id @default(autoincrement())
+  taskId              BigInt                 @map("task_id")
+  offerId             String                 @map("offer_id") @db.VarChar(32)
+  ordinal             Int
+  sourceProductId     BigInt?                @map("source_product_id")
+  userSourceProductId BigInt?                @map("user_source_product_id")
+  status              ProductBatchItemStatus @default(pending)
+  beforeSnapshot      Json                   @map("before_snapshot") @db.JsonB
+  result              Json?                  @db.JsonB
+  errorCode           String?                @map("error_code") @db.VarChar(64)
+  errorMessage        String?                @map("error_message") @db.Text
+  attempts            Int                    @default(0)
+  maxAttempts         Int                    @default(3) @map("max_attempts")
+  nextRunAt           DateTime               @default(now()) @map("next_run_at")
+  lockedAt            DateTime?              @map("locked_at")
+  lockedBy            String?                @map("locked_by") @db.VarChar(128)
+  startedAt           DateTime?              @map("started_at")
+  finishedAt          DateTime?              @map("finished_at")
+  createdAt           DateTime               @default(now()) @map("created_at")
+  updatedAt           DateTime               @updatedAt @map("updated_at")
+
+  task              SourceImportTask   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  sourceProduct     SourceProduct?     @relation(fields: [sourceProductId], references: [id], onDelete: SetNull)
+  userSourceProduct UserSourceProduct? @relation(fields: [userSourceProductId], references: [id], onDelete: SetNull)
+
+  @@unique([taskId, offerId], name: "uk_source_import_task_offer", map: "source_import_items_task_offer_key")
+  @@index([taskId, status])
+  @@index([status, nextRunAt])
+  @@index([lockedAt])
+  @@index([sourceProductId])
+  @@index([userSourceProductId])
+  @@map("source_import_items")
 }
 
 // ----- 订单 -----

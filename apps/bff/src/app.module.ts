@@ -20,6 +20,7 @@ import { FavoriteModule } from './modules/favorite/favorite.module';
 import { validateEnvironment } from './config/environment';
 import { ObservabilityModule } from './modules/observability/observability.module';
 import { ActivationModule } from './modules/activation/activation.module';
+import { SourceImportModule } from './modules/product/source-import.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { ActivationModule } from './modules/activation/activation.module';
     SettingsModule,
     ShopModule,
     ProductModule,
+    SourceImportModule,
     PublishModule,
     OrderModule,
     CategoryModule,

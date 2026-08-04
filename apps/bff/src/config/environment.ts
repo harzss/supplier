@@ -162,6 +162,20 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
     10,
     'PRODUCT_BATCH_MAX_ATTEMPTS',
   );
+  environment.SOURCE_IMPORT_POLL_MS = integer(
+    environment.SOURCE_IMPORT_POLL_MS,
+    2_000,
+    500,
+    60_000,
+    'SOURCE_IMPORT_POLL_MS',
+  );
+  environment.SOURCE_IMPORT_MAX_ATTEMPTS = integer(
+    environment.SOURCE_IMPORT_MAX_ATTEMPTS,
+    3,
+    1,
+    10,
+    'SOURCE_IMPORT_MAX_ATTEMPTS',
+  );
   validateOptionalBoolean(environment.SWAGGER_ENABLED, 'SWAGGER_ENABLED');
   validateOptionalBoolean(environment.DOUYIN_ORDER_SYNC_ENABLED, 'DOUYIN_ORDER_SYNC_ENABLED');
   if (typeof environment.DOUYIN_ORDER_SYNC_ENABLED === 'boolean') {
@@ -174,6 +188,10 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
   validateOptionalBoolean(environment.PRODUCT_BATCH_ENABLED, 'PRODUCT_BATCH_ENABLED');
   if (typeof environment.PRODUCT_BATCH_ENABLED === 'boolean') {
     environment.PRODUCT_BATCH_ENABLED = String(environment.PRODUCT_BATCH_ENABLED);
+  }
+  validateOptionalBoolean(environment.SOURCE_IMPORT_ENABLED, 'SOURCE_IMPORT_ENABLED');
+  if (typeof environment.SOURCE_IMPORT_ENABLED === 'boolean') {
+    environment.SOURCE_IMPORT_ENABLED = String(environment.SOURCE_IMPORT_ENABLED);
   }
   validateOptionalBoolean(
     environment.ALIBABA_1688_PURCHASE_ENABLED,
@@ -266,6 +284,7 @@ function validateProductionEnvironment(environment: RuntimeEnvironment): void {
   }
   environment.PUBLISH_QUEUE_MODE = queueMode;
   validateProductionPurchase(environment);
+  validateProductionSourceImport(environment);
   validateProductionDouyinAutomation(environment);
 }
 
@@ -280,6 +299,30 @@ function validateProductionPurchase(environment: RuntimeEnvironment): void {
   requiredString(environment, 'ALIBABA_1688_APP_SECRET');
   const redirectUri = requiredString(environment, 'ALIBABA_1688_OAUTH_REDIRECT_URI');
   validateUrl(redirectUri, 'ALIBABA_1688_OAUTH_REDIRECT_URI', ['https:']);
+}
+
+function validateProductionSourceImport(environment: RuntimeEnvironment): void {
+  if (environment.SOURCE_IMPORT_ENABLED !== 'true') return;
+  requiredString(environment, 'ALIBABA_1688_APP_KEY');
+  requiredString(environment, 'ALIBABA_1688_APP_SECRET');
+  const redirectUri = normalizeOAuthHttpsUrl(
+    requiredString(environment, 'ALIBABA_1688_OAUTH_REDIRECT_URI'),
+    'ALIBABA_1688_OAUTH_REDIRECT_URI',
+  );
+  environment.ALIBABA_1688_OAUTH_REDIRECT_URI = redirectUri;
+  const allowlist = requiredString(environment, 'OAUTH_CALLBACK_ALLOWLIST')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => normalizeOAuthHttpsUrl(value, 'OAUTH_CALLBACK_ALLOWLIST'));
+  if (!allowlist.includes(redirectUri)) {
+    throw new Error('OAUTH_CALLBACK_ALLOWLIST must contain ALIBABA_1688_OAUTH_REDIRECT_URI');
+  }
+  if (optionalString(environment.ALIBABA_1688_SOURCE_DATA_SCOPE) !== 'global_offer') {
+    throw new Error(
+      'ALIBABA_1688_SOURCE_DATA_SCOPE must be global_offer when source import is enabled',
+    );
+  }
 }
 
 function validateProductionDouyinAutomation(environment: RuntimeEnvironment): void {

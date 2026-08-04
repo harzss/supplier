@@ -9,6 +9,7 @@ import { isDemoAuthMode } from '@/lib/environment';
 
 const NAV_ITEMS = [
   { href: '/', label: '今日选品', eyebrow: 'Sourcing', icon: 'spark' },
+  { href: '/sources', label: '我的货源', eyebrow: 'Source library', icon: 'source' },
   { href: '/published', label: '铺货中心', eyebrow: 'Catalog', icon: 'package' },
   { href: '/orders', label: '订单履约', eyebrow: 'Fulfillment', icon: 'orders' },
   { href: '/analytics', label: '经营分析', eyebrow: 'Intelligence', icon: 'chart' },
@@ -288,6 +289,9 @@ function NavIcon({ name }: { name: NavIconName }) {
   const paths: Record<NavIconName, ReactNode> = {
     spark: (
       <path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3Zm6 11 .8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8L18 14ZM5 14l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3Z" />
+    ),
+    source: (
+      <path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Zm0 0 8 4.5m8-4.5L12 12m0 9v-9m-5-6.2 8 4.5" />
     ),
     package: <path d="m4 7 8-4 8 4v10l-8 4-8-4V7Zm0 0 8 4m8-4-8 4m0 10V11m-4-6 8 4" />,
     orders: <path d="M6 3h12v18H6V3Zm3 5h6M9 12h6M9 16h4" />,

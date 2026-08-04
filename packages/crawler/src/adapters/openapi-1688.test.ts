@@ -215,7 +215,129 @@ describe('OpenApi1688Adapter', () => {
       price: 35,
       priceMin: 35,
       priceMax: 35,
+      skuList: [],
     });
+  });
+
+  it('bounds monthly sales to a PostgreSQL integer', async () => {
+    const boundary = productAdapter({ bookedCount: '2147483647' });
+    await expect(boundary.fetchProduct('573741401425')).resolves.toMatchObject({
+      monthlySold: 2_147_483_647,
+    });
+
+    const overflow = productAdapter({ bookedCount: '2147483648' });
+    await expect(overflow.fetchProduct('573741401425')).rejects.toMatchObject({ code: 'parse' });
+  });
+
+  it('accepts bounded detail images and rejects oversized image collections', async () => {
+    const boundary = productAdapter({
+      intelligentInfo: {
+        descriptionImages: Array.from({ length: 50 }, (_, index) => `img/detail-${index}.jpg`),
+      },
+    });
+    const product = await boundary.fetchProduct('573741401425');
+    expect(product?.detailImages).toHaveLength(50);
+
+    const overflow = productAdapter({
+      intelligentInfo: {
+        descriptionImages: Array.from({ length: 51 }, (_, index) => `img/detail-${index}.jpg`),
+      },
+    });
+    await expect(overflow.fetchProduct('573741401425')).rejects.toMatchObject({ code: 'parse' });
+  });
+
+  it.each([
+    [
+      'overlong main image',
+      { productImage: { images: [`https://example.com/${'x'.repeat(500)}`] } },
+    ],
+    [
+      'overlong detail image',
+      { intelligentInfo: { descriptionImages: [`https://example.com/${'x'.repeat(500)}`] } },
+    ],
+    [
+      'main image with a control character',
+      { productImage: { images: ['https://example.com/a\nb.jpg'] } },
+    ],
+    [
+      'detail image with a control character',
+      { intelligentInfo: { descriptionImages: ['https://example.com/a\tb.jpg'] } },
+    ],
+  ])('rejects an %s', async (_label, overrides) => {
+    const adapter = productAdapter(overrides);
+    await expect(adapter.fetchProduct('573741401425')).rejects.toMatchObject({ code: 'parse' });
+  });
+
+  it('accepts bounded product and SKU attributes', async () => {
+    const adapter = productAdapter({
+      productAttribute: Array.from({ length: 100 }, (_, index) => ({
+        attributeName: `product-${index}`,
+        value: 'v'.repeat(1_024),
+      })),
+      productSkuInfos: [
+        validSku({
+          attributes: Array.from({ length: 10 }, (_, index) => ({
+            attributeDisplayName: `sku-${index}`,
+            attributeValue: 'v'.repeat(255),
+          })),
+        }),
+      ],
+    });
+
+    const product = await adapter.fetchProduct('573741401425');
+    expect(Object.keys(product?.attributes ?? {})).toHaveLength(100);
+    expect(Object.keys(product?.skuList?.[0]?.attributes ?? {})).toHaveLength(10);
+  });
+
+  it.each([
+    [
+      'too many product attributes',
+      { productAttribute: Array.from({ length: 101 }, () => ({ attributeName: 'a', value: 'b' })) },
+    ],
+    [
+      'overlong product attribute name',
+      { productAttribute: [{ attributeName: 'a'.repeat(129), value: 'b' }] },
+    ],
+    [
+      'overlong product attribute value',
+      { productAttribute: [{ attributeName: 'a', value: 'b'.repeat(1_025) }] },
+    ],
+    [
+      'too many SKU attributes',
+      {
+        productSkuInfos: [
+          validSku({
+            attributes: Array.from({ length: 11 }, () => ({
+              attributeDisplayName: 'a',
+              attributeValue: 'b',
+            })),
+          }),
+        ],
+      },
+    ],
+    [
+      'overlong SKU attribute name',
+      {
+        productSkuInfos: [
+          validSku({
+            attributes: [{ attributeDisplayName: 'a'.repeat(65), attributeValue: 'b' }],
+          }),
+        ],
+      },
+    ],
+    [
+      'overlong SKU attribute value',
+      {
+        productSkuInfos: [
+          validSku({
+            attributes: [{ attributeDisplayName: 'a', attributeValue: 'b'.repeat(256) }],
+          }),
+        ],
+      },
+    ],
+  ])('rejects %s', async (_label, overrides) => {
+    const adapter = productAdapter(overrides);
+    await expect(adapter.fetchProduct('573741401425')).rejects.toMatchObject({ code: 'parse' });
   });
 
   it('maps HTTP and platform errors to retry-safe crawler errors', async () => {
@@ -239,6 +361,130 @@ describe('OpenApi1688Adapter', () => {
       code: 'auth',
       retryable: false,
     });
+  });
+
+  it.each([
+    [408, 'network'],
+    [425, 'network'],
+    [429, 'rate_limited'],
+    [500, 'network'],
+    [503, 'network'],
+  ] as const)('treats HTTP %i as retryable %s failure', async (status, code) => {
+    const adapter = new OpenApi1688Adapter(
+      CONFIG,
+      vi.fn().mockResolvedValue(new Response('', { status })),
+    );
+
+    await expect(adapter.fetchProduct('573741401425')).rejects.toMatchObject({
+      code,
+      retryable: true,
+      httpStatus: status,
+    });
+  });
+
+  it('rejects product fields that exceed SourceProduct database bounds', async () => {
+    const overlongTitle = productAdapter({ subject: 'x'.repeat(256) });
+    await expect(overlongTitle.fetchProduct('573741401425')).rejects.toMatchObject({
+      code: 'parse',
+    });
+
+    const overlongSupplier = productAdapter({ supplierUserId: 's'.repeat(33) });
+    await expect(overlongSupplier.fetchProduct('573741401425')).rejects.toMatchObject({
+      code: 'parse',
+    });
+
+    const overlongCategory = productAdapter({ categoryName: '类'.repeat(65) });
+    await expect(overlongCategory.fetchProduct('573741401425')).rejects.toMatchObject({
+      code: 'parse',
+    });
+
+    const fetcher = vi.fn();
+    const overlongProductId = new OpenApi1688Adapter(CONFIG, fetcher);
+    await expect(overlongProductId.fetchProduct('1'.repeat(33))).rejects.toMatchObject({
+      code: 'parse',
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('rejects product and SKU prices outside Decimal(10,2)', async () => {
+    const productPrice = productAdapter({
+      productSkuInfos: [],
+      productSaleInfo: { consignPrice: 100_000_000 },
+    });
+    await expect(productPrice.fetchProduct('573741401425')).rejects.toMatchObject({
+      code: 'parse',
+    });
+
+    const skuPrice = productAdapter({
+      productSkuInfos: [validSku({ consignPrice: 100_000_000 })],
+    });
+    await expect(skuPrice.fetchProduct('573741401425')).rejects.toMatchObject({ code: 'parse' });
+
+    const fractionalCentPrice = productAdapter({
+      productSkuInfos: [validSku({ consignPrice: 12.345 })],
+    });
+    await expect(fractionalCentPrice.fetchProduct('573741401425')).rejects.toMatchObject({
+      code: 'parse',
+    });
+  });
+
+  it('accepts product, price, and SKU count database boundaries', async () => {
+    const adapter = productAdapter({
+      subject: 'x'.repeat(255),
+      supplierUserId: 's'.repeat(32),
+      categoryName: '类'.repeat(64),
+      productSkuInfos: Array.from({ length: 100 }, (_, index) =>
+        validSku({
+          specId: `sku-${index + 1}`,
+          consignPrice: 99_999_999.99,
+          amountOnSale: index,
+        }),
+      ),
+    });
+
+    await expect(adapter.fetchProduct('573741401425')).resolves.toMatchObject({
+      title: 'x'.repeat(255),
+      price: 99_999_999.99,
+      skuList: expect.arrayContaining([expect.objectContaining({ skuId: 'sku-100', stock: 99 })]),
+    });
+  });
+
+  it('rejects details with more than 100 SKUs', async () => {
+    const adapter = productAdapter({
+      productSkuInfos: Array.from({ length: 101 }, (_, index) =>
+        validSku({ specId: `sku-${index + 1}` }),
+      ),
+    });
+
+    await expect(adapter.fetchProduct('573741401425')).rejects.toMatchObject({ code: 'parse' });
+  });
+
+  it.each([
+    ['non-object SKU', null],
+    ['missing SKU ID', validSku({ specId: null, skuId: null })],
+    ['overlong SKU ID', validSku({ specId: 'x'.repeat(129) })],
+    ['missing stock', validSku({ amountOnSale: undefined })],
+    ['non-numeric stock', validSku({ amountOnSale: 'many' })],
+    ['boolean stock', validSku({ amountOnSale: false })],
+    ['negative stock', validSku({ amountOnSale: -1 })],
+    ['fractional stock', validSku({ amountOnSale: 1.5 })],
+    ['oversized stock', validSku({ amountOnSale: 2_147_483_648 })],
+    ['missing price', validSku({ consignPrice: undefined })],
+  ])('rejects a detail containing an invalid %s', async (_label, sku) => {
+    const adapter = productAdapter({ productSkuInfos: [sku] });
+
+    await expect(adapter.fetchProduct('573741401425')).rejects.toMatchObject({ code: 'parse' });
+  });
+
+  it('rejects duplicate normalized SKU IDs', async () => {
+    const adapter = productAdapter({
+      productSkuInfos: [
+        validSku({ skuId: 1, specId: 'duplicate' }),
+        validSku({ skuId: 2, specId: 'duplicate' }),
+      ],
+    });
+
+    await expect(adapter.fetchProduct('573741401425')).rejects.toMatchObject({ code: 'parse' });
   });
 
   it('fails closed on mismatched product IDs and unsupported search filters', async () => {
@@ -272,4 +518,32 @@ function jsonResponse(value: unknown): Response {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function productAdapter(overrides: Record<string, unknown>): OpenApi1688Adapter {
+  return new OpenApi1688Adapter(
+    CONFIG,
+    vi.fn().mockResolvedValue(
+      jsonResponse({
+        success: true,
+        productInfo: {
+          productID: 573741401425,
+          status: 'published',
+          subject: '合法商品',
+          productSkuInfos: [validSku()],
+          ...overrides,
+        },
+      }),
+    ),
+  );
+}
+
+function validSku(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    skuId: 111,
+    specId: 'sku-1',
+    amountOnSale: 8,
+    consignPrice: 12.5,
+    ...overrides,
+  };
 }

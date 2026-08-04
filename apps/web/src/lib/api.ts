@@ -632,6 +632,92 @@ export interface ProductBatchTaskPage {
   pageSize: number;
 }
 
+export type SourceImportAction = 'create' | 'refresh';
+
+export interface SourceImportSummary {
+  total: number;
+  pending: number;
+  running: number;
+  retryWait: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+  completed: number;
+  progressPercent: number;
+}
+
+export interface SourceImportItem {
+  itemId: string;
+  reference: string;
+  offerId: string;
+  existing: boolean;
+  collected: boolean;
+  action: SourceImportAction;
+  status: string;
+  retryable: boolean;
+  title: string | null;
+  mainImage: string | null;
+  price: number | null;
+  skuCount: number | null;
+  totalStock: number | null;
+  availability: string | null;
+  sourceProductId: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  result: Record<string, unknown> | null;
+  attempts: number;
+  maxAttempts: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface SourceImportTask {
+  taskId: string;
+  clientRequestId: string;
+  buyerShopId: string | null;
+  status: string;
+  previewRevision: number;
+  cancelRequestedAt: string | null;
+  confirmedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  summary: SourceImportSummary;
+  items: SourceImportItem[];
+}
+
+export interface SourceImportTaskPage {
+  items: SourceImportTask[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface CollectedSourceProduct {
+  collectionId: string;
+  sourceProductId: string;
+  productId1688: string;
+  title: string;
+  price: number;
+  mainImage: string | null;
+  categoryL1: string | null;
+  availability: string;
+  totalStock: number;
+  skuCount: number;
+  syncedAt: string;
+  firstCollectedAt: string;
+  lastCollectedAt: string;
+}
+
+export interface CollectedSourceProductList {
+  items: CollectedSourceProduct[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export interface PublishTaskSummary {
   taskId: string;
   status: string;
@@ -1209,6 +1295,53 @@ export const api = {
       `/product-batches/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/verify-online`,
       { method: 'POST' },
     );
+  },
+
+  createSourceImportPreview(body: {
+    clientRequestId: string;
+    references: string[];
+    buyerShopId?: string;
+  }): Promise<SourceImportTask> {
+    return request('/source-imports/previews', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  sourceImportTask(taskId: string): Promise<SourceImportTask> {
+    return request(`/source-imports/${encodeURIComponent(taskId)}`);
+  },
+
+  sourceImportTaskByClientRequest(clientRequestId: string): Promise<SourceImportTask> {
+    return request(`/source-imports/by-client-request/${encodeURIComponent(clientRequestId)}`);
+  },
+
+  sourceImportTasks(page: number, pageSize: number): Promise<SourceImportTaskPage> {
+    const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+    return request(`/source-imports?${params.toString()}`);
+  },
+
+  executeSourceImport(taskId: string, previewRevision: number): Promise<SourceImportTask> {
+    return request(`/source-imports/${encodeURIComponent(taskId)}/execute`, {
+      method: 'POST',
+      body: JSON.stringify({ previewRevision }),
+    });
+  },
+
+  cancelSourceImport(taskId: string): Promise<SourceImportTask> {
+    return request(`/source-imports/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
+  },
+
+  retrySourceImport(taskId: string, itemIds?: string[]): Promise<SourceImportTask> {
+    return request(`/source-imports/${encodeURIComponent(taskId)}/retry`, {
+      method: 'POST',
+      body: JSON.stringify(itemIds?.length ? { itemIds } : {}),
+    });
+  },
+
+  collectedSourceProducts(page = 1, pageSize = 50): Promise<CollectedSourceProductList> {
+    const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+    return request(`/source-products/collected?${params.toString()}`);
   },
 
   publishTasks(page: number, pageSize: number): Promise<PublishTaskPage> {

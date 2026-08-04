@@ -45,8 +45,13 @@ export default function FavoritesPage() {
                 从收藏中选择最多 {MAX_COMPARE} 款，并排核对采购价、月销、五维评分与代发条件。
               </p>
             </div>
-            <div className="rounded-full bg-white px-3 py-1.5 text-xs text-[var(--muted)] shadow-sm ring-1 ring-black/5 tabular-nums">
-              已收藏 {items.length} · 已选 {selectedItems.length}/{MAX_COMPARE}
+            <div className="flex flex-wrap items-center gap-2">
+              <Link href="/sources/import" className="primary-button source-entry-button">
+                批量采集 1688
+              </Link>
+              <div className="rounded-full bg-white px-3 py-1.5 text-xs text-[var(--muted)] shadow-sm ring-1 ring-black/5 tabular-nums">
+                已收藏 {items.length} · 已选 {selectedItems.length}/{MAX_COMPARE}
+              </div>
             </div>
           </div>
         </header>
@@ -63,9 +68,14 @@ export default function FavoritesPage() {
             <p className="mt-2 text-sm text-[var(--muted)]">
               从今日推荐中收藏感兴趣的款，再来这里并排比较。
             </p>
-            <Link href="/" className="secondary-button mt-5">
-              去今日推荐选款 →
-            </Link>
+            <div className="mt-5 flex flex-wrap justify-center gap-2">
+              <Link href="/sources/import" className="primary-button source-entry-button">
+                从 1688 批量采集
+              </Link>
+              <Link href="/" className="secondary-button">
+                去今日推荐选款 →
+              </Link>
+            </div>
           </div>
         ) : null}
 

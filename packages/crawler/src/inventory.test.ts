@@ -45,4 +45,55 @@ describe('source inventory snapshot', () => {
       totalStock: 0,
     });
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 2_147_483_648])(
+    'rejects malformed or PostgreSQL-incompatible SKU stock %s',
+    (stock) => {
+      expect(() =>
+        inventorySnapshot({
+          productId1688: '1005',
+          skuList: [{ skuId: 'sku-1', specName: '默认', price: 1, stock }],
+        }),
+      ).toThrow(/stock/i);
+    },
+  );
+
+  it('rejects a total stock value that cannot be stored in a PostgreSQL integer', () => {
+    expect(() =>
+      inventorySnapshot({
+        productId1688: '1006',
+        skuList: [
+          { skuId: 'sku-1', specName: 'A', price: 1, stock: 2_147_483_647 },
+          { skuId: 'sku-2', specName: 'B', price: 1, stock: 1 },
+        ],
+      }),
+    ).toThrow(/total stock/i);
+  });
+
+  it('accepts the PostgreSQL integer stock boundary', () => {
+    expect(
+      inventorySnapshot({
+        productId1688: '1007',
+        skuList: [{ skuId: 'sku-1', specName: '默认', price: 1, stock: 2_147_483_647 }],
+      }),
+    ).toMatchObject({ availability: 'available', totalStock: 2_147_483_647 });
+  });
+
+  it('rejects empty and duplicate normalized SKU IDs', () => {
+    expect(() =>
+      inventorySnapshot({
+        productId1688: '1008',
+        skuList: [{ skuId: ' ', specName: '默认', price: 1, stock: 1 }],
+      }),
+    ).toThrow(/SKU ID/i);
+    expect(() =>
+      inventorySnapshot({
+        productId1688: '1008',
+        skuList: [
+          { skuId: 'sku-1', specName: 'A', price: 1, stock: 1 },
+          { skuId: ' sku-1 ', specName: 'B', price: 1, stock: 1 },
+        ],
+      }),
+    ).toThrow(/duplicate/i);
+  });
 });

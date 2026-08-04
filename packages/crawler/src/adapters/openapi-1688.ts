@@ -35,6 +35,22 @@ const IMAGE_BASE_URL = 'https://cbu01.alicdn.com/';
 const REQUEST_TIMEOUT_MS = 10_000;
 const SEARCH_PAGE_SIZE = 50;
 const SEARCH_MAX_PAGES = 10;
+const MAX_PRODUCT_ID_LENGTH = 32;
+const MAX_SUPPLIER_ID_LENGTH = 32;
+const MAX_PRODUCT_TITLE_LENGTH = 255;
+const MAX_CATEGORY_L1_LENGTH = 64;
+const MAX_MAIN_IMAGE_LENGTH = 512;
+const MAX_DETAIL_IMAGES = 50;
+const MAX_PRODUCT_ATTRIBUTES = 100;
+const MAX_PRODUCT_ATTRIBUTE_NAME_LENGTH = 128;
+const MAX_PRODUCT_ATTRIBUTE_VALUE_LENGTH = 1_024;
+const MAX_SKUS = 100;
+const MAX_SKU_ID_LENGTH = 128;
+const MAX_SKU_ATTRIBUTES = 10;
+const MAX_SKU_ATTRIBUTE_NAME_LENGTH = 64;
+const MAX_SKU_ATTRIBUTE_VALUE_LENGTH = 255;
+const MAX_SOURCE_PRICE = 99_999_999.99;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const SEARCH_FILTERS = new Set<OpenApi1688SearchFilter>([
   'shipIn48Hours',
   'freeExchange7days',
@@ -236,12 +252,22 @@ function mapProduct(
   }
   const status = stringValue(product.status);
   if (status && status !== 'published') return null;
-  const title = boundedText(product.subject, 256, 'product title');
+  const title = boundedText(product.subject, MAX_PRODUCT_TITLE_LENGTH, 'product title');
 
-  const rawSkus = arrayValue(product.productSkuInfos ?? product.skuInfos);
-  const skuList = rawSkus.map(mapSku).filter((sku): sku is CrawledSku => !!sku);
-  if (rawSkus.length > 0 && skuList.length === 0) {
-    throw new CrawlerError('Alibaba 1688 product detail contains no valid SKU', 'parse');
+  const rawSkuValue = product.productSkuInfos ?? product.skuInfos;
+  if (rawSkuValue !== undefined && rawSkuValue !== null && !Array.isArray(rawSkuValue)) {
+    throw new CrawlerError('Alibaba 1688 product detail contains invalid SKU data', 'parse');
+  }
+  const rawSkus = arrayValue(rawSkuValue);
+  if (rawSkus.length > MAX_SKUS) {
+    throw new CrawlerError(
+      `Alibaba 1688 product detail contains more than ${MAX_SKUS} SKUs`,
+      'parse',
+    );
+  }
+  const skuList = rawSkus.map(mapSku);
+  if (new Set(skuList.map((sku) => sku.skuId)).size !== skuList.length) {
+    throw new CrawlerError('Alibaba 1688 product detail contains duplicate SKU IDs', 'parse');
   }
 
   const saleInfo = recordValue(product.productSaleInfo ?? product.saleInfo);
@@ -261,16 +287,38 @@ function mapProduct(
 
   const productImage = recordValue(product.productImage ?? product.image);
   const mainImages = normalizeImages(productImage?.images);
+  const mainImage = optionalBoundedText(mainImages[0], MAX_MAIN_IMAGE_LENGTH, 'main image URL');
   const intelligentInfo = recordValue(product.intelligentInfo);
   const detailImages = unique([
     ...normalizeImages(intelligentInfo?.descriptionImages),
     ...extractHtmlImages(stringValue(product.description)),
   ]).filter((url) => !mainImages.includes(url));
+  if (detailImages.length > MAX_DETAIL_IMAGES) {
+    throw new CrawlerError(
+      `Alibaba 1688 product detail contains more than ${MAX_DETAIL_IMAGES} detail images`,
+      'parse',
+    );
+  }
 
-  const categoryName = stringValue(product.categoryName) || undefined;
+  const categoryName = optionalBoundedText(
+    product.categoryName,
+    MAX_CATEGORY_L1_LENGTH,
+    'category name',
+  );
   const categoryId = optionalPositiveId(product.categoryID);
   const attributes = mapAttributes(product.productAttribute ?? product.attributes);
-  if (categoryId) attributes.alibaba1688CategoryId = categoryId;
+  if (categoryId) {
+    if (
+      attributes.alibaba1688CategoryId === undefined &&
+      Object.keys(attributes).length >= MAX_PRODUCT_ATTRIBUTES
+    ) {
+      throw new CrawlerError(
+        `Alibaba 1688 product detail contains more than ${MAX_PRODUCT_ATTRIBUTES} attributes`,
+        'parse',
+      );
+    }
+    attributes.alibaba1688CategoryId = categoryId;
+  }
 
   const rawGroups = [
     ...arrayValue(product.productBizGroupInfos ?? product.bizGroupInfos),
@@ -288,14 +336,16 @@ function mapProduct(
   const priceMax = Math.max(...prices);
   return {
     productId1688,
-    supplierId:
-      stringValue(product.supplierUserId ?? product.sellerId ?? product.supplierLoginId) ||
-      undefined,
+    supplierId: optionalBoundedText(
+      product.supplierUserId ?? product.sellerId ?? product.supplierLoginId,
+      MAX_SUPPLIER_ID_LENGTH,
+      'supplier ID',
+    ),
     title,
     price: priceMin,
     priceMin,
     priceMax,
-    mainImage: mainImages[0],
+    mainImage,
     detailImages,
     categoryPath: categoryName,
     categoryL1: categoryName,
@@ -307,10 +357,12 @@ function mapProduct(
   };
 }
 
-function mapSku(value: unknown): CrawledSku | null {
+function mapSku(value: unknown, index: number): CrawledSku {
   const sku = recordValue(value);
-  if (!sku) return null;
-  const skuId = stringValue(sku.specId ?? sku.skuId);
+  if (!sku) {
+    throw new CrawlerError(`Alibaba 1688 SKU ${index + 1} is invalid`, 'parse');
+  }
+  const skuId = boundedSkuId(sku.specId ?? sku.skuId, index);
   const price = firstPositiveNumber([
     sku.consignPrice,
     sku.jxhyPrice,
@@ -318,9 +370,14 @@ function mapSku(value: unknown): CrawledSku | null {
     sku.price,
     sku.retailPrice,
   ]);
-  if (!skuId || !price) return null;
-  const stockValue = Number(sku.amountOnSale);
-  const stock = Number.isFinite(stockValue) && stockValue >= 0 ? Math.trunc(stockValue) : 0;
+  if (price === null) {
+    throw new CrawlerError(`Alibaba 1688 SKU ${index + 1} price is invalid`, 'parse');
+  }
+  const stock = nonNegativeInteger(
+    sku.amountOnSale,
+    POSTGRES_INTEGER_MAX,
+    `SKU ${index + 1} stock`,
+  );
   const attributes = mapSkuAttributes(sku.attributes);
   const specName = Object.entries(attributes)
     .map(([key, item]) => `${key}:${item}`)
@@ -340,10 +397,18 @@ function mapSku(value: unknown): CrawledSku | null {
 
 function mapAttributes(value: unknown): Record<string, string> {
   const attributes: Record<string, string> = {};
-  for (const item of arrayValue(value)) {
+  const items = boundedArray(value, MAX_PRODUCT_ATTRIBUTES, 'product attributes');
+  for (const item of items) {
     const record = recordValue(item);
-    const name = stringValue(record?.attributeName);
-    const content = stringValue(record?.value);
+    const rawName = stringValue(record?.attributeName);
+    const rawContent = stringValue(record?.value);
+    if (!rawName || !rawContent) continue;
+    const name = boundedText(rawName, MAX_PRODUCT_ATTRIBUTE_NAME_LENGTH, 'product attribute name');
+    const content = boundedText(
+      rawContent,
+      MAX_PRODUCT_ATTRIBUTE_VALUE_LENGTH,
+      'product attribute value',
+    );
     if (name && content && attributes[name] === undefined) attributes[name] = content;
   }
   return attributes;
@@ -351,10 +416,14 @@ function mapAttributes(value: unknown): Record<string, string> {
 
 function mapSkuAttributes(value: unknown): Record<string, string> {
   const attributes: Record<string, string> = {};
-  for (const item of arrayValue(value)) {
+  const items = boundedArray(value, MAX_SKU_ATTRIBUTES, 'SKU attributes');
+  for (const item of items) {
     const record = recordValue(item);
-    const name = stringValue(record?.attributeDisplayName ?? record?.attributeName);
-    const content = stringValue(record?.attributeValue ?? record?.customValueName);
+    const rawName = stringValue(record?.attributeDisplayName ?? record?.attributeName);
+    const rawContent = stringValue(record?.attributeValue ?? record?.customValueName);
+    if (!rawName || !rawContent) continue;
+    const name = boundedText(rawName, MAX_SKU_ATTRIBUTE_NAME_LENGTH, 'SKU attribute name');
+    const content = boundedText(rawContent, MAX_SKU_ATTRIBUTE_VALUE_LENGTH, 'SKU attribute value');
     if (name && content && attributes[name] === undefined) attributes[name] = content;
   }
   return attributes;
@@ -403,17 +472,25 @@ function flattenStrings(value: unknown): string[] {
 }
 
 function normalizeImageUrl(value: string): string | null {
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new CrawlerError('Alibaba 1688 image URL is invalid', 'parse');
+  }
   const candidate = value.startsWith('//')
     ? `https:${value}`
     : /^https?:\/\//i.test(value)
       ? value
       : `${IMAGE_BASE_URL}${value.replace(/^\/+/, '')}`;
+  let url: URL;
   try {
-    const url = new URL(candidate);
-    return ['http:', 'https:'].includes(url.protocol) ? url.toString() : null;
+    url = new URL(candidate);
   } catch {
     return null;
   }
+  const normalized = url.toString();
+  if (normalized.length > MAX_MAIN_IMAGE_LENGTH) {
+    throw new CrawlerError('Alibaba 1688 image URL is invalid', 'parse');
+  }
+  return ['http:', 'https:'].includes(url.protocol) ? normalized : null;
 }
 
 function extractHtmlImages(html: string): string[] {
@@ -432,7 +509,11 @@ function parseCount(value: unknown): number | undefined {
   const match = text.match(/^(\d+(?:\.\d+)?)(万)?/);
   if (!match?.[1]) return undefined;
   const count = Number(match[1]) * (match[2] ? 10_000 : 1);
-  return Number.isSafeInteger(Math.trunc(count)) && count >= 0 ? Math.trunc(count) : undefined;
+  const normalized = Math.trunc(count);
+  if (!Number.isSafeInteger(normalized) || normalized < 0 || normalized > POSTGRES_INTEGER_MAX) {
+    throw new CrawlerError('Alibaba 1688 monthly sales count is invalid', 'parse');
+  }
+  return normalized;
 }
 
 function isApiFailure(value: Record<string, unknown>): boolean {
@@ -462,7 +543,7 @@ function httpError(operation: string, status: number): CrawlerError {
         ? 'not_found'
         : status === 429
           ? 'rate_limited'
-          : status >= 500
+          : status === 408 || status === 425 || status >= 500
             ? 'network'
             : 'unknown';
   return new CrawlerError(`Alibaba 1688 ${operation} failed (HTTP ${status})`, code, status);
@@ -490,10 +571,23 @@ function validateSearchFilters(values: OpenApi1688SearchFilter[]): OpenApi1688Se
 
 function boundedText(value: unknown, maxLength: number, label: string): string {
   const text = stringValue(value);
-  if (!text || text.length > maxLength) {
+  if (!text || text.length > maxLength || text.includes('\u0000')) {
     throw new CrawlerError(`Alibaba 1688 ${label} is invalid`, 'parse');
   }
   return text;
+}
+
+function optionalBoundedText(value: unknown, maxLength: number, label: string): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  return boundedText(value, maxLength, label);
+}
+
+function boundedSkuId(value: unknown, index: number): string {
+  const skuId = stringValue(value);
+  if (!skuId || skuId.length > MAX_SKU_ID_LENGTH || /[\u0000-\u001f\u007f]/.test(skuId)) {
+    throw new CrawlerError(`Alibaba 1688 SKU ${index + 1} ID is invalid`, 'parse');
+  }
+  return skuId;
 }
 
 function boundedToken(value: unknown, maxLength: number, label: string): string {
@@ -512,7 +606,7 @@ function positiveId(value: unknown, label: string): string {
 
 function optionalPositiveId(value: unknown): string | null {
   const id = stringValue(value);
-  return /^[1-9]\d*$/.test(id) ? id : null;
+  return id.length <= MAX_PRODUCT_ID_LENGTH && /^[1-9]\d*$/.test(id) ? id : null;
 }
 
 function firstPositiveNumber(values: unknown[]): number | null {
@@ -530,8 +624,32 @@ function minimumPositiveNumber(values: unknown[]): number | null {
 
 function positiveNumber(value: unknown): number | null {
   if (value === undefined || value === null || value === '') return null;
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? number : null;
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  const text = typeof value === 'string' ? value.trim() : String(value);
+  if (!/^\d+(?:\.\d+)?$/.test(text)) return null;
+  const number = Number(text);
+  const roundedToCents = Math.round(number * 100) / 100;
+  return Number.isFinite(number) &&
+    number > 0 &&
+    number <= MAX_SOURCE_PRICE &&
+    Math.abs(number - roundedToCents) <= Number.EPSILON * Math.max(1, number) * 4
+    ? number
+    : null;
+}
+
+function nonNegativeInteger(value: unknown, max: number, label: string): number {
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    throw new CrawlerError(`Alibaba 1688 ${label} is invalid`, 'parse');
+  }
+  const text = typeof value === 'string' ? value.trim() : String(value);
+  if (!/^\d+$/.test(text)) {
+    throw new CrawlerError(`Alibaba 1688 ${label} is invalid`, 'parse');
+  }
+  const number = Number(text);
+  if (!Number.isSafeInteger(number) || number > max) {
+    throw new CrawlerError(`Alibaba 1688 ${label} is invalid`, 'parse');
+  }
+  return number;
 }
 
 function stringValue(value: unknown): string {
@@ -548,6 +666,14 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 
 function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function boundedArray(value: unknown, maxLength: number, label: string): unknown[] {
+  const items = arrayValue(value);
+  if (items.length > maxLength) {
+    throw new CrawlerError(`Alibaba 1688 ${label} exceed ${maxLength} items`, 'parse');
+  }
+  return items;
 }
 
 function safeErrorCode(value: unknown): string {

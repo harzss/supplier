@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const bffOrigin = 'http://127.0.0.1:3201';
 
@@ -18,6 +18,18 @@ interface PublishDraft {
 interface PublishPreflightResult {
   ready: boolean;
   checks: Array<{ id: string; severity: 'blocker' | 'warning'; actionHref?: string }>;
+}
+
+async function requestPricingPreview(page: Page, pricingButton: Locator): Promise<void> {
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (candidate) =>
+        candidate.request().method() === 'POST' &&
+        candidate.url() === `${bffOrigin}/api/publish-tasks/pricing-preview`,
+    ),
+    pricingButton.click(),
+  ]);
+  expect(response.ok(), `Pricing preview failed with HTTP ${response.status()}`).toBeTruthy();
 }
 
 test('keeps publish confirmation behind the latest pricing preview and preflight', async ({
@@ -86,7 +98,7 @@ test('keeps publish confirmation behind the latest pricing preview and preflight
     page.getByText('请先完成售价与利润试算；任何定价策略变化都会要求重新确认。'),
   ).toBeVisible();
 
-  await pricingButton.click();
+  await requestPricingPreview(page, pricingButton);
   await expect(page.getByText('建议售价')).toBeVisible();
   await expect(page.getByText('保本价', { exact: true })).toBeVisible();
   await expect(page.getByText('预计单件利润')).toBeVisible();
@@ -136,7 +148,7 @@ test('keeps publish confirmation behind the latest pricing preview and preflight
     page.getByText('请先完成售价与利润试算；任何定价策略变化都会要求重新确认。'),
   ).toBeVisible();
 
-  await pricingButton.click();
+  await requestPricingPreview(page, pricingButton);
   await expect(preflightButton).toBeEnabled();
   const [restoredReadyResponse] = await Promise.all([
     page.waitForResponse(
@@ -163,7 +175,7 @@ test('keeps publish confirmation behind the latest pricing preview and preflight
   await expect(page.getByRole('button', { name: '确认发布到 1 个店铺' })).toHaveCount(0);
   await expect(preflightButton).toBeDisabled();
 
-  await pricingButton.click();
+  await requestPricingPreview(page, pricingButton);
   await expect(preflightButton).toBeEnabled();
 
   const disconnectResponse = await request.post(

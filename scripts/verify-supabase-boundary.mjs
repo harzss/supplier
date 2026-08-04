@@ -83,6 +83,7 @@ export async function verifySupabaseBoundary({ origin, anonKey }, fetcher = fetc
   const headers = supabasePublicApiKeyHeaders(anonKey);
   const settingsResponse = await fetcher(`${origin}/auth/v1/settings`, {
     headers,
+    redirect: 'error',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!settingsResponse.ok) {
@@ -98,6 +99,7 @@ export async function verifySupabaseBoundary({ origin, anonKey }, fetcher = fetc
 
   const restResponse = await fetcher(`${origin}/rest/v1/users?select=id&limit=1`, {
     headers,
+    redirect: 'error',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   assertAnonymousBusinessAccessDenied(restResponse.status);

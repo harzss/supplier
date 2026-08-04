@@ -263,6 +263,10 @@ const PRODUCTS = [
   },
 ];
 
+function mockSupplierId(productId1688) {
+  return `mock-supplier-${productId1688}`;
+}
+
 async function main() {
   console.log('→ Connecting...');
   await prisma.$connect();
@@ -300,6 +304,7 @@ async function main() {
       .digest('hex');
     const sourceData = {
       ...productData,
+      supplierId: mockSupplierId(p.productId1688),
       skuList,
       availability: 'available',
       totalStock: 100,
@@ -336,7 +341,33 @@ async function main() {
     });
     created++;
   }
-  console.log(`✓ ${created} products + scores`);
+
+  const seededProducts = await prisma.sourceProduct.findMany({
+    where: { productId1688: { in: PRODUCTS.map((product) => product.productId1688) } },
+    select: {
+      productId1688: true,
+      supplierId: true,
+      availability: true,
+      isOnePieceDrop: true,
+    },
+  });
+  const seededProductById = new Map(
+    seededProducts.map((product) => [product.productId1688, product]),
+  );
+  const invalidProductIds = PRODUCTS.flatMap((expected) => {
+    const actual = seededProductById.get(expected.productId1688);
+    return actual?.supplierId === mockSupplierId(expected.productId1688) &&
+      actual.availability === 'available' &&
+      actual.isOnePieceDrop
+      ? []
+      : [expected.productId1688];
+  });
+  if (invalidProductIds.length) {
+    throw new Error(
+      `Seeded source products are not publish-ready: ${invalidProductIds.join(', ')}`,
+    );
+  }
+  console.log(`✓ ${created} products + scores (publish-ready metadata verified)`);
 
   const top = await prisma.sourceProduct.findMany({
     take: 3,

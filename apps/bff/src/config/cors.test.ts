@@ -15,7 +15,7 @@ describe('applicationCorsOptions', () => {
     app = undefined;
   });
 
-  it('allows every browser method used by the BFF', async () => {
+  it('allows configured origins and rejects credentialed preflight for every other origin', async () => {
     const origin = 'https://supplier.example.com';
     app = await NestFactory.create<NestFastifyApplication>(
       CorsTestModule,
@@ -25,21 +25,42 @@ describe('applicationCorsOptions', () => {
     app.enableCors(applicationCorsOptions([origin]));
     await app.init();
 
-    const response = await app.inject({
+    for (const requestedMethod of ['PUT', 'DELETE']) {
+      const response = await app.inject({
+        method: 'OPTIONS',
+        url: '/api/publish-drafts/current',
+        headers: {
+          origin,
+          'access-control-request-method': requestedMethod,
+          'access-control-request-headers': 'authorization,content-type',
+        },
+      });
+
+      expect(response.statusCode).toBe(204);
+      expect(response.headers['access-control-allow-origin']).toBe(origin);
+      expect(response.headers['access-control-allow-credentials']).toBe('true');
+      expect(String(response.headers['access-control-allow-methods']).split(/,\s*/)).toEqual(
+        APPLICATION_CORS_METHODS,
+      );
+      expect(
+        String(response.headers['access-control-allow-headers'])
+          .split(/,\s*/)
+          .map((header) => header.toLowerCase()),
+      ).toEqual(['authorization', 'content-type']);
+    }
+
+    const rejected = await app.inject({
       method: 'OPTIONS',
       url: '/api/publish-drafts/current',
       headers: {
-        origin,
+        origin: 'https://cors-probe.invalid',
         'access-control-request-method': 'PUT',
-        'access-control-request-headers': 'content-type,x-user-id',
+        'access-control-request-headers': 'authorization,content-type',
       },
     });
 
-    expect(response.statusCode).toBe(204);
-    expect(response.headers['access-control-allow-origin']).toBe(origin);
-    expect(response.headers['access-control-allow-credentials']).toBe('true');
-    expect(String(response.headers['access-control-allow-methods']).split(/,\s*/)).toEqual(
-      APPLICATION_CORS_METHODS,
-    );
+    expect(rejected.statusCode < 200 || rejected.statusCode >= 300).toBe(true);
+    expect(rejected.headers['access-control-allow-origin']).toBeUndefined();
+    expect(rejected.headers['access-control-allow-credentials']).toBeUndefined();
   });
 });

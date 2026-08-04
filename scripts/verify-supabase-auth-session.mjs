@@ -263,7 +263,7 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
 async function request(fetcher, url, init, timeoutMs, label) {
   const signal = AbortSignal.timeout(timeoutMs);
   try {
-    return await fetcher(url, { ...init, signal });
+    return await fetcher(url, { ...init, redirect: 'error', signal });
   } catch {
     if (signal.aborted) throw new Error(`${label} timed out after ${timeoutMs}ms.`);
     throw new Error(`${label} request failed.`);

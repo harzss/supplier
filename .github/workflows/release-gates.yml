@@ -177,6 +177,7 @@ jobs:
           ALLOW_INSECURE_DEPLOY_VERIFY=true \
           BFF_URL=http://127.0.0.1:3101 \
           WEB_URL=http://127.0.0.1:3100 \
+          DEPLOY_VERIFY_CORS_ORIGIN=https://supplier.ci.example \
           OPERATIONS_TOKEN=ci-operations-token-that-is-longer-than-thirty-two \
           node scripts/verify-deployment.mjs
 

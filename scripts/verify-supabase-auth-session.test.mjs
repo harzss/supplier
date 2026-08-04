@@ -125,6 +125,7 @@ test('verifies password, protected API, refresh, logout, and no-token denial in 
   assert.deepEqual(JSON.parse(requests[5].init.body), { refresh_token: 'refreshed-refresh' });
   assert.equal(requests[6].url, `${BFF_ORIGIN}/api/me/entitlements`);
   assert.equal(requests[6].init.headers, undefined);
+  assert.ok(requests.every(({ init }) => init.redirect === 'error'));
   assert.ok(requests.every(({ init }) => init.signal instanceof AbortSignal));
 });
 

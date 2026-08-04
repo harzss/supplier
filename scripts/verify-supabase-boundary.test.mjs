@@ -131,6 +131,7 @@ test('uses a publishable key only as apikey for both boundary requests', async (
   for (const { init } of requests) {
     assert.equal(init.headers.apikey, PUBLISHABLE_KEY);
     assert.equal(Object.hasOwn(init.headers, 'authorization'), false);
+    assert.equal(init.redirect, 'error');
   }
 });
 
@@ -151,6 +152,7 @@ test('uses a legacy anon JWT as apikey and bearer for both boundary requests', a
   for (const { init } of requests) {
     assert.equal(init.headers.apikey, LEGACY_ANON_KEY);
     assert.equal(init.headers.authorization, `Bearer ${LEGACY_ANON_KEY}`);
+    assert.equal(init.redirect, 'error');
   }
 });
 

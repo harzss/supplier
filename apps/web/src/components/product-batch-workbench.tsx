@@ -65,8 +65,10 @@ const RESULT_FILTERS = [
 type PriceMode = ProductBatchPriceRule['mode'];
 type PriceDirection = Extract<ProductBatchPriceRule, { mode: 'percentage' }>['direction'];
 type TargetPriceValidation = { value: string | null; error: string };
+type TargetTitleValidation = { value: string | null; error: string };
 type ProductBatchPreviewInput =
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'offline' }>, 'clientRequestId'>
+  | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_title' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_price' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'sync_inventory' }>, 'clientRequestId'>;
 
@@ -80,6 +82,7 @@ const EMPTY_COMPOSER_DRAFT: ProductBatchComposerDraft = {
   priceDirection: 'increase',
   percentageInput: '10',
   targetInputs: {},
+  titleInputs: {},
   bulkTargetInput: '',
   targetPage: 1,
   selected: [],
@@ -142,6 +145,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
   const [priceDirection, setPriceDirection] = useState<PriceDirection>('increase');
   const [percentageInput, setPercentageInput] = useState('10');
   const [targetInputs, setTargetInputs] = useState<Record<string, string>>({});
+  const [titleInputs, setTitleInputs] = useState<Record<string, string>>({});
   const [bulkTargetInput, setBulkTargetInput] = useState('');
   const [targetPage, setTargetPage] = useState(1);
   const [validationAttempted, setValidationAttempted] = useState(false);
@@ -205,7 +209,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
     targetPage * TARGET_PAGE_SIZE,
   );
   const percentageValidation = validatePercentageInput(percentageInput, priceDirection);
-  const targetValidations = useMemo(
+  const priceTargetValidations = useMemo(
     () =>
       new Map(
         selectedItems.map((item) => [
@@ -215,7 +219,22 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
       ),
     [selectedItems, targetInputs],
   );
-  const invalidTargetCount = [...targetValidations.values()].filter((value) => !value.value).length;
+  const titleTargetValidations = useMemo(
+    () =>
+      new Map(
+        selectedItems.map((item) => [
+          item.publishedProductId,
+          normalizeTargetTitle(titleInputs[item.publishedProductId] ?? item.title, item.platform),
+        ]),
+      ),
+    [selectedItems, titleInputs],
+  );
+  const invalidPriceTargetCount = [...priceTargetValidations.values()].filter(
+    (value) => !value.value,
+  ).length;
+  const invalidTitleTargetCount = [...titleTargetValidations.values()].filter(
+    (value) => !value.value,
+  ).length;
   const composerDraft = useMemo<ProductBatchComposerDraft>(
     () => ({
       page,
@@ -227,6 +246,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
       priceDirection,
       percentageInput,
       targetInputs,
+      titleInputs,
       bulkTargetInput,
       targetPage,
       selected: selectedItems,
@@ -243,6 +263,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
       selectedItems,
       status,
       targetInputs,
+      titleInputs,
       targetPage,
     ],
   );
@@ -256,6 +277,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
     setPriceDirection(draft.priceDirection);
     setPercentageInput(draft.percentageInput);
     setTargetInputs(draft.targetInputs);
+    setTitleInputs(draft.titleInputs);
     setBulkTargetInput(draft.bulkTargetInput);
     setTargetPage(draft.targetPage);
     setSelected(new Map(draft.selected.map((item) => [item.publishedProductId, item] as const)));
@@ -388,6 +410,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
     setPage(1);
     setSelected(new Map());
     setTargetInputs({});
+    setTitleInputs({});
     setTargetPage(1);
     resetPreviewFeedback();
   };
@@ -435,6 +458,11 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
     resetPreviewFeedback();
   };
 
+  const setTitleInput = (id: string, value: string) => {
+    setTitleInputs((current) => ({ ...current, [id]: value }));
+    resetPreviewFeedback();
+  };
+
   const applyBulkTarget = () => {
     const normalized = normalizeTargetPrice(bulkTargetInput);
     if (!normalized.value) return;
@@ -462,7 +490,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
     }
     if (action === 'edit_price' && priceMode === 'targets') {
       const firstInvalidIndex = selectedItems.findIndex(
-        (item) => !targetValidations.get(item.publishedProductId)?.value,
+        (item) => !priceTargetValidations.get(item.publishedProductId)?.value,
       );
       if (firstInvalidIndex >= 0) {
         const item = selectedItems[firstInvalidIndex]!;
@@ -474,14 +502,34 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
         mode: 'targets',
         targets: selectedItems.map((item) => ({
           publishedProductId: item.publishedProductId,
-          targetStartPrice: targetValidations.get(item.publishedProductId)!.value!,
+          targetStartPrice: priceTargetValidations.get(item.publishedProductId)!.value!,
         })),
       };
+    }
+    if (action === 'edit_title') {
+      const firstInvalidIndex = selectedItems.findIndex(
+        (item) => !titleTargetValidations.get(item.publishedProductId)?.value,
+      );
+      if (firstInvalidIndex >= 0) {
+        const item = selectedItems[firstInvalidIndex]!;
+        setTargetPage(Math.floor(firstInvalidIndex / TARGET_PAGE_SIZE) + 1);
+        setPendingTargetFocusId(item.publishedProductId);
+        return;
+      }
     }
     const requestWithoutId = {
       action,
       publishedProductIds: selectedIds,
       ...(priceRule ? { priceRule } : {}),
+      ...(action === 'edit_title'
+        ? {
+            titleTargets: selectedItems.map((item) => ({
+              publishedProductId: item.publishedProductId,
+              expectedMutationRevision: item.mutationRevision,
+              targetTitle: titleTargetValidations.get(item.publishedProductId)!.value!,
+            })),
+          }
+        : {}),
     } as ProductBatchPreviewInput;
     const fingerprint = productBatchPreviewFingerprint(requestWithoutId);
     if (previewAttempt.current?.fingerprint !== fingerprint) {
@@ -556,18 +604,31 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
               </span>
               <em>已开放</em>
             </button>
-            {['改标题', '换源与清理'].map((label) => (
-              <button key={label} type="button" className="batch-action-card" disabled>
-                <span className="batch-action-icon" aria-hidden="true">
-                  ·
-                </span>
-                <span>
-                  <strong>{label}</strong>
-                  <small>复用同一批量任务状态机</small>
-                </span>
-                <em>下一阶段</em>
-              </button>
-            ))}
+            <button
+              type="button"
+              className={`batch-action-card ${action === 'edit_title' ? 'is-active' : ''}`}
+              aria-pressed={action === 'edit_title'}
+              onClick={() => chooseAction('edit_title')}
+            >
+              <span className="batch-action-icon" aria-hidden="true">
+                T
+              </span>
+              <span>
+                <strong>批量改标题</strong>
+                <small>逐件编辑并回读平台标题</small>
+              </span>
+              <em>已开放</em>
+            </button>
+            <button type="button" className="batch-action-card" disabled>
+              <span className="batch-action-icon" aria-hidden="true">
+                ·
+              </span>
+              <span>
+                <strong>换源与清理</strong>
+                <small>复用同一批量任务状态机</small>
+              </span>
+              <em>下一阶段</em>
+            </button>
           </div>
 
           {action === 'edit_price' ? (
@@ -762,7 +823,13 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
                   </th>
                   <th>商品</th>
                   <th>店铺 / 平台</th>
-                  <th>{action === 'sync_inventory' ? '1688 权威库存' : '起售价 / SKU'}</th>
+                  <th>
+                    {action === 'sync_inventory'
+                      ? '1688 权威库存'
+                      : action === 'edit_title'
+                        ? '标题状态'
+                        : '起售价 / SKU'}
+                  </th>
                   <th>货源</th>
                   <th>{action === 'sync_inventory' ? '最近同步' : '库存同步'}</th>
                   <th>当前状态</th>
@@ -818,9 +885,9 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
           page={targetPage}
           totalPages={targetTotalPages}
           values={targetInputs}
-          validations={targetValidations}
+          validations={priceTargetValidations}
           validationAttempted={validationAttempted}
-          invalidCount={invalidTargetCount}
+          invalidCount={invalidPriceTargetCount}
           bulkValue={bulkTargetInput}
           onBulkValueChange={(value) => {
             setBulkTargetInput(value);
@@ -828,6 +895,21 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
           }}
           onApplyBulk={applyBulkTarget}
           onValueChange={setTargetInput}
+          onPageChange={setTargetPage}
+          inputRefs={targetInputRefs}
+        />
+      ) : null}
+
+      {action === 'edit_title' && selected.size > 0 ? (
+        <TargetTitleEditor
+          items={visibleTargetItems}
+          page={targetPage}
+          totalPages={targetTotalPages}
+          values={titleInputs}
+          validations={titleTargetValidations}
+          validationAttempted={validationAttempted}
+          invalidCount={invalidTitleTargetCount}
+          onValueChange={setTitleInput}
           onPageChange={setTargetPage}
           inputRefs={targetInputRefs}
         />
@@ -863,9 +945,11 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
               已选 {selected.size} / {MAX_SELECTION} 件
             </strong>
             <span>
-              {action === 'edit_price' && priceMode === 'targets' && invalidTargetCount > 0
-                ? `还需填写 ${invalidTargetCount} 件商品的目标起售价。`
-                : '下一步只生成差异预览，不会立即调用平台。'}
+              {action === 'edit_price' && priceMode === 'targets' && invalidPriceTargetCount > 0
+                ? `还需填写 ${invalidPriceTargetCount} 件商品的目标起售价。`
+                : action === 'edit_title' && invalidTitleTargetCount > 0
+                  ? `还有 ${invalidTitleTargetCount} 件商品的标题不符合目标平台规则。`
+                  : '下一步只生成差异预览，不会立即调用平台。'}
             </span>
           </div>
           <div className="batch-selection-actions">
@@ -875,6 +959,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
               onClick={() => {
                 setSelected(new Map());
                 setTargetInputs({});
+                setTitleInputs({});
                 resetPreviewFeedback();
               }}
             >
@@ -959,6 +1044,13 @@ function CandidateRow({
             skuCount={item.sourceSkuCount}
             inventoryVersion={item.sourceInventoryVersion}
           />
+        ) : action === 'edit_title' ? (
+          <>
+            <strong className="batch-cell-primary">
+              {item.titleEditable ? '可修改标题' : '当前不可修改'}
+            </strong>
+            <small className="batch-cell-secondary">{titleRuleLabel(item.platform)}</small>
+          </>
         ) : (
           <>
             <strong className="batch-price-range">
@@ -971,6 +1063,14 @@ function CandidateRow({
         )}
         {action !== 'sync_inventory' && !selectable && unavailableReason ? (
           <small className="batch-row-note">{unavailableReason}</small>
+        ) : null}
+        {action === 'edit_title' && item.titleVerificationTaskId ? (
+          <Link
+            className="batch-row-link"
+            href={`/published/batch?task=${encodeURIComponent(item.titleVerificationTaskId)}`}
+          >
+            打开待核验任务
+          </Link>
         ) : null}
       </td>
       <td>
@@ -1170,6 +1270,143 @@ function TargetPriceEditor({
   );
 }
 
+function TargetTitleEditor({
+  items,
+  page,
+  totalPages,
+  values,
+  validations,
+  validationAttempted,
+  invalidCount,
+  onValueChange,
+  onPageChange,
+  inputRefs,
+}: {
+  items: ProductBatchCandidate[];
+  page: number;
+  totalPages: number;
+  values: Record<string, string>;
+  validations: Map<string, TargetTitleValidation>;
+  validationAttempted: boolean;
+  invalidCount: number;
+  onValueChange: (id: string, value: string) => void;
+  onPageChange: (page: number) => void;
+  inputRefs: { current: Map<string, HTMLInputElement> };
+}) {
+  return (
+    <section className="batch-target-panel" aria-labelledby="batch-title-target-heading">
+      <div className="batch-catalog-toolbar">
+        <div>
+          <p className="batch-step-label">03 · 设置目标标题</p>
+          <h2 id="batch-title-target-heading" className="batch-section-title">
+            逐项修改标题
+          </h2>
+          <p className="batch-target-description">
+            每件商品按目标平台规则单独确认标题；执行前后都会核对商品快照和平台结果。
+          </p>
+        </div>
+      </div>
+
+      {validationAttempted && invalidCount > 0 ? (
+        <p className="batch-target-error-summary" role="alert">
+          还有 {invalidCount} 件商品的目标标题不符合对应平台规则，请修正后再生成预览。
+        </p>
+      ) : null}
+
+      <div className="batch-table-shell">
+        <table className="batch-table batch-target-table">
+          <thead>
+            <tr>
+              <th>商品</th>
+              <th>店铺 / 平台</th>
+              <th>当前标题</th>
+              <th>目标标题</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => {
+              const id = item.publishedProductId;
+              const validation = validations.get(id) ?? normalizeTargetTitle('', item.platform);
+              const errorId = `batch-target-title-error-${id}`;
+              return (
+                <tr key={id}>
+                  <td>
+                    <div className="batch-product-cell">
+                      {item.mainImage ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={item.mainImage} alt="" width={37} height={37} loading="lazy" />
+                      ) : (
+                        <span className="batch-image-placeholder" aria-hidden="true" />
+                      )}
+                      <span>
+                        <strong>{item.title}</strong>
+                        <small>1688 · {item.sourceProductId}</small>
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <strong className="batch-cell-primary">{item.shopName ?? '未命名店铺'}</strong>
+                    <small className="batch-cell-secondary">{platformLabel(item.platform)}</small>
+                  </td>
+                  <td>
+                    <span className="batch-cell-primary">{item.title}</span>
+                  </td>
+                  <td>
+                    <label className="batch-target-price-field">
+                      <span className="sr-only">{item.title} 的目标标题</span>
+                      <input
+                        ref={(node) => {
+                          if (node) inputRefs.current.set(id, node);
+                          else inputRefs.current.delete(id);
+                        }}
+                        name={`target-title-${id}`}
+                        type="text"
+                        autoComplete="off"
+                        maxLength={titleInputMaxLength(item.platform)}
+                        value={values[id] ?? item.title}
+                        aria-invalid={validationAttempted && !validation.value}
+                        aria-describedby={
+                          validationAttempted && !validation.value ? errorId : undefined
+                        }
+                        onChange={(event) => onValueChange(id, event.target.value)}
+                      />
+                    </label>
+                    {validationAttempted && !validation.value ? (
+                      <small id={errorId} className="batch-field-error">
+                        {validation.error}
+                      </small>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {totalPages > 1 ? (
+        <div className="batch-pagination">
+          <span>
+            标题第 {page} / {totalPages} 页
+          </span>
+          <div>
+            <button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>
+              上一页
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() => onPageChange(page + 1)}
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function BatchTask({
   taskId,
   sessionScope,
@@ -1204,9 +1441,15 @@ function BatchTask({
     onSuccess: refresh,
   });
   const retry = useMutation({
-    mutationFn: () => api.retryProductBatch(taskId),
+    mutationFn: (itemIds: string[]) => api.retryProductBatch(taskId, itemIds),
     onSuccess: refresh,
   });
+  const verifyTitle = useMutation({
+    mutationFn: (itemId: string) => api.verifyProductBatchTitle(taskId, itemId),
+    onSuccess: refresh,
+  });
+  const taskMutationPending =
+    execute.isPending || cancel.isPending || retry.isPending || verifyTitle.isPending;
 
   useEffect(() => {
     if (task.data && task.data.status !== 'preview') {
@@ -1217,12 +1460,19 @@ function BatchTask({
   if (task.isLoading && !task.data) return <BatchLoading />;
   if (!task.data) return <BatchError error={task.error} />;
   const value = task.data;
+  const titleAction = value.action === 'edit_title';
   const priceAction = value.action === 'edit_price';
   const inventoryAction = value.action === 'sync_inventory';
-  const verifiedAction = priceAction || inventoryAction;
+  const verifiedAction = titleAction || priceAction || inventoryAction;
   const active = ACTIVE_TASK_STATUSES.has(value.status);
   const preview = value.status === 'preview';
-  const canRetry = ['failed', 'partial'].includes(value.status) && value.summary.failed > 0;
+  const retryableFailedIds = value.items
+    .filter((item) => item.status === 'failed' && item.retryable)
+    .map((item) => item.itemId);
+  const unknownTitleResultCount = value.items.filter(
+    (item) => item.status === 'failed' && item.errorCode === 'TITLE_RESULT_UNKNOWN',
+  ).length;
+  const canRetry = ['failed', 'partial'].includes(value.status) && retryableFailedIds.length > 0;
   const pendingExecution = value.summary.pending + value.summary.retryWait;
   const visibleItems =
     itemFilter === 'all'
@@ -1253,13 +1503,15 @@ function BatchTask({
           </div>
           <p className="batch-section-description">
             {preview
-              ? priceAction
-                ? '确认前请检查每件商品的起售价、SKU 价格区间和调整方向。'
-                : inventoryAction
-                  ? '确认前请检查同步前库存、1688 权威目标快照及库存版本；执行后将逐 SKU 回读平台核验。'
-                  : '确认前请检查每件商品的当前状态与执行后状态。'
+              ? titleAction
+                ? '确认前请逐件检查当前标题和目标标题；执行后将回读平台标题核验。'
+                : priceAction
+                  ? '确认前请检查每件商品的起售价、SKU 价格区间和调整方向。'
+                  : inventoryAction
+                    ? '确认前请检查同步前库存、1688 权威目标快照及库存版本；执行后将逐 SKU 回读平台核验。'
+                    : '确认前请检查每件商品的当前状态与执行后状态。'
               : active
-                ? `任务按商品独立${priceAction ? '改价并回读平台价格' : inventoryAction ? '同步并回读平台库存' : '执行'}；停止只影响尚未开始的条目。`
+                ? `任务按商品独立${titleAction ? '改标题并回读平台标题' : priceAction ? '改价并回读平台价格' : inventoryAction ? '同步并回读平台库存' : '执行'}；停止只影响尚未开始的条目。`
                 : '任务结果已持久化，可安全刷新或稍后返回查看。'}
           </p>
         </div>
@@ -1336,8 +1588,24 @@ function BatchTask({
               <tr>
                 <th>商品</th>
                 <th>店铺 / 平台</th>
-                <th>{priceAction ? '改价前' : inventoryAction ? '同步前' : '当前'}</th>
-                <th>{priceAction ? '目标价格' : inventoryAction ? '1688 目标' : '执行后'}</th>
+                <th>
+                  {titleAction
+                    ? '修改前'
+                    : priceAction
+                      ? '改价前'
+                      : inventoryAction
+                        ? '同步前'
+                        : '当前'}
+                </th>
+                <th>
+                  {titleAction
+                    ? '目标标题'
+                    : priceAction
+                      ? '目标价格'
+                      : inventoryAction
+                        ? '1688 目标'
+                        : '执行后'}
+                </th>
                 {verifiedAction ? <th>平台回读</th> : null}
                 <th>执行状态</th>
                 <th>尝试</th>
@@ -1345,7 +1613,14 @@ function BatchTask({
             </thead>
             <tbody>
               {visibleItems.map((item) => (
-                <TaskItemRow key={item.itemId} item={item} action={value.action} />
+                <TaskItemRow
+                  key={item.itemId}
+                  item={item}
+                  action={value.action}
+                  verifying={verifyTitle.isPending}
+                  verificationDisabled={taskMutationPending}
+                  onVerifyTitle={() => verifyTitle.mutate(item.itemId)}
+                />
               ))}
             </tbody>
           </table>
@@ -1394,7 +1669,7 @@ function BatchTask({
             <button
               type="button"
               className="batch-danger-outline-button"
-              disabled={cancel.isPending || value.status === 'cancelling'}
+              disabled={taskMutationPending || value.status === 'cancelling'}
               onClick={() => cancel.mutate()}
             >
               {value.status === 'cancelling' ? '正在停止剩余操作…' : '停止剩余操作'}
@@ -1405,10 +1680,10 @@ function BatchTask({
                 <button
                   type="button"
                   className="batch-primary-button"
-                  disabled={retry.isPending}
-                  onClick={() => retry.mutate()}
+                  disabled={taskMutationPending}
+                  onClick={() => retry.mutate(retryableFailedIds)}
                 >
-                  {retry.isPending ? '重新入队中…' : `重试 ${value.summary.failed} 个失败项`}
+                  {retry.isPending ? '重新入队中…' : `重试 ${retryableFailedIds.length} 个失败项`}
                 </button>
               ) : null}
               <button type="button" className="batch-secondary-button" onClick={onStartNew}>
@@ -1417,9 +1692,17 @@ function BatchTask({
             </>
           )}
         </div>
-        {[execute.error, cancel.error, retry.error].find(Boolean) ? (
+        {[execute.error, cancel.error, retry.error, verifyTitle.error].find(Boolean) ? (
           <p className="batch-bar-error" role="alert">
-            {errorMessage([execute.error, cancel.error, retry.error].find(Boolean))}
+            {errorMessage(
+              [execute.error, cancel.error, retry.error, verifyTitle.error].find(Boolean),
+            )}
+          </p>
+        ) : null}
+        {unknownTitleResultCount > 0 ? (
+          <p className="batch-bar-error" role="alert">
+            {unknownTitleResultCount}{' '}
+            个标题更新结果未知。请等待平台处理完成，再逐项执行“核验平台标题”。
           </p>
         ) : null}
       </section>
@@ -1427,7 +1710,20 @@ function BatchTask({
   );
 }
 
-function TaskItemRow({ item, action }: { item: ProductBatchItem; action: ProductBatchAction }) {
+function TaskItemRow({
+  item,
+  action,
+  verifying,
+  verificationDisabled,
+  onVerifyTitle,
+}: {
+  item: ProductBatchItem;
+  action: ProductBatchAction;
+  verifying: boolean;
+  verificationDisabled: boolean;
+  onVerifyTitle: () => void;
+}) {
+  const titleAction = action === 'edit_title';
   const priceAction = action === 'edit_price';
   const inventoryAction = action === 'sync_inventory';
   const actualMismatch =
@@ -1442,6 +1738,12 @@ function TaskItemRow({ item, action }: { item: ProductBatchItem; action: Product
     item.actualInventory !== null &&
     item.desiredInventory !== null &&
     !sameInventorySnapshot(item.actualInventory, item.desiredInventory);
+  const actualTitleMismatch =
+    titleAction &&
+    item.status === 'succeeded' &&
+    item.actualTitle !== null &&
+    item.desiredTitle !== null &&
+    item.actualTitle !== item.desiredTitle;
   return (
     <tr>
       <td>
@@ -1462,7 +1764,25 @@ function TaskItemRow({ item, action }: { item: ProductBatchItem; action: Product
         <strong className="batch-cell-primary">{item.shopName ?? '未命名店铺'}</strong>
         <small className="batch-cell-secondary">{platformLabel(item.platform)}</small>
       </td>
-      {priceAction ? (
+      {titleAction ? (
+        <>
+          <td>
+            <TitleValue value={item.beforeTitle} emptyLabel="修改前标题缺失" />
+          </td>
+          <td>
+            <TitleValue value={item.desiredTitle} emptyLabel="目标标题缺失" />
+          </td>
+          <td>
+            <TitleValue
+              value={item.actualTitle}
+              emptyLabel={item.status === 'succeeded' ? '回读待核验' : '执行后回读'}
+            />
+            {actualTitleMismatch ? (
+              <small className="batch-row-error">与目标标题不一致</small>
+            ) : null}
+          </td>
+        </>
+      ) : priceAction ? (
         <>
           <td className="batch-mono">
             <PriceRange value={item.beforePriceRange} skuCount={item.skuCount} />
@@ -1526,11 +1846,31 @@ function TaskItemRow({ item, action }: { item: ProductBatchItem; action: Product
       <td>
         <StatusPill value={item.status} />
         {item.errorMessage ? <small className="batch-row-error">{item.errorMessage}</small> : null}
+        {item.errorCode === 'TITLE_RESULT_UNKNOWN' ? (
+          <button
+            type="button"
+            className="batch-inline-action"
+            disabled={verificationDisabled}
+            onClick={onVerifyTitle}
+          >
+            {verifying ? '核验中…' : '核验平台标题'}
+          </button>
+        ) : null}
       </td>
       <td className="batch-mono">
         {item.attempts}/{item.maxAttempts}
       </td>
     </tr>
+  );
+}
+
+function TitleValue({ value, emptyLabel }: { value: string | null; emptyLabel: string }) {
+  return value ? (
+    <span className="batch-title-value" title={value}>
+      {value}
+    </span>
+  ) : (
+    <span className="batch-cell-secondary">{emptyLabel}</span>
   );
 }
 
@@ -1693,18 +2033,23 @@ function matchesResultFilter(status: string, filter: string): boolean {
 }
 
 function batchActionLabel(action: ProductBatchAction): string {
+  if (action === 'edit_title') return '批量改标题';
   if (action === 'edit_price') return '批量改价';
   if (action === 'sync_inventory') return '同步并核验库存';
   return '批量下架';
 }
 
 function batchActionVerb(action: ProductBatchAction): string {
+  if (action === 'edit_title') return '改标题';
   if (action === 'edit_price') return '改价';
   if (action === 'sync_inventory') return '同步库存';
   return '下架';
 }
 
 function batchActionDescription(action: ProductBatchAction): string {
+  if (action === 'edit_title') {
+    return '逐件填写目标标题，执行后回读平台确认；可恢复失败项单独重试，结果未知项必须先核验。';
+  }
   if (action === 'edit_price') {
     return '先定义改价规则，再逐件核对 SKU 价格区间；平台回读后才记为成功。';
   }
@@ -1718,6 +2063,7 @@ export function isCandidateSelectable(
   item: ProductBatchCandidate,
   action: ProductBatchAction,
 ): boolean {
+  if (action === 'edit_title') return item.titleEditable;
   if (action === 'edit_price') return item.priceEditable;
   if (action === 'sync_inventory') return item.inventorySyncEligible;
   return item.status === 'online';
@@ -1728,6 +2074,7 @@ export function candidateUnavailableReason(
   action: ProductBatchAction,
 ): string | null {
   if (isCandidateSelectable(item, action)) return null;
+  if (action === 'edit_title') return item.titleEditReason ?? '当前商品不能安全修改标题';
   if (action === 'edit_price') return item.priceEditReason ?? '当前商品缺少可核对的 SKU 价格';
   if (action === 'sync_inventory') {
     return item.inventorySyncReason ?? '当前商品没有可安全同步的 1688 库存快照';
@@ -1800,10 +2147,52 @@ export function normalizeTargetPrice(value: string): TargetPriceValidation {
   return { value: `${whole.toString()}.${fraction}`, error: '' };
 }
 
+export function normalizeTargetTitle(value: string, platform = 'douyin'): TargetTitleValidation {
+  const title = value.trim();
+  if (!title) return { value: null, error: '请输入目标标题。' };
+  if (/\r|\n/.test(title)) return { value: null, error: '目标标题不能包含换行符。' };
+  if (platform !== 'douyin') {
+    const maxLength = ['pdd', 'kuaishou', 'wechat_shop'].includes(platform) ? 30 : 60;
+    return [...title].length <= maxLength
+      ? { value: title, error: '' }
+      : { value: null, error: `目标标题不能超过 ${maxLength} 个字符。` };
+  }
+  const characterUnits = [...title].reduce(
+    (total, character) => total + (/^[\x00-\x7f]$/.test(character) ? 1 : 2),
+    0,
+  );
+  if (characterUnits < 16) {
+    return { value: null, error: '目标标题至少需要 8 个汉字或 16 个字符。' };
+  }
+  if (characterUnits > 60) {
+    return { value: null, error: '目标标题不能超过 30 个汉字或 60 个字符。' };
+  }
+  return { value: title, error: '' };
+}
+
+function titleRuleLabel(platform: string): string {
+  if (platform === 'douyin') return '8～30 个汉字 / 16～60 字符';
+  const maxLength = ['pdd', 'kuaishou', 'wechat_shop'].includes(platform) ? 30 : 60;
+  return `最多 ${maxLength} 个字符`;
+}
+
+function titleInputMaxLength(platform: string): number {
+  if (platform === 'douyin') return 60;
+  const maxLength = ['pdd', 'kuaishou', 'wechat_shop'].includes(platform) ? 30 : 60;
+  return maxLength * 2;
+}
+
 export function productBatchPreviewFingerprint(input: ProductBatchPreviewInput): string {
   return JSON.stringify({
     action: input.action,
     publishedProductIds: [...input.publishedProductIds].sort(),
+    ...(input.action === 'edit_title'
+      ? {
+          titleTargets: [...input.titleTargets].sort((left, right) =>
+            left.publishedProductId.localeCompare(right.publishedProductId),
+          ),
+        }
+      : {}),
     ...(input.action === 'edit_price'
       ? {
           priceRule:
@@ -1826,13 +2215,19 @@ export function shouldAcceptProductBatchPreviewResponse(
 ): boolean {
   if (!attempt || attempt.clientRequestId !== request.clientRequestId) return false;
   const input: ProductBatchPreviewInput =
-    request.action === 'edit_price'
+    request.action === 'edit_title'
       ? {
-          action: 'edit_price',
+          action: 'edit_title',
           publishedProductIds: request.publishedProductIds,
-          priceRule: request.priceRule,
+          titleTargets: request.titleTargets,
         }
-      : { action: request.action, publishedProductIds: request.publishedProductIds };
+      : request.action === 'edit_price'
+        ? {
+            action: 'edit_price',
+            publishedProductIds: request.publishedProductIds,
+            priceRule: request.priceRule,
+          }
+        : { action: request.action, publishedProductIds: request.publishedProductIds };
   return attempt.fingerprint === productBatchPreviewFingerprint(input);
 }
 

@@ -2157,6 +2157,44 @@ button:not(:disabled),
   white-space: nowrap;
 }
 
+.batch-title-value {
+  display: block;
+  min-width: 9rem;
+  color: var(--ink-soft);
+  font-size: 0.69rem;
+  font-weight: 590;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.batch-inline-action {
+  display: block;
+  min-height: 2.25rem;
+  margin-top: 0.38rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, white);
+  border-radius: 0.45rem;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  padding: 0.48rem 0.62rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+
+.batch-row-link {
+  display: inline-flex;
+  margin-top: 0.35rem;
+  color: var(--accent-dark);
+  font-size: 0.66rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.batch-inline-action:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .batch-price-range {
   display: block;
   overflow: hidden;
@@ -2877,6 +2915,28 @@ button:not(:disabled),
   .batch-selection-bar,
   .batch-confirm-panel {
     gap: 0.7rem;
+  }
+
+  .batch-result-table th:nth-last-child(2),
+  .batch-result-table td:nth-last-child(2) {
+    position: sticky;
+    right: 0;
+    z-index: 3;
+    min-width: 8.5rem;
+    box-shadow: -0.65rem 0 1rem rgb(17 24 39 / 6%);
+  }
+
+  .batch-result-table th:nth-last-child(2) {
+    background: #f8f9fb;
+  }
+
+  .batch-result-table td:nth-last-child(2) {
+    background: white;
+  }
+
+  .batch-inline-action {
+    min-height: 2.75rem;
+    font-size: 0.75rem;
   }
 }
 

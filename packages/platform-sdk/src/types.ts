@@ -31,6 +31,11 @@ export interface UpdateProductDto extends PublishProductDto {
   platformProductId: string;
 }
 
+export interface UpdateProductTitleDto {
+  platformProductId: string;
+  title: string;
+}
+
 export type PlatformProductStateName =
   | 'online'
   | 'offline'
@@ -46,6 +51,10 @@ export interface PlatformProductState {
   state: PlatformProductStateName;
   status: number | null;
   checkStatus: number | null;
+}
+
+export interface PlatformProductTitleState extends PlatformProductState {
+  title: string;
 }
 
 export interface UpdateProductPriceDto {

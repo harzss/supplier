@@ -65,4 +65,14 @@ export class ProductBatchController {
   ) {
     return this.batches.retry(user, id, dto);
   }
+
+  @Post(':id/items/:itemId/verify-title')
+  @AuditAction('product_batch.verify_title', 'product_batch_item')
+  verifyTitle(
+    @CurrentUser() user: CurrentUserType,
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+  ) {
+    return this.batches.verifyTitleResult(user, id, itemId);
+  }
 }

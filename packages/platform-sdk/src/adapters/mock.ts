@@ -12,6 +12,7 @@ import type {
   PlatformProductInventoryState,
   PlatformProductPriceState,
   PlatformProductState,
+  PlatformProductTitleState,
   PublishProductDto,
   PublishResult,
   ShipDto,
@@ -19,6 +20,7 @@ import type {
   SyncInventoryDto,
   UpdateProductDto,
   UpdateProductPriceDto,
+  UpdateProductTitleDto,
 } from '../types';
 
 const DEFAULT_CONFIG: AdapterConfig = {
@@ -31,6 +33,7 @@ const DEFAULT_CONFIG: AdapterConfig = {
 const MOCK_PRODUCT_PRICES = new Map<string, Map<string, number>>();
 const MOCK_PRODUCT_INVENTORY = new Map<string, Map<string, number>>();
 const MOCK_PRODUCT_STATES = new Map<string, PlatformProductState>();
+const MOCK_PRODUCT_TITLES = new Map<string, string>();
 
 /**
  * Mock 平台适配器：模拟发布 / 订单 / 发货。
@@ -68,6 +71,7 @@ export class MockPlatformAdapter extends BasePlatformAdapter {
     const id = `${this.platform}-${Date.now()}-${hashTitle(dto.title)}`;
     storeProductPrices(this.platform, id, dto.skus);
     storeProductInventory(this.platform, id, dto.skus);
+    MOCK_PRODUCT_TITLES.set(mockProductKey(this.platform, id), dto.title);
     MOCK_PRODUCT_STATES.set(mockProductKey(this.platform, id), onlineMockProductState());
     return { platformProductId: id, url: `https://mock.${this.platform}.shop/item/${id}` };
   }
@@ -75,6 +79,22 @@ export class MockPlatformAdapter extends BasePlatformAdapter {
   async updateProduct(_token: string, dto: UpdateProductDto): Promise<void> {
     storeProductPrices(this.platform, dto.platformProductId, dto.skus);
     storeProductInventory(this.platform, dto.platformProductId, dto.skus);
+    MOCK_PRODUCT_TITLES.set(mockProductKey(this.platform, dto.platformProductId), dto.title);
+  }
+
+  async updateProductTitle(_token: string, dto: UpdateProductTitleDto): Promise<void> {
+    const key = mockProductKey(this.platform, dto.platformProductId);
+    if (!MOCK_PRODUCT_STATES.has(key) || !MOCK_PRODUCT_TITLES.has(key)) {
+      throw new Error('Mock product is unavailable');
+    }
+    MOCK_PRODUCT_TITLES.set(key, validMockTitle(this.platform, dto.title));
+  }
+
+  async getProductTitle(_token: string, productId: string): Promise<PlatformProductTitleState> {
+    const key = mockProductKey(this.platform, productId);
+    const title = MOCK_PRODUCT_TITLES.get(key);
+    if (!title) throw new Error('Mock product title is unavailable');
+    return { ...mockProductState(key), title };
   }
 
   async updateProductPrice(_token: string, dto: UpdateProductPriceDto): Promise<void> {
@@ -327,6 +347,22 @@ function validMockPrice(value: number): number {
 function validMockStock(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error('Mock SKU stock is invalid');
   return value;
+}
+
+function validMockTitle(platform: PlatformType, value: string): string {
+  const title = value.trim();
+  if (!title || /[\r\n]/.test(title)) throw new Error('Mock product title is invalid');
+  if (platform === 'douyin') {
+    const units = [...title].reduce(
+      (total, character) => total + (/^[\x00-\x7f]$/.test(character) ? 1 : 2),
+      0,
+    );
+    if (units < 16 || units > 60) throw new Error('Mock product title is invalid');
+    return title;
+  }
+  const maxLength = ['pdd', 'kuaishou', 'wechat_shop'].includes(platform) ? 30 : 60;
+  if ([...title].length > maxLength) throw new Error('Mock product title is invalid');
+  return title;
 }
 
 export function createMockAdapter(platform: PlatformType): MockPlatformAdapter {

@@ -82,6 +82,52 @@ describe('ProductBatchService', () => {
     });
   });
 
+  it('exposes title-edit eligibility only for published online or offline products', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(2);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({ status: 'online', task: { skuSnapshot: null } }),
+      publishedProduct({ id: 12n, status: 'draft', task: { skuSnapshot: null } }),
+    ]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50 }),
+    ).resolves.toMatchObject({
+      items: [
+        { publishedProductId: '11', titleEditable: true, titleEditReason: null },
+        {
+          publishedProductId: '12',
+          titleEditable: false,
+          titleEditReason: '只有已发布的在线或下架商品可以改标题',
+        },
+      ],
+    });
+  });
+
+  it('blocks title editing while an earlier platform write still needs verification', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({ task: { skuSnapshot: null } }),
+    ]);
+    fixture.prisma.productBatchItem.findMany.mockResolvedValue([
+      { id: 51n, taskId: 41n, publishedProductId: 11n },
+    ]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50 }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          titleEditable: false,
+          titleEditReason: '存在结果待核验的标题更新，请先在原批量任务核验',
+          titleVerificationTaskId: '41',
+          titleVerificationItemId: '51',
+        },
+      ],
+    });
+  });
+
   it('replays the same preview request without creating another task', async () => {
     const fixture = createFixture();
     const replay = taskRecord({
@@ -173,6 +219,51 @@ describe('ProductBatchService', () => {
         priceRule: { mode: 'percentage', direction: 'increase', basisPoints: 1100 },
       }),
     ).rejects.toThrow('该请求标识已用于不同的批量操作');
+  });
+
+  it('replays equivalent title targets after trimming and input reordering', async () => {
+    const titleTargets = [
+      {
+        publishedProductId: '11',
+        expectedMutationRevision: 1,
+        targetTitle: '夏季轻薄纯棉短袖上衣',
+      },
+      {
+        publishedProductId: '12',
+        expectedMutationRevision: 1,
+        targetTitle: '通勤宽松纯棉圆领短袖',
+      },
+    ];
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        requestFingerprint: fingerprint('edit_title', ['11', '12'], undefined, titleTargets),
+        items: [],
+      }),
+    );
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_title',
+        publishedProductIds: ['12', '11'],
+        titleTargets: [
+          {
+            publishedProductId: '12',
+            expectedMutationRevision: 1,
+            targetTitle: '  通勤宽松纯棉圆领短袖 ',
+          },
+          {
+            publishedProductId: '11',
+            expectedMutationRevision: 1,
+            targetTitle: '夏季轻薄纯棉短袖上衣',
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ action: 'edit_title' });
+
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
   });
 
   it('rejects a price rule on an inventory-sync preview', async () => {
@@ -329,6 +420,44 @@ describe('ProductBatchService', () => {
     );
   });
 
+  it('materializes an absolute target title and skips platform-invalid short titles per item', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({ id: 11n, title: '夏季纯棉短袖上衣' }),
+      publishedProduct({ id: 12n, title: '通勤纯棉圆领短袖' }),
+    ]);
+    fixture.prisma.productBatchTask.create.mockImplementation(async ({ data }: any) =>
+      taskRecord({ action: 'edit_title', requestFingerprint: data.requestFingerprint, items: [] }),
+    );
+
+    await fixture.service.createPreview(USER, {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'edit_title',
+      publishedProductIds: ['11', '12'],
+      titleTargets: [
+        {
+          publishedProductId: '11',
+          expectedMutationRevision: 1,
+          targetTitle: '夏季轻薄纯棉短袖上衣',
+        },
+        { publishedProductId: '12', expectedMutationRevision: 1, targetTitle: '短袖' },
+      ],
+    });
+
+    const created = fixture.prisma.productBatchTask.create.mock.calls[0]![0].data.items.create;
+    expect(created[0]).toMatchObject({
+      status: 'pending',
+      beforeSnapshot: { title: '夏季纯棉短袖上衣' },
+      desiredSnapshot: { title: '夏季轻薄纯棉短袖上衣' },
+    });
+    expect(created[1]).toMatchObject({
+      status: 'skipped',
+      errorCode: 'TITLE_COMPLIANCE_BLOCKED',
+      desiredSnapshot: { title: '短袖' },
+    });
+  });
+
   it('rejects target prices that do not exactly cover the selected products', async () => {
     const fixture = createFixture();
 
@@ -345,6 +474,102 @@ describe('ProductBatchService', () => {
     ).rejects.toThrow('逐项目标价必须与所选商品完全一致');
 
     expect(fixture.prisma.publishedProduct.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects title targets that do not exactly cover the selected products', async () => {
+    const fixture = createFixture();
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_title',
+        publishedProductIds: ['11', '12'],
+        titleTargets: [
+          {
+            publishedProductId: '11',
+            expectedMutationRevision: 1,
+            targetTitle: '夏季轻薄纯棉短袖上衣',
+          },
+        ],
+      }),
+    ).rejects.toThrow('必须有效并与所选商品完全一致');
+
+    expect(fixture.prisma.publishedProduct.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a title preview when the selected product revision is stale', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({ mutationRevision: 2 }),
+    ]);
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_title',
+        publishedProductIds: ['11'],
+        titleTargets: [
+          {
+            publishedProductId: '11',
+            expectedMutationRevision: 1,
+            targetTitle: '夏季轻薄纯棉短袖上衣',
+          },
+        ],
+      }),
+    ).rejects.toThrow('商品已在选择后发生变化');
+
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a new title preview until an unknown earlier mutation is verified', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([publishedProduct()]);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 51n });
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_title',
+        publishedProductIds: ['11'],
+        titleTargets: [
+          {
+            publishedProductId: '11',
+            expectedMutationRevision: 1,
+            targetTitle: '夏季轻薄纯棉短袖上衣',
+          },
+        ],
+      }),
+    ).rejects.toThrow('存在结果待核验的标题更新');
+  });
+
+  it('returns immutable before, desired and platform-read title fields in task detail', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        items: [
+          taskItem({
+            status: 'succeeded',
+            beforeSnapshot: { status: 'online', title: '夏季纯棉短袖上衣' },
+            desiredSnapshot: { status: 'online', title: '夏季轻薄纯棉短袖上衣' },
+            result: { actualTitle: '夏季轻薄纯棉短袖上衣' },
+            publishedProduct: publishedProduct({ title: '夏季轻薄纯棉短袖上衣' }),
+          }),
+        ],
+      }),
+    );
+
+    await expect(fixture.service.detail(USER, '41')).resolves.toMatchObject({
+      items: [
+        {
+          beforeTitle: '夏季纯棉短袖上衣',
+          desiredTitle: '夏季轻薄纯棉短袖上衣',
+          actualTitle: '夏季轻薄纯棉短袖上衣',
+        },
+      ],
+    });
   });
 
   it('confirms an unchanged preview and queues its pending items', async () => {
@@ -463,6 +688,248 @@ describe('ProductBatchService', () => {
     await expect(fixture.service.retry(USER, '41', {})).rejects.toThrow('失败项状态已变化，请刷新');
   });
 
+  it('blocks manual replay when a title mutation result is still unknown', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        status: 'failed',
+        confirmedAt: NOW,
+        items: [taskItem({ status: 'failed', errorCode: 'TITLE_RESULT_UNKNOWN', finishedAt: NOW })],
+      }),
+    );
+
+    await expect(fixture.service.retry(USER, '41', {})).rejects.toThrow(
+      '请先在原批量任务核验平台实际标题',
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('verifies an unknown title result as succeeded when the platform shows the target', async () => {
+    const fixture = createFixture();
+    const item = unknownTitleExecutionRecord(new Date().toISOString());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.adapter.getProductTitle.mockResolvedValue(
+      platformTitle('夏季轻薄纯棉短袖上衣', 'reviewing'),
+    );
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'failed',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: null,
+      items: [{ status: 'succeeded' }],
+    });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        status: 'succeeded',
+        confirmedAt: NOW,
+        finishedAt: NOW,
+        items: [
+          taskItem({
+            status: 'succeeded',
+            beforeSnapshot: item.beforeSnapshot,
+            desiredSnapshot: item.desiredSnapshot,
+            result: { actualTitle: '夏季轻薄纯棉短袖上衣' },
+            publishedProduct: publishedProduct({ title: '夏季轻薄纯棉短袖上衣' }),
+          }),
+        ],
+      }),
+    );
+
+    await expect(fixture.service.verifyTitleResult(USER, '41', '51')).resolves.toMatchObject({
+      status: 'succeeded',
+    });
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ title: '夏季轻薄纯棉短袖上衣', status: 'draft' }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'succeeded', errorCode: null }),
+      }),
+    );
+  });
+
+  it('keeps an unknown title result unresolved until the five-minute quiet window passes', async () => {
+    const fixture = createFixture();
+    const item = unknownTitleExecutionRecord(new Date().toISOString());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.adapter.getProductTitle.mockResolvedValue(platformTitle('夏季纯棉短袖上衣', 'online'));
+
+    await expect(fixture.service.verifyTitleResult(USER, '41', '51')).rejects.toThrow(
+      '5 分钟后再次核验',
+    );
+
+    expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('keeps an original title unresolved while the platform still reports a reviewing state', async () => {
+    const fixture = createFixture();
+    const item = unknownTitleExecutionRecord(new Date(Date.now() - 10 * 60_000).toISOString());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.adapter.getProductTitle.mockResolvedValue(
+      platformTitle('夏季纯棉短袖上衣', 'reviewing'),
+    );
+
+    await expect(fixture.service.verifyTitleResult(USER, '41', '51')).rejects.toThrow(
+      '平台仍在处理标题更新',
+    );
+    expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('immediately closes an unknown result when the platform shows a third-party title', async () => {
+    const fixture = createFixture();
+    const item = unknownTitleExecutionRecord(new Date().toISOString());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.adapter.getProductTitle.mockResolvedValue(
+      platformTitle('人工修改后的第三个标题', 'online'),
+    );
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'failed',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: null,
+      items: [{ status: 'failed' }],
+    });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        status: 'failed',
+        confirmedAt: NOW,
+        finishedAt: NOW,
+        items: [taskItem({ status: 'failed', errorCode: 'PLATFORM_TITLE_CHANGED' })],
+      }),
+    );
+
+    await expect(fixture.service.verifyTitleResult(USER, '41', '51')).resolves.toMatchObject({
+      items: [expect.objectContaining({ errorCode: 'PLATFORM_TITLE_CHANGED' })],
+    });
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ title: '人工修改后的第三个标题' }),
+      }),
+    );
+  });
+
+  it('prioritizes a rejected platform state during unknown-result verification', async () => {
+    const fixture = createFixture();
+    const item = unknownTitleExecutionRecord(new Date().toISOString());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.adapter.getProductTitle.mockResolvedValue({
+      title: '夏季纯棉短袖上衣',
+      state: 'rejected',
+      status: 1,
+      checkStatus: 4,
+    });
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'failed',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: null,
+      items: [{ status: 'failed' }],
+    });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        status: 'failed',
+        confirmedAt: NOW,
+        finishedAt: NOW,
+        items: [taskItem({ status: 'failed', errorCode: 'TITLE_RESULT_REJECTED' })],
+      }),
+    );
+
+    await expect(fixture.service.verifyTitleResult(USER, '41', '51')).resolves.toMatchObject({
+      items: [expect.objectContaining({ errorCode: 'TITLE_RESULT_REJECTED' })],
+    });
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'rejected' }),
+      }),
+    );
+  });
+
+  it('closes an unknown platform state instead of leaving the title fence stuck', async () => {
+    const fixture = createFixture();
+    const item = unknownTitleExecutionRecord(new Date().toISOString());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.adapter.getProductTitle.mockResolvedValue({
+      title: '夏季纯棉短袖上衣',
+      state: 'unknown',
+      status: null,
+      checkStatus: null,
+    });
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'failed',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: null,
+      items: [{ status: 'failed' }],
+    });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        status: 'failed',
+        confirmedAt: NOW,
+        finishedAt: NOW,
+        items: [taskItem({ status: 'failed', errorCode: 'TITLE_RESULT_STATE_INVALID' })],
+      }),
+    );
+
+    await expect(fixture.service.verifyTitleResult(USER, '41', '51')).resolves.toMatchObject({
+      items: [expect.objectContaining({ errorCode: 'TITLE_RESULT_STATE_INVALID' })],
+    });
+  });
+
+  it('closes an unknown result without retry when the quiet-window readback still shows the original title', async () => {
+    const fixture = createFixture();
+    const item = unknownTitleExecutionRecord(new Date(Date.now() - 6 * 60_000).toISOString());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(item);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.adapter.getProductTitle.mockResolvedValue(platformTitle('夏季纯棉短袖上衣', 'online'));
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'failed',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: null,
+      items: [{ status: 'failed' }],
+    });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({
+        action: 'edit_title',
+        status: 'failed',
+        confirmedAt: NOW,
+        finishedAt: NOW,
+        items: [
+          taskItem({
+            status: 'failed',
+            errorCode: 'TITLE_NOT_APPLIED_VERIFIED',
+            errorMessage: '本次写入未确认生效',
+            beforeSnapshot: item.beforeSnapshot,
+            desiredSnapshot: item.desiredSnapshot,
+          }),
+        ],
+      }),
+    );
+
+    await expect(fixture.service.verifyTitleResult(USER, '41', '51')).resolves.toMatchObject({
+      items: [
+        expect.objectContaining({ errorCode: 'TITLE_NOT_APPLIED_VERIFIED', retryable: false }),
+      ],
+    });
+  });
+
   it('claims an item with compare-and-set and retries after a lost race', async () => {
     const fixture = createFixture();
     const candidate = {
@@ -539,6 +1006,103 @@ describe('ProductBatchService', () => {
       where: { id: 41n, stateRevision: 1 },
       data: { status: 'queued', stateRevision: { increment: 1 }, finishedAt: null },
     });
+  });
+
+  it('turns a stale title write into a non-retryable unknown result even after cancellation', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchItem.findMany.mockResolvedValue([
+      {
+        id: 51n,
+        taskId: 41n,
+        status: 'running',
+        attempts: 1,
+        maxAttempts: 3,
+        lockedBy: 'dead-worker',
+        errorCode: 'TITLE_WRITE_STARTED',
+        task: { action: 'edit_title', cancelRequestedAt: NOW },
+      },
+    ]);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(null);
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'cancelling',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: NOW,
+      items: [{ status: 'failed' }],
+    });
+
+    await expect(fixture.service.claimNext('worker-2')).resolves.toBeNull();
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'TITLE_RESULT_UNKNOWN',
+        }),
+      }),
+    );
+  });
+
+  it('settles a cancelled running item instead of leaving it in an unreachable retry wait', async () => {
+    const fixture = createFixture();
+    const item = executionRecord();
+    fixture.prisma.productBatchItem.updateMany.mockImplementation(async ({ where }: any) => ({
+      count: where?.task?.cancelRequestedAt ? 1 : 0,
+    }));
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'cancelling',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: NOW,
+      items: [{ status: 'cancelled' }],
+    });
+
+    await expect(fixture.service.failClaimedItem(item, new Error('read failed'))).resolves.toBe(
+      'cancelled',
+    );
+  });
+
+  it('preserves an explicit unknown title result when cancellation arrives concurrently', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle.mockResolvedValue(platformTitle('夏季纯棉短袖上衣', 'online'));
+    const unknown = new Error('Douyin product title update request failed');
+    unknown.name = 'PlatformMutationResultUnknownError';
+    fixture.adapter.updateProductTitle.mockRejectedValueOnce(unknown);
+
+    let error: unknown;
+    try {
+      await fixture.service.executeClaimed(item);
+    } catch (caught) {
+      error = caught;
+    }
+    (item.task as { cancelRequestedAt: Date | null }).cancelRequestedAt = NOW;
+    fixture.prisma.productBatchItem.updateMany.mockClear();
+    fixture.prisma.productBatchItem.updateMany.mockImplementation(async ({ where }: any) => ({
+      count: where?.errorCode ? 1 : 0,
+    }));
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue({
+      id: 41n,
+      status: 'cancelling',
+      stateRevision: 1,
+      confirmedAt: NOW,
+      cancelRequestedAt: NOW,
+      items: [{ status: 'failed' }],
+    });
+
+    await expect(fixture.service.failClaimedItem(item, error)).resolves.toBe('failed');
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledTimes(1);
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'TITLE_RESULT_UNKNOWN',
+        }),
+      }),
+    );
   });
 
   it('reconciles an active task whose items were already terminal after an interrupted refresh', async () => {
@@ -716,6 +1280,277 @@ describe('ProductBatchService', () => {
             reason: 'platform_result_recovered',
             recovered: true,
           }),
+        }),
+      }),
+    );
+  });
+
+  it('updates only the title and atomically commits the confirmed draft readback', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle
+      .mockResolvedValueOnce(platformTitle('夏季纯棉短袖上衣', 'online'))
+      .mockResolvedValueOnce(platformTitle('夏季轻薄纯棉短袖上衣', 'reviewing'));
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.updateProductTitle).toHaveBeenCalledWith('shop-token', {
+      platformProductId: '998877',
+      title: '夏季轻薄纯棉短袖上衣',
+    });
+    expect(fixture.adapter.updateProductPrice).not.toHaveBeenCalled();
+    expect(fixture.adapter.syncInventory).not.toHaveBeenCalled();
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 1 }),
+        data: expect.objectContaining({
+          title: '夏季轻薄纯棉短袖上衣',
+          status: 'draft',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'succeeded',
+          result: expect.objectContaining({
+            reason: 'title_confirmed',
+            actualTitle: '夏季轻薄纯棉短袖上衣',
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('recovers a timed-out title mutation from the draft-aware platform readback', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle
+      .mockResolvedValueOnce(platformTitle('夏季纯棉短袖上衣', 'online'))
+      .mockResolvedValueOnce(platformTitle('夏季轻薄纯棉短袖上衣', 'reviewing'));
+    const unknown = new Error('Douyin product title update request failed');
+    unknown.name = 'PlatformMutationResultUnknownError';
+    fixture.adapter.updateProductTitle.mockRejectedValueOnce(unknown);
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: expect.objectContaining({
+            reason: 'platform_title_recovered',
+            recovered: true,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('preserves result-unknown semantics when the product lock is lost after title submission', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle.mockResolvedValueOnce(
+      platformTitle('夏季纯棉短袖上衣', 'online'),
+    );
+    fixture.productLocks.renew
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('product lock lost'));
+    let writeStarted = false;
+    fixture.prisma.productBatchItem.updateMany.mockImplementation(async ({ where, data }: any) => {
+      if (data?.errorCode === 'TITLE_WRITE_STARTED') {
+        writeStarted = true;
+        return { count: 1 };
+      }
+      if (where?.errorCode) return { count: writeStarted ? 1 : 0 };
+      if (where?.task?.cancelRequestedAt) return { count: 0 };
+      return { count: 1 };
+    });
+
+    let thrown: unknown;
+    try {
+      await fixture.service.executeClaimed(item);
+    } catch (error) {
+      thrown = error;
+    }
+    await expect(fixture.service.failClaimedItem(item, thrown)).resolves.toBe('failed');
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ errorCode: 'TITLE_RESULT_UNKNOWN', status: 'failed' }),
+      }),
+    );
+  });
+
+  it('does not submit a title when the product lock expires after persisting the write marker', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle.mockResolvedValueOnce(
+      platformTitle('夏季纯棉短袖上衣', 'online'),
+    );
+    fixture.productLocks.renew
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('product lock lost'));
+    let writeStarted = false;
+    fixture.prisma.productBatchItem.updateMany.mockImplementation(async ({ where, data }: any) => {
+      if (data?.errorCode === 'TITLE_WRITE_STARTED') {
+        writeStarted = true;
+        return { count: 1 };
+      }
+      if (where?.task?.cancelRequestedAt) return { count: 0 };
+      return { count: 1 };
+    });
+
+    let thrown: unknown;
+    try {
+      await fixture.service.executeClaimed(item);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(writeStarted).toBe(true);
+    expect(fixture.adapter.updateProductTitle).not.toHaveBeenCalled();
+    await expect(fixture.service.failClaimedItem(item, thrown)).resolves.toBe('retry_wait');
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'retry_wait',
+          errorCode: 'TITLE_WRITE_GUARD_LOST',
+        }),
+      }),
+    );
+  });
+
+  it('does not repeat a title mutation when the platform already has the desired title', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord({ attempts: 2 });
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle.mockResolvedValueOnce(
+      platformTitle('夏季轻薄纯棉短袖上衣', 'reviewing'),
+    );
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.updateProductTitle).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: expect.objectContaining({ recovered: true }),
+        }),
+      }),
+    );
+  });
+
+  it('blocks a second title task when another write needs verification after taking the product lock', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord({ id: 52n, taskId: 42n });
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 51n });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '同一商品存在结果待核验的标题更新',
+    );
+
+    expect(fixture.productLocks.acquire).toHaveBeenCalledWith(item.publishedProductId);
+    expect(fixture.adapter.getProductTitle).not.toHaveBeenCalled();
+    expect(fixture.adapter.updateProductTitle).not.toHaveBeenCalled();
+    expect(fixture.productLocks.release).toHaveBeenCalledWith(
+      item.publishedProductId,
+      'product-lock',
+    );
+  });
+
+  it('atomically records a confirmed title that leaves the platform product rejected', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle
+      .mockResolvedValueOnce(platformTitle('夏季纯棉短袖上衣', 'online'))
+      .mockResolvedValueOnce({
+        title: '夏季轻薄纯棉短袖上衣',
+        state: 'rejected',
+        status: 1,
+        checkStatus: 4,
+      });
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          title: '夏季轻薄纯棉短袖上衣',
+          status: 'rejected',
+          lastEditError: '平台商品状态为 rejected，已同步实际标题，请按平台提示修正',
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'failed', errorCode: 'TITLE_RESULT_REJECTED' }),
+      }),
+    );
+  });
+
+  it('fails closed and synchronizes a third-party platform title drift', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle.mockResolvedValueOnce(
+      platformTitle('人工修改后的第三个标题', 'online'),
+    );
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.updateProductTitle).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          title: '人工修改后的第三个标题',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'PLATFORM_TITLE_CHANGED',
+          result: expect.objectContaining({ actualTitle: '人工修改后的第三个标题' }),
+        }),
+      }),
+    );
+  });
+
+  it('marks an unconfirmed ambiguous title mutation non-retryable', async () => {
+    const fixture = createFixture();
+    const item = titleExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductTitle.mockResolvedValue(platformTitle('夏季纯棉短袖上衣', 'online'));
+    const unknown = new Error('Douyin product title update request failed');
+    unknown.name = 'PlatformMutationResultUnknownError';
+    fixture.adapter.updateProductTitle.mockRejectedValueOnce(unknown);
+
+    let thrown: unknown;
+    try {
+      await fixture.service.executeClaimed(item);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    await expect(fixture.service.failClaimedItem(item, thrown)).resolves.toBe('failed');
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'TITLE_RESULT_UNKNOWN',
         }),
       }),
     );
@@ -1357,6 +2192,8 @@ function createFixture() {
   const adapter = {
     offlineProduct: vi.fn(),
     getProductState: vi.fn(),
+    updateProductTitle: vi.fn(),
+    getProductTitle: vi.fn(),
     updateProductPrice: vi.fn(),
     getProductPrices: vi.fn(),
     syncInventory: vi.fn(),
@@ -1383,7 +2220,9 @@ function createFixture() {
       findFirst: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn(),
-      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      updateMany: vi.fn().mockImplementation(async ({ where }: any) => ({
+        count: where?.errorCode || where?.task?.cancelRequestedAt ? 0 : 1,
+      })),
     },
     publishedProduct: {
       count: vi.fn(),
@@ -1427,6 +2266,10 @@ function createFixture() {
     productLocks,
     prepareExecution(item: ProductBatchExecutionRecord) {
       prisma.productBatchItem.findUnique.mockResolvedValue(item);
+      prisma.publishedProduct.findUnique.mockResolvedValue({
+        platformProductId: item.publishedProduct.platformProductId,
+        mutationRevision: item.expectedMutationRevision,
+      });
       prisma.productBatchTask.findUnique.mockResolvedValue({
         id: item.taskId,
         status: 'running',
@@ -1553,6 +2396,45 @@ function priceExecutionRecord(overrides: Record<string, unknown> = {}) {
   } as unknown as ProductBatchExecutionRecord;
 }
 
+function titleExecutionRecord(overrides: Record<string, unknown> = {}) {
+  const record = executionRecord();
+  return {
+    ...record,
+    beforeSnapshot: {
+      status: 'online',
+      title: '夏季纯棉短袖上衣',
+      platformProductId: '998877',
+      shopId: '21',
+      mutationRevision: 1,
+    },
+    desiredSnapshot: {
+      status: 'online',
+      title: '夏季轻薄纯棉短袖上衣',
+    },
+    task: { ...record.task, action: 'edit_title' },
+    publishedProduct: publishedProduct({
+      title: '夏季纯棉短袖上衣',
+      task: { userId: 1n, skuSnapshot: null },
+    }),
+    ...overrides,
+  } as unknown as ProductBatchExecutionRecord;
+}
+
+function unknownTitleExecutionRecord(titleWriteStartedAt: string) {
+  const record = titleExecutionRecord();
+  return {
+    ...record,
+    status: 'failed',
+    errorCode: 'TITLE_RESULT_UNKNOWN',
+    errorMessage: '标题写入结果未知',
+    result: { phase: 'platform_write_started', titleWriteStartedAt },
+    lockedAt: null,
+    lockedBy: null,
+    finishedAt: NOW,
+    task: { ...record.task, status: 'failed' },
+  } as unknown as ProductBatchExecutionRecord;
+}
+
 function inventoryExecutionRecord(overrides: Record<string, unknown> = {}) {
   const record = executionRecord();
   return {
@@ -1627,6 +2509,18 @@ function platformInventory(items: Array<[string, number]>) {
   };
 }
 
+function platformTitle(
+  title: string,
+  state: 'online' | 'offline' | 'reviewing' | 'draft' = 'online',
+) {
+  return {
+    title,
+    state,
+    status: state === 'online' ? 0 : 1,
+    checkStatus: state === 'reviewing' ? 2 : state === 'draft' ? 1 : 3,
+  };
+}
+
 function publishedProduct(overrides: Record<string, unknown> = {}) {
   return {
     id: 11n,
@@ -1677,12 +2571,28 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function fingerprint(action: string, ids: string[], priceRule?: Record<string, unknown>): string {
+function fingerprint(
+  action: string,
+  ids: string[],
+  priceRule?: Record<string, unknown>,
+  titleTargets?: Array<{
+    publishedProductId: string;
+    expectedMutationRevision: number;
+    targetTitle: string;
+  }>,
+): string {
   return createHash('sha256')
     .update(
       JSON.stringify({
         action,
         publishedProductIds: [...ids].sort(),
+        ...(titleTargets
+          ? {
+              titleTargets: [...titleTargets].sort((left, right) =>
+                left.publishedProductId.localeCompare(right.publishedProductId),
+              ),
+            }
+          : {}),
         ...(priceRule ? { priceRule } : {}),
       }),
     )

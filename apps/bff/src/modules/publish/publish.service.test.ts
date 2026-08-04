@@ -687,7 +687,7 @@ describe('PublishService', () => {
     expect(fixture.ai.generateDetail).toHaveBeenCalledWith(
       USER,
       expect.objectContaining({
-        title: 'AI 优化标题',
+        title: 'AI 优化夏季纯棉短袖标题',
         attributes: expect.objectContaining({ material: '棉' }),
       }),
     );
@@ -1083,7 +1083,7 @@ describe('PublishService', () => {
     const sourceProduct = {
       id: 2n,
       productId1688: '1688-1',
-      title: '纯棉T恤',
+      title: '夏季轻薄纯棉短袖上衣',
       price: 10,
       categoryPath: '女装/T恤',
       categoryL1: '女装',
@@ -1200,7 +1200,7 @@ describe('PublishService', () => {
       targetShopIds: ['9', '10'],
       status: 'partial',
       aiOptimized: {
-        title: '已持久化标题',
+        title: '已持久化商品标题',
         mainImageUrl: 'https://cdn.example/reused-main.png',
         mainImageRequested: true,
       },
@@ -1213,7 +1213,7 @@ describe('PublishService', () => {
       sourceProduct: {
         id: 2n,
         productId1688: '1688-1',
-        title: '纯棉T恤',
+        title: '夏季轻薄纯棉短袖上衣',
         price: 10,
         categoryPath: '女装/T恤',
         categoryL1: '女装',
@@ -1237,7 +1237,7 @@ describe('PublishService', () => {
     expect(fixture.publishProduct).toHaveBeenCalledWith(
       'plain-access-token',
       expect.objectContaining({
-        title: '已持久化标题',
+        title: '已持久化商品标题',
         mainImages: ['https://cdn.example/reused-main.png'],
       }),
     );
@@ -1263,7 +1263,7 @@ describe('PublishService', () => {
       sourceProduct: {
         id: 2n,
         productId1688: '1688-1',
-        title: '纯棉T恤',
+        title: '夏季轻薄纯棉短袖上衣',
         price: 10,
         categoryPath: '女装/T恤',
         categoryL1: '女装',
@@ -1296,7 +1296,7 @@ describe('PublishService', () => {
     let lost = false;
     fixture.ai.generateTitle.mockImplementation(async () => {
       lost = true;
-      return { titles: ['AI 优化标题'] };
+      return { titles: ['AI 优化夏季纯棉短袖标题'] };
     });
     const lease = leaseLostWhen(() => lost);
 
@@ -1427,7 +1427,10 @@ describe('PublishService', () => {
         leaseLostWhen(() => interrupted),
       ),
     ).rejects.toThrow('所有权已变化');
-    expect(checkpoint).toMatchObject({ title: 'AI 优化标题', rewriteTitle: true });
+    expect(checkpoint).toMatchObject({
+      title: 'AI 优化夏季纯棉短袖标题',
+      rewriteTitle: true,
+    });
     expect(fixture.ai.generateTitle).toHaveBeenCalledOnce();
     expect(fixture.ai.generateDetail).not.toHaveBeenCalled();
 
@@ -1449,7 +1452,7 @@ describe('PublishService', () => {
       ...task,
       aiOptions: { rewriteTitle: false, removeWatermark: true },
       aiOptimized: {
-        title: '纯棉T恤',
+        title: '夏季轻薄纯棉短袖上衣',
         mainImageAttempted: true,
         mainImageError: '主图合规审核未通过',
       },
@@ -1490,7 +1493,7 @@ describe('PublishService', () => {
       sourceProduct: {
         id: 2n,
         productId1688: '1688-1',
-        title: '纯棉T恤',
+        title: '夏季轻薄纯棉短袖上衣',
         price: 10,
         categoryPath: '女装/T恤',
         categoryL1: '女装',
@@ -1543,14 +1546,14 @@ describe('PublishService', () => {
     fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
 
     const result = await fixture.service.updatePublishedProduct(USER, '7', {
-      title: '修正后的纯棉T恤',
+      title: '夏季修正后的纯棉T恤',
     });
 
     expect(fixture.updateProduct).toHaveBeenCalledWith(
       'plain-access-token',
       expect.objectContaining({
         platformProductId: '998877',
-        title: '修正后的纯棉T恤',
+        title: '夏季修正后的纯棉T恤',
         categoryId: '12345',
         categoryProperties: {
           '2176': [{ value: 111, name: '棉', diyType: 0 }],
@@ -1581,7 +1584,7 @@ describe('PublishService', () => {
         },
       },
       data: expect.objectContaining({
-        title: '修正后的纯棉T恤',
+        title: '夏季修正后的纯棉T恤',
         status: 'draft',
         salePrice: 15,
         skuPriceSnapshot: {
@@ -1608,9 +1611,39 @@ describe('PublishService', () => {
     });
     expect(result).toMatchObject({
       publishedProductId: '7',
-      title: '修正后的纯棉T恤',
+      title: '夏季修正后的纯棉T恤',
       status: 'draft',
     });
+  });
+
+  it('blocks a full product edit while a title mutation result still needs verification', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 51n });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '夏季修正后的纯棉T恤' }),
+    ).rejects.toThrow('存在结果待核验的标题更新');
+
+    expect(fixture.platformProductLocks.acquire).not.toHaveBeenCalled();
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('rechecks unresolved title mutations after taking the product lock', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.prisma.productBatchItem.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 51n });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '夏季修正后的纯棉T恤' }),
+    ).rejects.toThrow('存在结果待核验的标题更新');
+
+    expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);
+    expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
   });
 
   it('persists the confirmed platform status instead of reviving a locally online product', async () => {
@@ -1628,7 +1661,7 @@ describe('PublishService', () => {
     });
 
     await expect(
-      fixture.service.updatePublishedProduct(USER, '7', { title: '下架后修正标题' }),
+      fixture.service.updatePublishedProduct(USER, '7', { title: '下架后修正商品标题' }),
     ).resolves.toMatchObject({ status: 'offline' });
 
     expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenLastCalledWith(
@@ -1662,12 +1695,12 @@ describe('PublishService', () => {
       items: [{ sourceSkuId: 'default', priceCents: 1800 }],
     });
 
-    await fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' });
+    await fixture.service.updatePublishedProduct(USER, '7', { title: '只修改这个商品标题' });
 
     expect(fixture.updateProduct).toHaveBeenCalledWith(
       'plain-access-token',
       expect.objectContaining({
-        title: '只修改标题',
+        title: '只修改这个商品标题',
         salePrice: 18,
         skus: [expect.objectContaining({ sourceSkuId: 'default', price: 18 })],
       }),
@@ -1686,7 +1719,7 @@ describe('PublishService', () => {
     });
 
     await expect(
-      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' }),
+      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改这个商品标题' }),
     ).rejects.toThrow('平台 SKU 库存已变化并同步');
 
     expect(fixture.updateProduct).not.toHaveBeenCalled();
@@ -1724,7 +1757,7 @@ describe('PublishService', () => {
     });
 
     await expect(
-      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' }),
+      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改这个商品标题' }),
     ).rejects.toThrow('请先下架商品');
 
     expect(fixture.updateProduct).not.toHaveBeenCalled();
@@ -1749,7 +1782,7 @@ describe('PublishService', () => {
       });
 
     await expect(
-      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' }),
+      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改这个商品标题' }),
     ).rejects.toThrow('提交前发生变化');
 
     expect(fixture.updateProduct).not.toHaveBeenCalled();
@@ -1791,7 +1824,7 @@ describe('PublishService', () => {
       });
 
     await expect(
-      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' }),
+      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改这个商品标题' }),
     ).rejects.toThrow('平台未确认商品编辑后的 SKU 库存');
 
     expect(fixture.updateProduct).toHaveBeenCalledOnce();
@@ -2007,7 +2040,7 @@ function queuedTaskRecord(overrides: Record<string, unknown> = {}) {
   const sourceProduct = {
     id: 2n,
     productId1688: '1688-1',
-    title: '纯棉T恤',
+    title: '夏季轻薄纯棉短袖上衣',
     price: 10,
     categoryPath: '女装/T恤',
     categoryL1: '女装',
@@ -2074,7 +2107,7 @@ function publishedProductRecord() {
     shopId: 9n,
     sourceProductId: 2n,
     platformProductId: '998877',
-    title: '旧标题',
+    title: '夏季纯棉短袖旧标题',
     salePrice: 15,
     costPrice: 10,
     skuPriceSnapshot: {
@@ -2112,7 +2145,7 @@ function publishedProductRecord() {
     sourceProduct: {
       id: 2n,
       productId1688: '1688-1',
-      title: '纯棉T恤',
+      title: '夏季轻薄纯棉短袖上衣',
       price: 10,
       categoryPath: '女装/T恤',
       categoryL1: '女装',
@@ -2148,7 +2181,7 @@ function createFixture(
       findUnique: vi.fn().mockResolvedValue({
         id: 2n,
         productId1688: '1688-1',
-        title: '纯棉T恤',
+        title: '夏季轻薄纯棉短袖上衣',
         price: 10,
         categoryPath: '女装/T恤',
         categoryL1: '女装',
@@ -2195,6 +2228,9 @@ function createFixture(
       update: vi.fn().mockResolvedValue({}),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    productBatchItem: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
   };
   prisma.$transaction.mockImplementation(
     async (callback: (tx: typeof prisma) => Promise<unknown>) => callback(prisma),
@@ -2205,7 +2241,7 @@ function createFixture(
     assertWithinQuota: vi.fn(),
   };
   const ai = {
-    generateTitle: vi.fn().mockResolvedValue({ titles: ['AI 优化标题'] }),
+    generateTitle: vi.fn().mockResolvedValue({ titles: ['AI 优化夏季纯棉短袖标题'] }),
     generateDetail: vi.fn().mockResolvedValue({
       detailHtml: '<div><section>AI 详情</section></div>',
       complianceFlags: [],

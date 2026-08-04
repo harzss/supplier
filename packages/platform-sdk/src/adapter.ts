@@ -11,6 +11,7 @@ import type {
   PlatformProductInventoryState,
   PlatformProductPriceState,
   PlatformProductState,
+  PlatformProductTitleState,
   PlatformExecutionGuard,
   PublishProductDto,
   PublishResult,
@@ -20,6 +21,7 @@ import type {
   SyncInventoryDto,
   UpdateProductDto,
   UpdateProductPriceDto,
+  UpdateProductTitleDto,
 } from './types';
 
 export interface PlatformAdapter {
@@ -34,7 +36,9 @@ export interface PlatformAdapter {
   publishProduct(token: string, dto: PublishProductDto): Promise<PublishResult>;
   findProductByExternalId?(token: string, externalProductId: string): Promise<PublishResult | null>;
   updateProduct(token: string, dto: UpdateProductDto): Promise<void>;
+  updateProductTitle?(token: string, dto: UpdateProductTitleDto): Promise<void>;
   updateProductPrice?(token: string, dto: UpdateProductPriceDto): Promise<void>;
+  getProductTitle?(token: string, productId: string): Promise<PlatformProductTitleState>;
   getProductPrices?(token: string, productId: string): Promise<PlatformProductPriceState>;
   getProductInventory?(token: string, productId: string): Promise<PlatformProductInventoryState>;
   getProductState?(token: string, productId: string): Promise<PlatformProductState>;

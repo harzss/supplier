@@ -191,11 +191,11 @@ erDiagram
 
 ## 3. 当前批量商品操作契约
 
-`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `offline`（批量下架）、`edit_price`（批量改价）与 `sync_inventory`（同步并核验 1688 库存）；数据库 action enum 中的标题、上架、换源和清理仍只是预留值，不表示这些动作已经实现。
+`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）与 `sync_inventory`（同步并核验 1688 库存）；数据库 action enum 中的上架、换源和清理仍只是预留值，不表示这些动作已经实现。
 
 ### 3.1 `product_batch_tasks`
 
-- `user_id + client_request_id` 唯一；`request_fingerprint` 同时绑定动作、与顺序无关的商品集合和规范化改价规则。同键同参返回原预览，同键异参拒绝，避免响应丢失后创建第二批任务或以旧请求键执行不同价格。
+- `user_id + client_request_id` 唯一；`request_fingerprint` 同时绑定动作、与顺序无关的商品集合、逐商品标题目标或规范化改价规则。同键同参返回原预览，同键异参拒绝，避免响应丢失后创建第二批任务或以旧请求键执行不同变更。
 - `preview_revision` 绑定用户确认时看到的物化预览；只有匹配当前 revision 才能从 `preview` 进入 `queued`。
 - `state_revision` 为任务状态 CAS 版本。确认、停止、重试、领取和汇总都会递增；并发汇总失去版本后必须重读 item，不能把已经完成的任务写回运行中。
 - 状态为 `preview / queued / running / cancelling / cancelled / partial / succeeded / failed`。停止请求写入 `cancel_requested_at`，只阻止尚未开始或等待重试的条目；已经在执行的条目按协作式停止语义收敛。
@@ -206,6 +206,7 @@ erDiagram
 - 每个任务与已发布商品组合唯一，最多由 API 创建 100 项；`ordinal` 保留预览顺序。
 - `expected_mutation_revision`、`before_snapshot` 和 `desired_snapshot` 固化预览时事实。改价预览会把比例或逐项目标价物化为每个外部 SKU 的绝对整数分价格，重试只执行该快照，不按后来价格重新计算。执行前必须确认商品 revision、平台商品 ID、店铺和状态未漂移，否则 fail-closed 并要求新建预览。
 - 库存预览保存已确认平台快照、1688 逐 SKU 目标、货源指纹和版本；执行前后回读平台，只提交未达目标 SKU。最终写入同时绑定商品 revision 与源库存版本，不能覆盖后来到达的新目标。
+- 标题预览保存原标题、逐商品目标标题与预期商品 revision。平台写入前先保存 `TITLE_WRITE_STARTED` 与开始时间；平台超时、锁/worker 所有权丢失、取消竞态或响应畸形时收敛为不可重放的 `TITLE_RESULT_UNKNOWN`，只有核验平台标题后才能继续。目标标题、原标题、第三方标题和驳回/封禁状态分别按明确规则原子同步商品与 item。
 - 状态为 `pending / running / retry_wait / succeeded / failed / skipped / cancelled`。worker 以旧状态、attempts 和任务取消状态做 CAS 领取，并记录 `locked_at / locked_by`；超过 5 分钟的 running 项按次数恢复为等待重试或失败。
 - 失败重试只把选中的 `failed` 项重置为 `pending`；`succeeded` 与 `skipped` 不会重新执行。`result` 保存平台确认/恢复原因，错误码与脱敏信息按 item 保留。
 

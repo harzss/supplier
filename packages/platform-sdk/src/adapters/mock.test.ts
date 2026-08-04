@@ -130,4 +130,31 @@ describe('MockPlatformAdapter', () => {
       expect.objectContaining({ state: 'offline', status: 1 }),
     );
   });
+
+  it('persists and reads a title-only update without changing product state', async () => {
+    const adapter = createMockAdapter('douyin');
+    const published = await adapter.publishProduct('tok', sampleDto);
+
+    await expect(
+      adapter.getProductTitle('tok', published.platformProductId),
+    ).resolves.toMatchObject({ title: sampleDto.title, state: 'online' });
+    await adapter.updateProductTitle('tok', {
+      platformProductId: published.platformProductId,
+      title: '更新后的纯棉短袖T恤',
+    });
+    await expect(
+      adapter.getProductTitle('tok', published.platformProductId),
+    ).resolves.toMatchObject({ title: '更新后的纯棉短袖T恤', state: 'online' });
+  });
+
+  it('rejects title updates for a mock product that was never published', async () => {
+    const adapter = createMockAdapter('douyin');
+
+    await expect(
+      adapter.updateProductTitle('tok', {
+        platformProductId: 'missing-product',
+        title: '更新后的纯棉短袖T恤',
+      }),
+    ).rejects.toThrow('unavailable');
+  });
 });

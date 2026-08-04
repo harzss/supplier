@@ -471,6 +471,10 @@ export interface ProductBatchCandidate {
   salePrice: number;
   priceRange: [number, number] | null;
   skuCount: number;
+  titleEditable: boolean;
+  titleEditReason: string | null;
+  titleVerificationTaskId: string | null;
+  titleVerificationItemId: string | null;
   priceEditable: boolean;
   priceEditReason: string | null;
   sourceProductId: string;
@@ -488,7 +492,7 @@ export interface ProductBatchCandidate {
   publishedAt: string;
 }
 
-export type ProductBatchAction = 'offline' | 'edit_price' | 'sync_inventory';
+export type ProductBatchAction = 'offline' | 'edit_title' | 'edit_price' | 'sync_inventory';
 
 export type ProductBatchPriceRule =
   | {
@@ -506,6 +510,16 @@ export type ProductBatchPreviewRequest =
       clientRequestId: string;
       action: 'offline';
       publishedProductIds: string[];
+    }
+  | {
+      clientRequestId: string;
+      action: 'edit_title';
+      publishedProductIds: string[];
+      titleTargets: Array<{
+        publishedProductId: string;
+        expectedMutationRevision: number;
+        targetTitle: string;
+      }>;
     }
   | {
       clientRequestId: string;
@@ -553,6 +567,9 @@ export interface ProductBatchItem {
   shopName: string | null;
   platform: string;
   platformProductId: string | null;
+  beforeTitle: string;
+  desiredTitle: string | null;
+  actualTitle: string | null;
   beforeStatus: string;
   desiredStatus: string;
   beforePrice: number | null;
@@ -566,6 +583,7 @@ export interface ProductBatchItem {
   actualInventory: ProductBatchInventorySnapshot | null;
   beforeInventoryVersion: number | null;
   desiredInventoryVersion: number | null;
+  retryable: boolean;
   status: string;
   attempts: number;
   maxAttempts: number;
@@ -1162,6 +1180,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(itemIds?.length ? { itemIds } : {}),
     });
+  },
+
+  verifyProductBatchTitle(taskId: string, itemId: string): Promise<ProductBatchTask> {
+    return request(
+      `/product-batches/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/verify-title`,
+      { method: 'POST' },
+    );
   },
 
   publishTasks(page: number, pageSize: number): Promise<PublishTaskPage> {

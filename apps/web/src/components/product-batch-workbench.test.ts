@@ -3,6 +3,7 @@ import {
   candidateUnavailableReason,
   isCandidateSelectable,
   normalizeTargetPrice,
+  normalizeTargetTitle,
   productBatchPreviewFingerprint,
   sameInventorySnapshot,
   shouldAcceptProductBatchPreviewResponse,
@@ -50,6 +51,23 @@ describe('product batch price inputs', () => {
     expect(normalizeTargetPrice('0.01')).toEqual({ value: '0.01', error: '' });
     expect(normalizeTargetPrice('0')).toMatchObject({ value: null });
     expect(normalizeTargetPrice('1000000.01')).toMatchObject({ value: null });
+  });
+
+  it('normalizes target titles using the platform 16 to 60 character-unit rule', () => {
+    expect(normalizeTargetTitle('  夏季透气短袖上衣  ')).toEqual({
+      value: '夏季透气短袖上衣',
+      error: '',
+    });
+    expect(normalizeTargetTitle('   ')).toMatchObject({ value: null });
+    expect(normalizeTargetTitle('好'.repeat(7))).toMatchObject({ value: null });
+    expect(normalizeTargetTitle('a'.repeat(15))).toMatchObject({ value: null });
+    expect(normalizeTargetTitle('好'.repeat(30))).toMatchObject({ value: '好'.repeat(30) });
+    expect(normalizeTargetTitle('好'.repeat(31))).toMatchObject({ value: null });
+    expect(normalizeTargetTitle('a'.repeat(60))).toMatchObject({ value: 'a'.repeat(60) });
+    expect(normalizeTargetTitle('a'.repeat(61))).toMatchObject({ value: null });
+    expect(normalizeTargetTitle('🙂'.repeat(8))).toMatchObject({ value: '🙂'.repeat(8) });
+    expect(normalizeTargetTitle('短标题', 'taobao')).toMatchObject({ value: '短标题' });
+    expect(normalizeTargetTitle('好'.repeat(31), 'pdd')).toMatchObject({ value: null });
   });
 
   it('keeps the idempotency fingerprint stable across selection and target order', () => {
@@ -140,6 +158,62 @@ describe('product batch price inputs', () => {
     ).toBe(true);
   });
 
+  it('keeps title-edit fingerprints stable across selection order and rejects stale intent', () => {
+    const left = productBatchPreviewFingerprint({
+      action: 'edit_title',
+      publishedProductIds: ['2', '1'],
+      titleTargets: [
+        { publishedProductId: '2', expectedMutationRevision: 4, targetTitle: '标题二' },
+        { publishedProductId: '1', expectedMutationRevision: 3, targetTitle: '标题一' },
+      ],
+    });
+    const request = {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'edit_title' as const,
+      publishedProductIds: ['1', '2'],
+      titleTargets: [
+        { publishedProductId: '1', expectedMutationRevision: 3, targetTitle: '标题一' },
+        { publishedProductId: '2', expectedMutationRevision: 4, targetTitle: '标题二' },
+      ],
+    };
+
+    expect(left).toBe(
+      productBatchPreviewFingerprint({
+        action: request.action,
+        publishedProductIds: request.publishedProductIds,
+        titleTargets: request.titleTargets,
+      }),
+    );
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        request,
+      ),
+    ).toBe(true);
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        {
+          ...request,
+          titleTargets: [
+            { publishedProductId: '1', expectedMutationRevision: 3, targetTitle: '已变化' },
+            { publishedProductId: '2', expectedMutationRevision: 4, targetTitle: '标题二' },
+          ],
+        },
+      ),
+    ).toBe(false);
+    expect(
+      productBatchPreviewFingerprint({
+        action: request.action,
+        publishedProductIds: request.publishedProductIds,
+        titleTargets: request.titleTargets.map((target) => ({
+          ...target,
+          expectedMutationRevision: target.expectedMutationRevision + 1,
+        })),
+      }),
+    ).not.toBe(left);
+  });
+
   it('selects only inventory-sync eligible products and surfaces the server reason', () => {
     const eligible = candidate('11', '可同步商品');
     const blocked = {
@@ -151,6 +225,19 @@ describe('product batch price inputs', () => {
     expect(isCandidateSelectable(eligible, 'sync_inventory')).toBe(true);
     expect(isCandidateSelectable(blocked, 'sync_inventory')).toBe(false);
     expect(candidateUnavailableReason(blocked, 'sync_inventory')).toBe(blocked.inventorySyncReason);
+  });
+
+  it('selects only title-edit eligible products and surfaces the server reason', () => {
+    const eligible = candidate('11', '可改标题商品');
+    const blocked = {
+      ...candidate('12', '不可改标题商品'),
+      titleEditable: false,
+      titleEditReason: '请先下架商品后再修改标题',
+    };
+
+    expect(isCandidateSelectable(eligible, 'edit_title')).toBe(true);
+    expect(isCandidateSelectable(blocked, 'edit_title')).toBe(false);
+    expect(candidateUnavailableReason(blocked, 'edit_title')).toBe(blocked.titleEditReason);
   });
 
   it('summarizes and compares authoritative inventory snapshots by SKU', () => {
@@ -197,6 +284,7 @@ describe('product batch workbench session recovery', () => {
       priceDirection: 'decrease',
       percentageInput: '12.34',
       targetInputs: { '11': '39.90', '88': '58' },
+      titleInputs: {},
       bulkTargetInput: '39.90',
       targetPage: 2,
       selected: [candidate('11', '第一页商品'), candidate('88', '第三页商品')],
@@ -231,6 +319,23 @@ describe('product batch workbench session recovery', () => {
     expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(inventorySession);
   });
 
+  it('restores title-edit targets and the candidate eligibility snapshot', () => {
+    const storage = new MemoryStorage();
+    const titleSession: ProductBatchWorkbenchSession = {
+      ...session,
+      draft: {
+        ...session.draft,
+        action: 'edit_title',
+        titleInputs: { '11': '新的商品标题' },
+        targetInputs: {},
+        selected: [candidate('11', '原商品标题')],
+      },
+    };
+
+    expect(writeProductBatchWorkbenchSession(scope, titleSession, storage)).toBe(true);
+    expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(titleSession);
+  });
+
   it.each(['offline', 'edit_price'] as const)(
     'migrates legacy v1 %s drafts without losing their preview identity',
     (action) => {
@@ -262,6 +367,8 @@ describe('product batch workbench session recovery', () => {
           inventorySyncError: null,
           inventorySyncEligible: false,
           inventorySyncReason: '旧版会话缺少库存快照，请刷新商品后再同步库存',
+          titleEditable: false,
+          titleEditReason: '旧版会话缺少标题编辑状态，请刷新商品后再修改标题',
         },
       ]);
       expect(isCandidateSelectable(restored!.draft.selected[0]!, 'sync_inventory')).toBe(false);
@@ -280,6 +387,30 @@ describe('product batch workbench session recovery', () => {
           ...session.draft,
           action: 'sync_inventory',
           selected: [legacyCandidate('11', '旧版会话商品')],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('does not migrate a candidate without title eligibility into a title-edit draft', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    const selected = candidate('11', '旧版标题商品') as Record<string, unknown>;
+    delete selected.titleEditable;
+    delete selected.titleEditReason;
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          action: 'edit_title',
+          selected: [selected],
         },
         preview: session.preview,
       }),
@@ -412,6 +543,10 @@ function candidate(publishedProductId: string, title: string) {
     salePrice: 29.9,
     priceRange: [29.9, 49.9] as [number, number],
     skuCount: 2,
+    titleEditable: true,
+    titleEditReason: null,
+    titleVerificationTaskId: null,
+    titleVerificationItemId: null,
     priceEditable: true,
     priceEditReason: null,
     sourceProductId: `source-${publishedProductId}`,
@@ -433,6 +568,8 @@ function candidate(publishedProductId: string, title: string) {
 function legacyCandidate(publishedProductId: string, title: string): Record<string, unknown> {
   const legacy: Record<string, unknown> = { ...candidate(publishedProductId, title) };
   for (const field of [
+    'titleEditable',
+    'titleEditReason',
     'sourceTotalStock',
     'sourceSkuCount',
     'sourceInventoryVersion',

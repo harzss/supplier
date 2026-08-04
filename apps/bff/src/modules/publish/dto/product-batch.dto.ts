@@ -19,12 +19,32 @@ import {
 } from 'class-validator';
 import { IsPositiveInt64String } from './create-publish-task.dto';
 
-export const PRODUCT_BATCH_ACTIONS = ['offline', 'edit_price', 'sync_inventory'] as const;
+export const PRODUCT_BATCH_ACTIONS = [
+  'offline',
+  'edit_title',
+  'edit_price',
+  'sync_inventory',
+] as const;
 export type SupportedProductBatchAction = (typeof PRODUCT_BATCH_ACTIONS)[number];
 export const PRODUCT_BATCH_MAX_ITEMS = 100;
 
 export const PRODUCT_BATCH_PRICE_RULE_MODES = ['percentage', 'targets'] as const;
 export const PRODUCT_BATCH_PRICE_DIRECTIONS = ['increase', 'decrease'] as const;
+
+export class ProductBatchTitleTargetDto {
+  @IsString()
+  @IsPositiveInt64String()
+  publishedProductId!: string;
+
+  @IsInt()
+  @Min(1)
+  expectedMutationRevision!: number;
+
+  @IsString()
+  @MaxLength(60)
+  @Matches(/\S/)
+  targetTitle!: string;
+}
 
 export class ProductBatchPriceTargetDto {
   @IsString()
@@ -79,6 +99,16 @@ export class CreateProductBatchPreviewDto {
   @IsString({ each: true })
   @IsPositiveInt64String({ each: true })
   publishedProductIds!: string[];
+
+  @ValidateIf((value: CreateProductBatchPreviewDto) => value.action === 'edit_title')
+  @IsDefined()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(PRODUCT_BATCH_MAX_ITEMS)
+  @ArrayUnique((target: ProductBatchTitleTargetDto) => target.publishedProductId)
+  @ValidateNested({ each: true })
+  @Type(() => ProductBatchTitleTargetDto)
+  titleTargets?: ProductBatchTitleTargetDto[];
 
   @ValidateIf((value: CreateProductBatchPreviewDto) => value.action === 'edit_price')
   @IsDefined()

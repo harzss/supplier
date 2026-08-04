@@ -126,6 +126,9 @@
 - 批量改价使用独立的 `sku.editPrice`，请求只携带 `product_id`、发布时写入的 `out_sku_id` 和绝对整数分 `price`；不得为了改价复用会同时覆盖标题、图片、库存等字段的 `product.editV2`
 - 改价预览把比例或逐项目标起售价物化为逐 SKU 绝对价格。执行前后使用 `product.detail.spec_prices` 回读，并严格要求外部 SKU ID 非空且唯一、价格为正整数；平台已达目标时恢复成功，部分成功时只续跑剩余 SKU，出现额外价格漂移或 SKU 集合变化时同步真实快照并 fail-closed
 - 后续执行完整 `product.editV2` 前必须先回读并保留平台最新 SKU 价格，防止标题或详情修正把独立批量改价覆盖回旧价格
+- 批量改标题只使用 `product.partialEdit`，请求仅携带 `product_id + name`，不得复用会覆盖图片、价格、库存与 SKU 的完整 `product.editV2`
+- 标题回读使用 `product.detail(show_draft=true).data.name`，同时保存平台状态、审核状态和实际标题；抖店标题统一按 8～30 个汉字、16～60 加权字符校验
+- `partialEdit` 的网络错误、408/429/5xx、无法解析或缺失合法业务 `code` 的 2xx 响应均视为结果未知；写入 fence 未核验前禁止再次改标题或执行完整商品编辑。明确普通 4xx 才按确定失败处理
 - 每次真实库存变化分配单调递增版本号，并生成店铺内 24 小时唯一、同一次重试稳定的 `idempotent_id`；平台返回“Token 已被使用”时按同一快照已落地处理
 - 库存 worker 的执行、完成和失败必须同时匹配 `syncing + attempts + lockedBy + 目标版本/指纹`；stale recovery 或其他 worker 接管后，迟到结果只能返回 stale，不能覆盖新状态
 - 人工库存重试按读取到的失败状态、尝试次数和目标版本做条件更新；若期间已被 worker 认领则返回冲突，不清除新 worker 的锁

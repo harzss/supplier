@@ -505,6 +505,151 @@ describe('DouyinAdapter', () => {
     });
   });
 
+  it('edits only the title through product.partialEdit', async () => {
+    const fetcher = vi.fn(
+      async () => new Response(JSON.stringify({ code: 10000, data: {} }), { status: 200 }),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await adapter.updateProductTitle('access-token', {
+      platformProductId: '998877',
+      title: '修正后的纯棉短袖商品',
+    });
+
+    const [input, init] = fetcher.mock.calls[0]!;
+    const url = new URL(String(input));
+    expect(url.pathname).toBe('/product/partialEdit');
+    expect(url.searchParams.get('method')).toBe('product.partialEdit');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      name: '修正后的纯棉短袖商品',
+      product_id: '998877',
+    });
+  });
+
+  it('classifies an ambiguous product.partialEdit transport failure as result unknown', async () => {
+    const adapter = new DouyinAdapter(CONFIG, vi.fn().mockRejectedValue(new Error('timeout')));
+
+    await expect(
+      adapter.updateProductTitle('access-token', {
+        platformProductId: '998877',
+        title: '修正后的纯棉短袖商品',
+      }),
+    ).rejects.toBeInstanceOf(PlatformMutationResultUnknownError);
+  });
+
+  it('keeps a definitive product.partialEdit 400 response out of result-unknown recovery', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      vi.fn().mockResolvedValue(new Response('bad request', { status: 400 })),
+    );
+
+    const result = adapter.updateProductTitle('access-token', {
+      platformProductId: '998877',
+      title: '修正后的纯棉短袖商品',
+    });
+    await expect(result).rejects.toThrow('HTTP 400');
+    await expect(result).rejects.not.toBeInstanceOf(PlatformMutationResultUnknownError);
+  });
+
+  it('classifies a product.partialEdit 500 response as result unknown', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      vi.fn().mockResolvedValue(new Response('server error', { status: 500 })),
+    );
+
+    await expect(
+      adapter.updateProductTitle('access-token', {
+        platformProductId: '998877',
+        title: '修正后的纯棉短袖商品',
+      }),
+    ).rejects.toBeInstanceOf(PlatformMutationResultUnknownError);
+  });
+
+  it.each([{}, { data: {} }, { code: '10000', data: {} }])(
+    'classifies a product.partialEdit response with an invalid code as result unknown',
+    async (payload) => {
+      const adapter = new DouyinAdapter(
+        CONFIG,
+        vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 })),
+      );
+
+      await expect(
+        adapter.updateProductTitle('access-token', {
+          platformProductId: '998877',
+          title: '修正后的纯棉短袖商品',
+        }),
+      ).rejects.toBeInstanceOf(PlatformMutationResultUnknownError);
+    },
+  );
+
+  it('trims and enforces the weighted Douyin title boundary before partialEdit', async () => {
+    const fetcher = vi.fn(
+      async () => new Response(JSON.stringify({ code: 10000, data: {} }), { status: 200 }),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher);
+
+    await adapter.updateProductTitle('access-token', {
+      platformProductId: '998877',
+      title: '  夏季轻薄纯棉短袖  ',
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({
+      name: '夏季轻薄纯棉短袖',
+    });
+    await expect(
+      adapter.updateProductTitle('access-token', {
+        platformProductId: '998877',
+        title: '好'.repeat(31),
+      }),
+    ).rejects.toThrow('invalid');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the draft-aware product title from product.detail data.name', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: {
+              product_id_str: '998877',
+              name: '修正后的纯棉短袖商品',
+              status: 1,
+              check_status: 2,
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await expect(adapter.getProductTitle('access-token', '998877')).resolves.toEqual({
+      title: '修正后的纯棉短袖商品',
+      state: 'reviewing',
+      status: 1,
+      checkStatus: 2,
+    });
+    const [input, init] = fetcher.mock.calls[0]!;
+    expect(new URL(String(input)).pathname).toBe('/product/detail');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      product_id: '998877',
+      show_draft: 'true',
+    });
+  });
+
+  it('rejects product.detail when the title is missing', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(JSON.stringify({ code: 10000, data: { product_id: '998877', status: 1 } }), {
+          status: 200,
+        }),
+    );
+
+    await expect(adapter.getProductTitle('access-token', '998877')).rejects.toThrow(
+      'invalid product title',
+    );
+  });
+
   it('updates one SKU to an absolute integer-cent price through sku.editPrice', async () => {
     const fetcher = vi.fn(
       async () => new Response(JSON.stringify({ code: 10000, data: {} }), { status: 200 }),

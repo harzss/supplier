@@ -67,6 +67,53 @@ describe('CreateProductBatchPreviewDto', () => {
     await expect(validate(dto)).resolves.toHaveLength(0);
   });
 
+  it('accepts exact per-product title targets', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'edit_title',
+      publishedProductIds: ['1', '2'],
+      titleTargets: [
+        {
+          publishedProductId: '1',
+          expectedMutationRevision: 1,
+          targetTitle: '夏季轻薄纯棉短袖上衣',
+        },
+        {
+          publishedProductId: '2',
+          expectedMutationRevision: 2,
+          targetTitle: '通勤宽松纯棉圆领短袖',
+        },
+      ],
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
+  it.each([
+    ['missing targets', undefined],
+    [
+      'a blank title',
+      [{ publishedProductId: '1', expectedMutationRevision: 1, targetTitle: '   ' }],
+    ],
+    [
+      'a title over 60 characters',
+      [{ publishedProductId: '1', expectedMutationRevision: 1, targetTitle: 'A'.repeat(61) }],
+    ],
+    [
+      'a missing product revision',
+      [{ publishedProductId: '1', targetTitle: '夏季轻薄纯棉短袖上衣' }],
+    ],
+  ])('rejects a title preview with %s', async (_label, titleTargets) => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'edit_title',
+      publishedProductIds: ['1'],
+      titleTargets,
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
+  });
+
   it.each([
     ['a missing percentage direction', { mode: 'percentage', basisPoints: 100 }],
     ['a fractional basis point', { mode: 'percentage', direction: 'increase', basisPoints: 10.5 }],

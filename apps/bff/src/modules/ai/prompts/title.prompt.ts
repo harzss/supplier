@@ -57,7 +57,7 @@ export function buildTitleMessages(input: TitlePromptInput): ChatMessage[] {
   const system = [
     `你是${platformName(input.targetPlatform)}标题优化专家。`,
     `要求：`,
-    `1. 标题不超过 ${rule.maxLength} 字`,
+    `1. ${input.targetPlatform === 'douyin' ? '标题须为 8～30 个汉字（16～60 个加权字符）' : `标题不超过 ${rule.maxLength} 字`}`,
     `2. 风格：${rule.styleHint}`,
     `3. 严格禁用以下词汇：${rule.forbidden.join('、') || '（无额外禁用词）'}`,
     `4. 不得使用极限词、医疗用语、虚假宣传`,
@@ -100,7 +100,22 @@ export function validateTitleForPlatform(title: string, platform: PlatformType):
   const normalized = title.trim();
   if (!normalized) return '标题不能为空';
   const rule = PLATFORM_RULES[platform];
-  if (normalized.length > rule.maxLength) return `超过 ${rule.maxLength} 字`;
+  const length =
+    platform === 'douyin'
+      ? [...normalized].reduce(
+          (total, character) => total + (/^[\x00-\x7f]$/.test(character) ? 1 : 2),
+          0,
+        )
+      : [...normalized].length;
+  const maxLength = platform === 'douyin' ? rule.maxLength * 2 : rule.maxLength;
+  if (platform === 'douyin' && length < 16) {
+    return '少于 8 个汉字（16 个字符）';
+  }
+  if (length > maxLength) {
+    return platform === 'douyin'
+      ? `超过 ${rule.maxLength} 个汉字（${maxLength} 个字符）`
+      : `超过 ${rule.maxLength} 字`;
+  }
   const hit = rule.forbidden.find((word) => normalized.includes(word));
   return hit ? `包含禁用词: ${hit}` : null;
 }

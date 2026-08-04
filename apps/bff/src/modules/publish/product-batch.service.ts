@@ -12,9 +12,12 @@ import type {
   PlatformProductInventoryState,
   PlatformProductPriceState,
   PlatformProductState,
+  PlatformProductTitleState,
+  PlatformType,
 } from '@supplier/platform-sdk';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
+import { validateTitleForPlatform } from '../ai/prompts/title.prompt';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import {
@@ -27,6 +30,7 @@ import type {
   CreateProductBatchPreviewDto,
   ExecuteProductBatchDto,
   ProductBatchPriceRuleDto,
+  ProductBatchTitleTargetDto,
   ProductBatchCandidateQueryDto,
   ProductBatchTaskListQueryDto,
   RetryProductBatchDto,
@@ -37,6 +41,18 @@ const STALE_ITEM_MS = 5 * 60_000;
 const TASK_RECONCILE_INTERVAL_MS = 30_000;
 const MAX_PRICE_CENTS = 100_000_000;
 const TERMINAL_TASK_STATUSES = ['cancelled', 'partial', 'succeeded', 'failed'] as const;
+const TITLE_WRITE_STARTED_CODE = 'TITLE_WRITE_STARTED';
+const TITLE_RESULT_UNKNOWN_CODE = 'TITLE_RESULT_UNKNOWN';
+const UNRESOLVED_TITLE_CODES = [TITLE_WRITE_STARTED_CODE, TITLE_RESULT_UNKNOWN_CODE] as const;
+const RETRYABLE_FAILED_CODES = new Set([
+  'ITEM_OWNERSHIP_LOST',
+  'PLATFORM_ERROR',
+  'PRICE_NOT_CONFIRMED',
+  'STATUS_NOT_OFFLINE',
+  'TITLE_WRITE_GUARD_LOST',
+  'TITLE_READBACK_FAILED',
+  'WORKER_STALE',
+]);
 
 const TASK_INCLUDE = {
   items: {
@@ -84,6 +100,10 @@ export interface ProductBatchCandidatePage {
     skuCount: number;
     priceEditable: boolean;
     priceEditReason: string | null;
+    titleEditable: boolean;
+    titleEditReason: string | null;
+    titleVerificationTaskId: string | null;
+    titleVerificationItemId: string | null;
     sourceProductId: string;
     sourceAvailability: string;
     sourceTotalStock: number;
@@ -135,6 +155,9 @@ export interface ProductBatchItemView {
   platformProductId: string | null;
   beforeStatus: string;
   desiredStatus: string;
+  beforeTitle: string;
+  desiredTitle: string | null;
+  actualTitle: string | null;
   beforePrice: number | null;
   desiredPrice: number | null;
   beforePriceRange: [number, number] | null;
@@ -146,6 +169,7 @@ export interface ProductBatchItemView {
   actualInventory: ProductBatchInventorySnapshot | null;
   beforeInventoryVersion: number | null;
   desiredInventoryVersion: number | null;
+  retryable: boolean;
   status: string;
   attempts: number;
   maxAttempts: number;
@@ -176,6 +200,12 @@ type NormalizedPriceRule =
       mode: 'targets';
       targets: Array<{ publishedProductId: string; targetStartPriceCents: number }>;
     };
+
+type NormalizedTitleTarget = {
+  publishedProductId: string;
+  expectedMutationRevision: number;
+  targetTitle: string;
+};
 
 export interface ProductBatchSummary {
   total: number;
@@ -243,12 +273,33 @@ export class ProductBatchService {
         },
       }),
     ]);
+    const unresolvedTitleItems = await this.prisma.productBatchItem.findMany({
+      where: {
+        publishedProductId: { in: records.map((record) => record.id) },
+        status: { in: ['running', 'retry_wait', 'failed'] },
+        errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
+        task: { userId: user.userId, action: 'edit_title' },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, taskId: true, publishedProductId: true },
+    });
+    const unresolvedTitleByProduct = new Map<bigint, (typeof unresolvedTitleItems)[number]>();
+    for (const item of unresolvedTitleItems) {
+      if (!unresolvedTitleByProduct.has(item.publishedProductId)) {
+        unresolvedTitleByProduct.set(item.publishedProductId, item);
+      }
+    }
     return {
       items: records.map((record) => {
         const prices =
           parseSkuPriceSnapshot(record.skuPriceSnapshot) ??
           priceSnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
         const priceEditable = record.status === 'online' && !!prices;
+        const titleEditReason = titleEditUnavailableReason(
+          record,
+          unresolvedTitleByProduct.has(record.id),
+        );
+        const unresolvedTitle = unresolvedTitleByProduct.get(record.id);
         const beforeInventory =
           parseSkuInventorySnapshot(record.skuInventorySnapshot) ??
           inventorySnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
@@ -280,6 +331,10 @@ export class ProductBatchService {
             : record.status !== 'online'
               ? '只有在线商品可以改价'
               : '缺少可核对的 SKU 价格快照',
+          titleEditable: titleEditReason === null,
+          titleEditReason,
+          titleVerificationTaskId: unresolvedTitle?.taskId.toString() ?? null,
+          titleVerificationItemId: unresolvedTitle?.id.toString() ?? null,
           sourceProductId: record.sourceProduct.productId1688,
           sourceAvailability: record.sourceProduct.availability,
           sourceTotalStock: desiredInventory
@@ -308,8 +363,18 @@ export class ProductBatchService {
     dto: CreateProductBatchPreviewDto,
   ): Promise<ProductBatchTaskView> {
     this.entitlement.assertFeature(user.plan, 'catalog.batch');
+    const titleTargets = normalizeTitleTargets(
+      dto.action,
+      dto.publishedProductIds,
+      dto.titleTargets,
+    );
     const priceRule = normalizePriceRule(dto.action, dto.publishedProductIds, dto.priceRule);
-    const fingerprint = requestFingerprint(dto.action, dto.publishedProductIds, priceRule);
+    const fingerprint = requestFingerprint(
+      dto.action,
+      dto.publishedProductIds,
+      titleTargets,
+      priceRule,
+    );
     const replay = await this.findByClientRequestId(user.userId, dto.clientRequestId);
     if (replay) {
       this.assertSameRequest(replay, dto.action, fingerprint);
@@ -336,6 +401,30 @@ export class ProductBatchService {
     if (records.length !== ids.length) {
       throw new NotFoundException('部分商品不存在、已失效或不属于当前账号');
     }
+    if (dto.action === 'edit_title') {
+      const unresolved = await this.prisma.productBatchItem.findFirst({
+        where: {
+          publishedProductId: { in: ids },
+          status: { in: ['running', 'retry_wait', 'failed'] },
+          errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
+          task: { userId: user.userId, action: 'edit_title' },
+        },
+        select: { id: true },
+      });
+      if (unresolved) {
+        throw new ConflictException(
+          '所选商品存在结果待核验的标题更新，请先在原批量任务核验平台标题',
+        );
+      }
+      const staleTarget = titleTargets?.find(
+        (target) =>
+          records.find((record) => record.id.toString() === target.publishedProductId)
+            ?.mutationRevision !== target.expectedMutationRevision,
+      );
+      if (staleTarget) {
+        throw new ConflictException('商品已在选择后发生变化，请刷新列表并重新确认目标标题');
+      }
+    }
     const byId = new Map(records.map((record) => [record.id.toString(), record]));
     const maxAttempts = this.maxAttempts();
     try {
@@ -348,7 +437,7 @@ export class ProductBatchService {
           items: {
             create: dto.publishedProductIds.map((id, ordinal) => {
               const record = byId.get(id)!;
-              const preview = previewForAction(dto.action, record, priceRule);
+              const preview = previewForAction(dto.action, record, titleTargets, priceRule);
               return {
                 publishedProductId: record.id,
                 ordinal,
@@ -499,6 +588,12 @@ export class ProductBatchService {
     if (!retryItems.length || (requestedIds && retryItems.length !== requestedIds.length)) {
       throw new BadRequestException('所选条目中包含不可重试项');
     }
+    if (retryItems.some((item) => item.errorCode === TITLE_RESULT_UNKNOWN_CODE)) {
+      throw new BadRequestException('标题更新结果未知，请先在原批量任务核验平台实际标题');
+    }
+    if (retryItems.some((item) => !isRetryableFailedError(item.errorCode))) {
+      throw new BadRequestException('所选条目包含需要重新预览或人工处理的失败项');
+    }
     const stale = retryItems.find(
       (item) => item.publishedProduct.mutationRevision !== item.expectedMutationRevision,
     );
@@ -545,6 +640,74 @@ export class ProductBatchService {
       }
     });
     return toTaskView(await this.requireTask(user.userId, task.id));
+  }
+
+  async verifyTitleResult(
+    user: CurrentUser,
+    taskIdValue: string,
+    itemIdValue: string,
+  ): Promise<ProductBatchTaskView> {
+    this.entitlement.assertFeature(user.plan, 'catalog.batch');
+    const taskId = parsePositiveId(taskIdValue, '批量任务 ID');
+    const itemId = parsePositiveId(itemIdValue, '批量条目 ID');
+    const initial = await this.prisma.productBatchItem.findFirst({
+      where: {
+        id: itemId,
+        taskId,
+        status: 'failed',
+        errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
+        task: { userId: user.userId, action: 'edit_title' },
+      },
+      include: EXECUTION_INCLUDE,
+    });
+    if (!initial) throw new NotFoundException('待核验的标题批量条目不存在');
+
+    const lock = await this.platformProductLocks.acquire(initial.publishedProductId);
+    try {
+      const item = await this.prisma.productBatchItem.findFirst({
+        where: {
+          id: itemId,
+          taskId,
+          status: 'failed',
+          errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
+          task: { userId: user.userId, action: 'edit_title' },
+        },
+        include: EXECUTION_INCLUDE,
+      });
+      if (!item) throw new ConflictException('标题核验状态已变化，请刷新任务');
+      const product = item.publishedProduct;
+      if (!product.platformProductId) throw new BadRequestException('平台商品 ID 不存在');
+      const beforeTitle = stringValue(jsonRecord(item.beforeSnapshot)?.title)?.trim();
+      const desiredTitle = stringValue(jsonRecord(item.desiredSnapshot)?.title)?.trim();
+      if (!beforeTitle || !desiredTitle) {
+        throw new ConflictException('标题任务快照不完整，无法自动核验');
+      }
+      const adapter = this.adapters.create(product.shop);
+      if (!adapter.getProductTitle) {
+        throw new BadRequestException('当前平台无法回读商品标题');
+      }
+      const token = isDemoShop(product.shop)
+        ? 'mock-token'
+        : await this.shopTokens.getAccessToken(product.shop.id, user.userId);
+      await this.platformProductLocks.renew(product.id, lock);
+      const platformState = await adapter.getProductTitle(token, product.platformProductId);
+      await this.platformProductLocks.renew(product.id, lock);
+
+      if (shouldWaitForTitleVerification(platformState, beforeTitle, desiredTitle, item.result)) {
+        throw new ConflictException(
+          platformState.title === beforeTitle &&
+            (platformState.state === 'draft' ||
+              platformState.state === 'reviewing' ||
+              platformState.state === 'approved_pending_online')
+            ? '平台仍在处理标题更新，请稍后再次核验'
+            : '平台仍未显示目标标题，请在写入开始 5 分钟后再次核验',
+        );
+      }
+      await this.persistVerifiedTitleResult(item, beforeTitle, desiredTitle, platformState);
+      return toTaskView(await this.requireTask(user.userId, taskId));
+    } finally {
+      await this.platformProductLocks.release(initial.publishedProductId, lock);
+    }
   }
 
   async claimNext(workerId: string): Promise<ProductBatchExecutionRecord | null> {
@@ -595,7 +758,7 @@ export class ProductBatchService {
   }
 
   async executeClaimed(item: ProductBatchExecutionRecord): Promise<'processed' | 'stale'> {
-    if (!['offline', 'edit_price', 'sync_inventory'].includes(item.task.action)) {
+    if (!['offline', 'edit_title', 'edit_price', 'sync_inventory'].includes(item.task.action)) {
       throw new ProductBatchItemError('ACTION_UNSUPPORTED', '当前批量动作尚未实现', false);
     }
     if (item.task.cancelRequestedAt) return this.cancelClaimedItem(item);
@@ -618,21 +781,46 @@ export class ProductBatchService {
       if (current.task.action === 'offline' && product.status === 'offline') {
         return this.completeClaimedItem(current, { reason: 'already_offline' });
       }
-      if (product.status !== 'online') {
+      const titleAction = current.task.action === 'edit_title';
+      if (
+        (titleAction && product.status !== 'online' && product.status !== 'offline') ||
+        (!titleAction && product.status !== 'online')
+      ) {
         const actionLabel =
           current.task.action === 'offline'
             ? '下架'
-            : current.task.action === 'edit_price'
-              ? '改价'
-              : '同步库存';
+            : titleAction
+              ? '改标题'
+              : current.task.action === 'edit_price'
+                ? '改价'
+                : '同步库存';
         throw new ProductBatchItemError(
-          'PRODUCT_NOT_ONLINE',
+          titleAction ? 'PRODUCT_NOT_PUBLISHED' : 'PRODUCT_NOT_ONLINE',
           `商品当前状态为 ${product.status}，未执行${actionLabel}`,
           false,
         );
       }
       if (product.mutationRevision !== current.expectedMutationRevision) {
         throw new ProductBatchItemError('PRODUCT_CHANGED', '商品已在预览后发生变化', false);
+      }
+      if (titleAction) {
+        const unresolvedTitleMutation = await this.prisma.productBatchItem.findFirst({
+          where: {
+            id: { not: current.id },
+            publishedProductId: product.id,
+            status: { in: ['running', 'retry_wait', 'failed'] },
+            errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
+            task: { userId: current.task.userId, action: 'edit_title' },
+          },
+          select: { id: true },
+        });
+        if (unresolvedTitleMutation) {
+          throw new ProductBatchItemError(
+            'TITLE_VERIFICATION_REQUIRED',
+            '同一商品存在结果待核验的标题更新，请先核验原任务并重新生成预览',
+            false,
+          );
+        }
       }
       const snapshot = jsonRecord(current.beforeSnapshot);
       if (
@@ -649,6 +837,9 @@ export class ProductBatchService {
       await this.platformProductLocks.renew(product.id, lock);
       if (!(await this.assertItemOwned(current))) return 'stale';
 
+      if (current.task.action === 'edit_title') {
+        return this.executeTitleClaimed(current, adapter, token, lock);
+      }
       if (current.task.action === 'edit_price') {
         const result = await this.executePriceClaimed(current, adapter, token, lock);
         return result;
@@ -747,6 +938,424 @@ export class ProductBatchService {
     } finally {
       await this.platformProductLocks.release(item.publishedProductId, lock);
     }
+  }
+
+  private async executeTitleClaimed(
+    item: ProductBatchExecutionRecord,
+    adapter: PlatformAdapter,
+    token: string,
+    lock: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    const beforeTitle = stringValue(jsonRecord(item.beforeSnapshot)?.title)?.trim();
+    const desiredTitle = stringValue(jsonRecord(item.desiredSnapshot)?.title)?.trim();
+    if (
+      !beforeTitle ||
+      !desiredTitle ||
+      [...desiredTitle].length > 60 ||
+      titleComplianceReason(desiredTitle, product.shop.platform)
+    ) {
+      throw new ProductBatchItemError(
+        'TITLE_SNAPSHOT_INVALID',
+        '批量改标题快照不完整或不符合平台规则，请重新生成预览',
+        false,
+      );
+    }
+    if (!adapter.getProductTitle || !adapter.updateProductTitle) {
+      throw new ProductBatchItemError(
+        'TITLE_UPDATE_UNSUPPORTED',
+        '当前平台不支持可回读的标题编辑',
+        false,
+      );
+    }
+
+    const platformBefore = await adapter.getProductTitle(token, product.platformProductId!);
+    if (platformBefore.title === desiredTitle) {
+      return this.persistTitleResult(item, beforeTitle, desiredTitle, platformBefore, true, lock);
+    }
+    assertTitleEditState(platformBefore, '编辑前');
+    if (platformBefore.title !== beforeTitle) {
+      return this.persistPlatformTitleDrift(
+        item,
+        platformBefore,
+        '平台商品标题已在预览后变化，请确认后重新生成预览',
+      );
+    }
+
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.markTitleWriteStarted(item))) return this.cancelClaimedItem(item);
+    try {
+      await this.platformProductLocks.renew(product.id, lock);
+    } catch (_error) {
+      throw new ProductBatchItemError(
+        'TITLE_WRITE_GUARD_LOST',
+        '标题写入前商品锁已失效，平台请求尚未提交，将安全重试',
+        true,
+      );
+    }
+    if (!(await this.assertItemOwned(item))) {
+      throw new ProductBatchItemError(
+        'TITLE_WRITE_GUARD_LOST',
+        '标题写入前任务所有权已变化，平台请求尚未提交',
+        true,
+      );
+    }
+    const productBeforeWrite = await this.prisma.publishedProduct.findUnique({
+      where: { id: product.id },
+      select: { platformProductId: true, mutationRevision: true },
+    });
+    if (
+      productBeforeWrite?.platformProductId !== product.platformProductId ||
+      productBeforeWrite.mutationRevision !== item.expectedMutationRevision
+    ) {
+      throw new ProductBatchItemError(
+        'TITLE_WRITE_ABORTED_PRODUCT_CHANGED',
+        '商品已在标题写入前发生变化，平台请求未提交，请重新生成预览',
+        false,
+      );
+    }
+    try {
+      await this.platformProductLocks.renew(product.id, lock);
+    } catch (_error) {
+      throw new ProductBatchItemError(
+        'TITLE_WRITE_GUARD_LOST',
+        '标题写入前商品锁已失效，平台请求尚未提交，将安全重试',
+        true,
+      );
+    }
+
+    let mutationError: unknown;
+    try {
+      await adapter.updateProductTitle(token, {
+        platformProductId: product.platformProductId!,
+        title: desiredTitle,
+      });
+    } catch (error) {
+      mutationError = error;
+    }
+
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.renewClaimedItemLease(item, false))) return 'stale';
+
+    let platformAfter: PlatformProductTitleState;
+    try {
+      platformAfter = await adapter.getProductTitle(token, product.platformProductId!);
+    } catch (_error) {
+      if (!mutationError || isPlatformMutationResultUnknown(mutationError)) {
+        throw new ProductBatchItemError(
+          TITLE_RESULT_UNKNOWN_CODE,
+          '标题更新结果未知且暂时无法回读，请稍后人工核验平台标题',
+          false,
+        );
+      }
+      throw new ProductBatchItemError(
+        'TITLE_UPDATE_FAILED',
+        safeErrorMessage(mutationError),
+        false,
+      );
+    }
+
+    if (platformAfter.title === desiredTitle) {
+      return this.persistTitleResult(
+        item,
+        beforeTitle,
+        desiredTitle,
+        platformAfter,
+        Boolean(mutationError),
+        lock,
+      );
+    }
+    if (platformAfter.title !== beforeTitle) {
+      return this.persistPlatformTitleDrift(
+        item,
+        platformAfter,
+        '平台返回了预览之外的商品标题，请确认后重新生成预览',
+      );
+    }
+    if (mutationError) {
+      throw new ProductBatchItemError(
+        isPlatformMutationResultUnknown(mutationError)
+          ? TITLE_RESULT_UNKNOWN_CODE
+          : 'TITLE_UPDATE_FAILED',
+        isPlatformMutationResultUnknown(mutationError)
+          ? '标题更新结果未知，平台仍显示原标题，请稍后人工核验后再操作'
+          : safeErrorMessage(mutationError),
+        false,
+      );
+    }
+    throw new ProductBatchItemError(
+      TITLE_RESULT_UNKNOWN_CODE,
+      '平台已受理标题更新，但尚未确认目标标题，请稍后人工核验平台标题',
+      false,
+    );
+  }
+
+  private async markTitleWriteStarted(item: ProductBatchExecutionRecord): Promise<boolean> {
+    const now = new Date();
+    const updated = await this.prisma.productBatchItem.updateMany({
+      where: {
+        ...ownedItemWhere(item),
+        task: { cancelRequestedAt: null },
+      },
+      data: {
+        lockedAt: now,
+        result: {
+          phase: 'platform_write_started',
+          titleWriteStartedAt: now.toISOString(),
+        } as Prisma.InputJsonValue,
+        errorCode: TITLE_WRITE_STARTED_CODE,
+        errorMessage: '平台标题写入已开始，正在回读确认结果',
+      },
+    });
+    return updated.count === 1;
+  }
+
+  private async persistVerifiedTitleResult(
+    item: ProductBatchExecutionRecord,
+    beforeTitle: string,
+    desiredTitle: string,
+    platformState: PlatformProductTitleState,
+  ): Promise<void> {
+    const product = item.publishedProduct;
+    const desiredConfirmed = platformState.title === desiredTitle;
+    const failure =
+      titleResultFailure(platformState) ??
+      (desiredConfirmed
+        ? null
+        : platformState.title === beforeTitle
+          ? {
+              code: 'TITLE_NOT_APPLIED_VERIFIED',
+              message: '核验窗口结束后平台仍显示原标题，本次写入未确认生效，请重新生成预览',
+            }
+          : {
+              code: 'PLATFORM_TITLE_CHANGED',
+              message: '平台显示了预览之外的标题，已同步实际状态，请重新生成预览',
+            });
+    const now = new Date();
+    const result = {
+      reason: failure
+        ? failure.code === 'TITLE_NOT_APPLIED_VERIFIED'
+          ? 'title_not_applied_verified'
+          : 'platform_title_requires_attention'
+        : 'platform_title_verified',
+      recovered: desiredConfirmed,
+      beforeTitle,
+      desiredTitle,
+      actualTitle: platformState.title,
+      verifiedAt: now.toISOString(),
+      platformState: {
+        state: platformState.state,
+        status: platformState.status,
+        checkStatus: platformState.checkStatus,
+      },
+    };
+    await this.prisma.$transaction(async (tx) => {
+      const updatedProduct = await tx.publishedProduct.updateMany({
+        where: {
+          id: product.id,
+          platformProductId: product.platformProductId,
+          mutationRevision: product.mutationRevision,
+        },
+        data: {
+          title: platformState.title,
+          status: localStatusFromTitleState(platformState, product.status),
+          lastEditedAt: desiredConfirmed ? now : product.lastEditedAt,
+          lastEditError: failure?.message ?? null,
+          platformStatusRaw: platformState.status,
+          platformCheckStatusRaw: platformState.checkStatus,
+          platformStatusSyncedAt: now,
+          platformStatusError: null,
+          mutationRevision: { increment: 1 },
+        },
+      });
+      if (updatedProduct.count !== 1) {
+        throw new ConflictException('商品已在标题核验期间发生变化，请刷新后重试');
+      }
+      const updatedItem = await tx.productBatchItem.updateMany({
+        where: {
+          id: item.id,
+          taskId: item.taskId,
+          status: 'failed',
+          errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
+        },
+        data: {
+          status: failure ? 'failed' : 'succeeded',
+          result: result as Prisma.InputJsonValue,
+          errorCode: failure?.code ?? null,
+          errorMessage: failure?.message ?? null,
+          lockedAt: null,
+          lockedBy: null,
+          finishedAt: now,
+        },
+      });
+      if (updatedItem.count !== 1) {
+        throw new ConflictException('标题核验状态已变化，请刷新任务');
+      }
+    });
+    await this.refreshTask(item.taskId);
+  }
+
+  private async persistTitleResult(
+    item: ProductBatchExecutionRecord,
+    beforeTitle: string,
+    desiredTitle: string,
+    platformState: PlatformProductTitleState,
+    recovered: boolean,
+    lock: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.renewClaimedItemLease(item, false))) return 'stale';
+    const now = new Date();
+    const failure = titleResultFailure(platformState);
+    const result = {
+      reason: failure
+        ? 'platform_title_state_requires_attention'
+        : recovered
+          ? 'platform_title_recovered'
+          : 'title_confirmed',
+      recovered,
+      beforeTitle,
+      desiredTitle,
+      actualTitle: platformState.title,
+      platformState: {
+        state: platformState.state,
+        status: platformState.status,
+        checkStatus: platformState.checkStatus,
+      },
+    };
+    await this.prisma.$transaction(async (tx) => {
+      const updatedProduct = await tx.publishedProduct.updateMany({
+        where: {
+          id: product.id,
+          platformProductId: product.platformProductId,
+          mutationRevision: item.expectedMutationRevision,
+        },
+        data: {
+          title: desiredTitle,
+          status: localStatusFromTitleState(platformState, product.status),
+          lastEditedAt: now,
+          lastEditError: failure?.message ?? null,
+          platformStatusRaw: platformState.status,
+          platformCheckStatusRaw: platformState.checkStatus,
+          platformStatusSyncedAt: now,
+          platformStatusError: null,
+          mutationRevision: { increment: 1 },
+        },
+      });
+      if (updatedProduct.count !== 1) {
+        const latest = await tx.publishedProduct.findUnique({ where: { id: product.id } });
+        if (
+          latest?.platformProductId !== product.platformProductId ||
+          latest.title !== desiredTitle
+        ) {
+          throw new ProductBatchItemError(
+            'PRODUCT_CHANGED',
+            '商品已在标题更新期间发生变化，请重新生成预览',
+            false,
+          );
+        }
+      }
+      const updatedItem = await tx.productBatchItem.updateMany({
+        where: ownedItemWhere(item),
+        data: {
+          status: failure ? 'failed' : 'succeeded',
+          result: result as Prisma.InputJsonValue,
+          errorCode: failure?.code ?? null,
+          errorMessage: failure?.message ?? null,
+          lockedAt: null,
+          lockedBy: null,
+          finishedAt: now,
+        },
+      });
+      if (updatedItem.count !== 1) {
+        throw new ProductBatchItemError(
+          'ITEM_OWNERSHIP_LOST',
+          '批量标题任务所有权已变化，将由新 worker 回读恢复',
+          true,
+        );
+      }
+    });
+    await this.refreshTask(item.taskId);
+    return 'processed';
+  }
+
+  private async persistPlatformTitleDrift(
+    item: ProductBatchExecutionRecord,
+    platformState: PlatformProductTitleState,
+    message: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    const now = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      const updatedProduct = await tx.publishedProduct.updateMany({
+        where: {
+          id: product.id,
+          platformProductId: product.platformProductId,
+          mutationRevision: item.expectedMutationRevision,
+        },
+        data: {
+          title: platformState.title,
+          status: localStatusFromTitleState(platformState, product.status),
+          lastEditError: message,
+          platformStatusRaw: platformState.status,
+          platformCheckStatusRaw: platformState.checkStatus,
+          platformStatusSyncedAt: now,
+          platformStatusError: null,
+          mutationRevision: { increment: 1 },
+        },
+      });
+      if (updatedProduct.count !== 1) {
+        throw new ProductBatchItemError(
+          'PRODUCT_CHANGED',
+          '商品已在标题核验期间发生变化，请重新生成预览',
+          false,
+        );
+      }
+      const updatedItem = await tx.productBatchItem.updateMany({
+        where: ownedItemWhere(item),
+        data: {
+          status: 'failed',
+          result: {
+            reason: 'platform_title_changed',
+            actualTitle: platformState.title,
+            platformState: {
+              state: platformState.state,
+              status: platformState.status,
+              checkStatus: platformState.checkStatus,
+            },
+          } as Prisma.InputJsonValue,
+          errorCode: 'PLATFORM_TITLE_CHANGED',
+          errorMessage: message,
+          lockedAt: null,
+          lockedBy: null,
+          finishedAt: now,
+        },
+      });
+      if (updatedItem.count !== 1) {
+        throw new ProductBatchItemError(
+          'ITEM_OWNERSHIP_LOST',
+          '批量标题任务所有权已变化，将由新 worker 回读恢复',
+          true,
+        );
+      }
+    });
+    await this.refreshTask(item.taskId);
+    return 'processed';
+  }
+
+  private async renewClaimedItemLease(
+    item: ProductBatchExecutionRecord,
+    requireActiveTask: boolean,
+  ): Promise<boolean> {
+    const updated = await this.prisma.productBatchItem.updateMany({
+      where: {
+        ...ownedItemWhere(item),
+        ...(requireActiveTask ? { task: { cancelRequestedAt: null } } : {}),
+      },
+      data: { lockedAt: new Date() },
+    });
+    return updated.count === 1;
   }
 
   private async executePriceClaimed(
@@ -1566,7 +2175,48 @@ export class ProductBatchService {
   async failClaimedItem(
     item: ProductBatchExecutionRecord,
     error: unknown,
-  ): Promise<'retry_wait' | 'failed' | 'stale'> {
+  ): Promise<'retry_wait' | 'failed' | 'cancelled' | 'stale'> {
+    if (
+      item.task.action === 'edit_title' &&
+      (isUnknownTitleExecutionError(error) || !isResolvedTitleExecutionError(error))
+    ) {
+      const unknown = await this.prisma.productBatchItem.updateMany({
+        where: {
+          ...ownedItemWhere(item),
+          errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
+        },
+        data: {
+          status: 'failed',
+          lockedAt: null,
+          lockedBy: null,
+          errorCode: TITLE_RESULT_UNKNOWN_CODE,
+          errorMessage: '标题写入已经开始，但未能可靠收敛平台结果，请稍后核验实际标题',
+          finishedAt: new Date(),
+        },
+      });
+      if (unknown.count === 1) {
+        await this.refreshTask(item.taskId);
+        return 'failed';
+      }
+    }
+    const cancelled = await this.prisma.productBatchItem.updateMany({
+      where: {
+        ...ownedItemWhere(item),
+        task: { cancelRequestedAt: { not: null } },
+      },
+      data: {
+        status: 'cancelled',
+        lockedAt: null,
+        lockedBy: null,
+        errorCode: null,
+        errorMessage: null,
+        finishedAt: new Date(),
+      },
+    });
+    if (cancelled.count === 1) {
+      await this.refreshTask(item.taskId);
+      return 'cancelled';
+    }
     const retryable = !(error instanceof ProductBatchItemError) || error.retryable;
     const failed = !retryable || item.attempts >= item.maxAttempts;
     const code =
@@ -1641,7 +2291,10 @@ export class ProductBatchService {
     const taskIds = new Set<bigint>();
     for (const item of stale) {
       const cancelled = Boolean(item.task.cancelRequestedAt);
-      const failed = !cancelled && item.attempts >= item.maxAttempts;
+      const titleResultUnknown =
+        item.task.action === 'edit_title' &&
+        UNRESOLVED_TITLE_CODES.includes(item.errorCode as (typeof UNRESOLVED_TITLE_CODES)[number]);
+      const failed = titleResultUnknown || (!cancelled && item.attempts >= item.maxAttempts);
       const updated = await this.prisma.productBatchItem.updateMany({
         where: {
           id: item.id,
@@ -1650,13 +2303,27 @@ export class ProductBatchService {
           lockedBy: item.lockedBy,
         },
         data: {
-          status: cancelled ? 'cancelled' : failed ? 'failed' : 'retry_wait',
+          status: titleResultUnknown
+            ? 'failed'
+            : cancelled
+              ? 'cancelled'
+              : failed
+                ? 'failed'
+                : 'retry_wait',
           nextRunAt: now,
           lockedAt: null,
           lockedBy: null,
-          errorCode: cancelled ? null : 'WORKER_STALE',
-          errorMessage: cancelled ? null : '批量任务 worker 超时，已安全恢复',
-          ...((cancelled || failed) && { finishedAt: now }),
+          errorCode: titleResultUnknown
+            ? TITLE_RESULT_UNKNOWN_CODE
+            : cancelled
+              ? null
+              : 'WORKER_STALE',
+          errorMessage: titleResultUnknown
+            ? '标题写入期间 worker 中断，请核验平台实际标题'
+            : cancelled
+              ? null
+              : '批量任务 worker 超时，已安全恢复',
+          ...((cancelled || failed || titleResultUnknown) && { finishedAt: now }),
         },
       });
       if (updated.count === 1) taskIds.add(item.taskId);
@@ -1790,6 +2457,7 @@ function toTaskView(task: ProductBatchTaskRecord): ProductBatchTaskView {
       const desiredInventory = parseSkuInventorySnapshot(desired?.skuInventory);
       const actualInventory = parseSkuInventorySnapshot(result?.actualInventory);
       const beforeStatus = stringValue(before?.status) ?? item.publishedProduct.status;
+      const beforeTitle = stringValue(before?.title) ?? item.publishedProduct.title;
       return {
         itemId: item.id.toString(),
         publishedProductId: item.publishedProductId.toString(),
@@ -1801,6 +2469,9 @@ function toTaskView(task: ProductBatchTaskRecord): ProductBatchTaskView {
         platformProductId: item.publishedProduct.platformProductId,
         beforeStatus,
         desiredStatus: stringValue(desired?.status) ?? beforeStatus,
+        beforeTitle,
+        desiredTitle: stringValue(desired?.title),
+        actualTitle: stringValue(result?.actualTitle),
         beforePrice: beforePrices ? snapshotStartPrice(beforePrices) : null,
         desiredPrice: desiredPrices ? snapshotStartPrice(desiredPrices) : null,
         beforePriceRange: beforePrices ? snapshotPriceRange(beforePrices) : null,
@@ -1812,6 +2483,7 @@ function toTaskView(task: ProductBatchTaskRecord): ProductBatchTaskView {
         actualInventory,
         beforeInventoryVersion: integerOrNull(before?.inventoryVersion),
         desiredInventoryVersion: integerOrNull(desired?.inventoryVersion),
+        retryable: item.status === 'failed' && isRetryableFailedError(item.errorCode),
         status: item.status,
         attempts: item.attempts,
         maxAttempts: item.maxAttempts,
@@ -1879,7 +2551,7 @@ function previewForAction(
     inventoryFingerprint: string | null;
     inventoryVersion: number;
     inventorySyncStatus: string;
-    shop: { platform: string };
+    shop: { platform: string; platformShopId: string };
     task: { skuSnapshot: Prisma.JsonValue | null };
     sourceProduct: {
       availability: string;
@@ -1888,6 +2560,7 @@ function previewForAction(
       inventoryVersion: number;
     };
   },
+  titleTargets: NormalizedTitleTarget[] | null,
   priceRule: NormalizedPriceRule | null,
 ) {
   const before = beforeSnapshot(record);
@@ -1897,6 +2570,47 @@ function previewForAction(
       ...status,
       beforeSnapshot: before,
       desiredSnapshot: { status: 'offline' },
+    };
+  }
+  if (action === 'edit_title') {
+    const target = titleTargets?.find((value) => value.publishedProductId === record.id.toString());
+    if (!target) throw new BadRequestException('逐项目标标题缺少所选商品');
+    const desiredSnapshot = { status: record.status, title: target.targetTitle };
+    const unavailableReason = titleEditUnavailableReason(record);
+    if (unavailableReason) {
+      return skippedTitlePreview(
+        before,
+        desiredSnapshot,
+        'TITLE_EDIT_UNAVAILABLE',
+        unavailableReason,
+      );
+    }
+    const complianceReason = titleComplianceReason(target.targetTitle, record.shop.platform);
+    if (complianceReason) {
+      return skippedTitlePreview(
+        before,
+        desiredSnapshot,
+        'TITLE_COMPLIANCE_BLOCKED',
+        complianceReason,
+      );
+    }
+    if (record.title === target.targetTitle) {
+      return {
+        status: 'skipped' as const,
+        result: { reason: 'title_unchanged', actualTitle: record.title },
+        errorCode: null,
+        errorMessage: null,
+        beforeSnapshot: before,
+        desiredSnapshot,
+      };
+    }
+    return {
+      status: 'pending' as const,
+      result: undefined,
+      errorCode: null,
+      errorMessage: null,
+      beforeSnapshot: before,
+      desiredSnapshot,
     };
   }
   if (action === 'sync_inventory') {
@@ -2047,6 +2761,22 @@ function previewForAction(
   };
 }
 
+function skippedTitlePreview(
+  beforeSnapshotValue: Record<string, unknown>,
+  desiredSnapshotValue: Record<string, unknown>,
+  errorCode: string,
+  errorMessage: string,
+) {
+  return {
+    status: 'skipped' as const,
+    result: { reason: errorCode.toLowerCase() },
+    errorCode,
+    errorMessage,
+    beforeSnapshot: beforeSnapshotValue,
+    desiredSnapshot: desiredSnapshotValue,
+  };
+}
+
 function skippedInventoryPreview(
   beforeSnapshotValue: Record<string, unknown>,
   desiredSnapshotValue: Record<string, unknown>,
@@ -2117,15 +2847,19 @@ function normalizePriceRule(
   ids: string[],
   value: ProductBatchPriceRuleDto | undefined,
 ): NormalizedPriceRule | null {
-  if (action === 'offline' || action === 'sync_inventory') {
+  if (action !== 'edit_price') {
     if (value) {
-      throw new BadRequestException(
-        action === 'offline' ? '批量下架不能携带改价规则' : '库存同步不能携带改价规则',
-      );
+      const message =
+        action === 'offline'
+          ? '批量下架不能携带改价规则'
+          : action === 'sync_inventory'
+            ? '库存同步不能携带改价规则'
+            : '批量改标题不能携带改价规则';
+      throw new BadRequestException(message);
     }
     return null;
   }
-  if (action !== 'edit_price' || !value) {
+  if (!value) {
     throw new BadRequestException('批量改价必须提供价格规则');
   }
   if (value.mode === 'percentage') {
@@ -2176,9 +2910,47 @@ function normalizePriceRule(
   };
 }
 
+function normalizeTitleTargets(
+  action: string,
+  ids: string[],
+  value: ProductBatchTitleTargetDto[] | undefined,
+): NormalizedTitleTarget[] | null {
+  if (action !== 'edit_title') {
+    if (value) throw new BadRequestException('当前批量动作不能携带目标标题');
+    return null;
+  }
+  if (!value?.length) throw new BadRequestException('批量改标题必须提供逐项目标标题');
+  const selected = new Set(ids);
+  const normalized = value.map((target) => ({
+    publishedProductId: target.publishedProductId,
+    expectedMutationRevision: target.expectedMutationRevision,
+    targetTitle: typeof target.targetTitle === 'string' ? target.targetTitle.trim() : '',
+  }));
+  const targetIds = new Set(normalized.map((target) => target.publishedProductId));
+  if (
+    normalized.some(
+      (target) =>
+        !target.targetTitle ||
+        [...target.targetTitle].length > 60 ||
+        !Number.isInteger(target.expectedMutationRevision) ||
+        target.expectedMutationRevision < 1,
+    ) ||
+    targetIds.size !== normalized.length ||
+    selected.size !== targetIds.size ||
+    [...selected].some((id) => !targetIds.has(id)) ||
+    [...targetIds].some((id) => !selected.has(id))
+  ) {
+    throw new BadRequestException('逐项目标标题必须有效并与所选商品完全一致');
+  }
+  return normalized.sort((left, right) =>
+    left.publishedProductId.localeCompare(right.publishedProductId),
+  );
+}
+
 function requestFingerprint(
   action: string,
   ids: string[],
+  titleTargets: NormalizedTitleTarget[] | null,
   priceRule: NormalizedPriceRule | null,
 ): string {
   return createHash('sha256')
@@ -2186,6 +2958,7 @@ function requestFingerprint(
       JSON.stringify({
         action,
         publishedProductIds: [...ids].sort(),
+        ...(titleTargets ? { titleTargets } : {}),
         ...(priceRule ? { priceRule } : {}),
       }),
     )
@@ -2524,6 +3297,38 @@ function inventorySyncUnavailableReason(
   return null;
 }
 
+function titleEditUnavailableReason(
+  record: {
+    platformProductId: string | null;
+    status: string;
+    shop: { platform: string; platformShopId: string };
+  },
+  unresolvedTitleResult = false,
+): string | null {
+  if (!record.platformProductId) return '商品缺少平台商品 ID';
+  if (unresolvedTitleResult) return '存在结果待核验的标题更新，请先在原批量任务核验';
+  if (record.status !== 'online' && record.status !== 'offline') {
+    return '只有已发布的在线或下架商品可以改标题';
+  }
+  if (!isDemoShop(record.shop) && record.shop.platform !== 'douyin') {
+    return '当前仅支持抖店商品批量改标题';
+  }
+  return null;
+}
+
+function titleComplianceReason(title: string, platform: string): string | null {
+  if (/\r|\n/.test(title)) return '标题不能包含换行符';
+  if (platform === 'douyin') {
+    const units = [...title].reduce(
+      (total, character) => total + (/^[\x00-\x7f]$/.test(character) ? 1 : 2),
+      0,
+    );
+    if (units < 16) return '抖店标题至少需要 8 个汉字（16 个字符）';
+    if (units > 60) return '抖店标题最多允许 30 个汉字（60 个字符）';
+  }
+  return validateTitleForPlatform(title, platform as PlatformType);
+}
+
 function batchInventoryIdempotencyKey(
   itemId: bigint,
   version: number,
@@ -2582,8 +3387,82 @@ function retryDelayMs(attempts: number): number {
   return Math.min(5 * 60_000, 5_000 * 2 ** Math.max(0, attempts - 1));
 }
 
+function titleVerificationWindowElapsed(result: Prisma.JsonValue | null): boolean {
+  const startedAt = stringValue(jsonRecord(result)?.titleWriteStartedAt);
+  if (!startedAt) return false;
+  const timestamp = Date.parse(startedAt);
+  return Number.isFinite(timestamp) && Date.now() - timestamp >= STALE_ITEM_MS;
+}
+
+function shouldWaitForTitleVerification(
+  state: PlatformProductTitleState,
+  beforeTitle: string,
+  desiredTitle: string,
+  result: Prisma.JsonValue | null,
+): boolean {
+  if (state.title === desiredTitle || state.title !== beforeTitle) return false;
+  if (
+    state.state === 'rejected' ||
+    state.state === 'blocked' ||
+    state.state === 'deleted' ||
+    state.state === 'unknown'
+  ) {
+    return false;
+  }
+  if (state.state === 'online' || state.state === 'offline') {
+    return !titleVerificationWindowElapsed(result);
+  }
+  return true;
+}
+
 function isOfflineState(state: string): boolean {
   return state === 'offline' || state === 'deleted';
+}
+
+function assertTitleEditState(state: PlatformProductTitleState, stage: string): void {
+  if (state.state === 'online' || state.state === 'offline') return;
+  throw new ProductBatchItemError(
+    'TITLE_EDIT_STATE_INVALID',
+    `${stage}平台商品状态为 ${state.state}，不能安全提交标题更新`,
+    false,
+  );
+}
+
+function titleResultFailure(
+  state: PlatformProductTitleState,
+): { code: string; message: string } | null {
+  if (state.state === 'rejected' || state.state === 'blocked') {
+    return {
+      code: 'TITLE_RESULT_REJECTED',
+      message: `平台商品状态为 ${state.state}，已同步实际标题，请按平台提示修正`,
+    };
+  }
+  if (state.state === 'deleted' || state.state === 'unknown') {
+    return {
+      code: 'TITLE_RESULT_STATE_INVALID',
+      message: `平台商品状态为 ${state.state}，已同步实际标题，请人工核验`,
+    };
+  }
+  return null;
+}
+
+function localStatusFromTitleState(
+  state: PlatformProductTitleState,
+  fallback: string,
+): 'online' | 'offline' | 'draft' | 'rejected' {
+  if (state.state === 'online') return 'online';
+  if (state.state === 'offline' || state.state === 'deleted') return 'offline';
+  if (
+    state.state === 'draft' ||
+    state.state === 'reviewing' ||
+    state.state === 'approved_pending_online'
+  ) {
+    return 'draft';
+  }
+  if (state.state === 'rejected' || state.state === 'blocked') return 'rejected';
+  return fallback === 'offline' || fallback === 'draft' || fallback === 'rejected'
+    ? fallback
+    : 'online';
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -2593,6 +3472,29 @@ function safeErrorMessage(error: unknown): string {
 function safeErrorCode(error: unknown, fallback: string): string {
   const value = error instanceof Error ? error.name : '';
   return /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : fallback;
+}
+
+function isRetryableFailedError(errorCode: string | null): boolean {
+  return errorCode === null || RETRYABLE_FAILED_CODES.has(errorCode);
+}
+
+function isResolvedTitleExecutionError(error: unknown): boolean {
+  return (
+    error instanceof ProductBatchItemError &&
+    [
+      'PLATFORM_TITLE_CHANGED',
+      'TITLE_WRITE_ABORTED_PRODUCT_CHANGED',
+      'TITLE_WRITE_GUARD_LOST',
+      'TITLE_RESULT_REJECTED',
+      'TITLE_RESULT_STATE_INVALID',
+      TITLE_RESULT_UNKNOWN_CODE,
+      'TITLE_UPDATE_FAILED',
+    ].includes(error.code)
+  );
+}
+
+function isUnknownTitleExecutionError(error: unknown): boolean {
+  return error instanceof ProductBatchItemError && error.code === TITLE_RESULT_UNKNOWN_CODE;
 }
 
 function isPlatformMutationResultUnknown(error: unknown): boolean {

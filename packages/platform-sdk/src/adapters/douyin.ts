@@ -16,6 +16,7 @@ import type {
   PlatformProductInventoryState,
   PlatformProductPriceState,
   PlatformProductState,
+  PlatformProductTitleState,
   PlatformShipmentPackage,
   PublishProductDto,
   PublishResult,
@@ -26,6 +27,7 @@ import type {
   SyncInventoryDto,
   UpdateProductDto,
   UpdateProductPriceDto,
+  UpdateProductTitleDto,
 } from '../types';
 
 type HttpFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -96,6 +98,7 @@ interface DouyinProductDetailData {
   outer_product_id?: string;
   status?: number | string;
   check_status?: number | string;
+  name?: string;
   spec_prices?: unknown[];
 }
 
@@ -209,6 +212,55 @@ export class DouyinAdapter extends BasePlatformAdapter {
       product_id: productId,
       quality_list: serializeQualifications(dto.qualifications ?? []),
     });
+  }
+
+  async updateProductTitle(token: string, dto: UpdateProductTitleDto): Promise<void> {
+    const productId = positiveNumericId(dto.platformProductId, 'product ID');
+    const title = validDouyinTitle(dto.title);
+    try {
+      await this.requestApi<undefined>(
+        '/product/partialEdit',
+        'product.partialEdit',
+        'product title update',
+        token,
+        { name: title, product_id: productId },
+      );
+    } catch (error) {
+      if (mutationResultIsUnknown(error, 'product title update')) {
+        throw new PlatformMutationResultUnknownError(
+          error instanceof Error ? error.message : 'Douyin product title update result is unknown',
+        );
+      }
+      throw error;
+    }
+  }
+
+  async getProductTitle(token: string, productIdValue: string): Promise<PlatformProductTitleState> {
+    const productId = positiveNumericId(productIdValue, 'product ID');
+    const data = await this.requestApi<DouyinProductDetailData>(
+      '/product/detail',
+      'product.detail',
+      'product detail',
+      token,
+      { product_id: productId, show_draft: 'true' },
+    );
+    if (!data) throw new Error('Douyin product detail returned an invalid response');
+    const returnedProductId = stringValue(data.product_id_str ?? data.product_id).trim();
+    if (returnedProductId && returnedProductId !== productId) {
+      throw new Error('Douyin product detail returned a mismatched product ID');
+    }
+    const title = stringValue(data.name).trim();
+    if (!title || title.length > 60) {
+      throw new Error('Douyin product detail returned an invalid product title');
+    }
+    const status = optionalInteger(data.status);
+    const checkStatus = optionalInteger(data.check_status);
+    return {
+      state: mapProductState(status, checkStatus),
+      status,
+      checkStatus,
+      title,
+    };
   }
 
   async updateProductPrice(token: string, dto: UpdateProductPriceDto): Promise<void> {
@@ -344,7 +396,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
           ACCEPTED_INVENTORY_IDEMPOTENCY_RESPONSE,
         );
       } catch (error) {
-        if (inventoryMutationResultIsUnknown(error)) {
+        if (mutationResultIsUnknown(error, 'inventory sync')) {
           throw new PlatformMutationResultUnknownError(
             error instanceof Error ? error.message : 'Douyin inventory sync result is unknown',
           );
@@ -810,6 +862,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
     path:
       | '/product/addV2'
       | '/product/editV2'
+      | '/product/partialEdit'
       | '/product/detail'
       | '/product/GetRecommendCategory'
       | '/product/getCatePropertyV2'
@@ -828,6 +881,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
     method:
       | 'product.addV2'
       | 'product.editV2'
+      | 'product.partialEdit'
       | 'product.detail'
       | 'product.GetRecommendCategory'
       | 'product.getCatePropertyV2'
@@ -846,6 +900,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
     operation:
       | 'product publish'
       | 'product update'
+      | 'product title update'
       | 'product detail'
       | 'category recommendation'
       | 'category attributes'
@@ -899,6 +954,9 @@ export class DouyinAdapter extends BasePlatformAdapter {
     try {
       payload = (await response.json()) as DouyinApiResponse<T>;
     } catch {
+      throw new Error(`Douyin ${operation} returned an invalid response`);
+    }
+    if (!payload || typeof payload !== 'object' || !Number.isSafeInteger(payload.code)) {
       throw new Error(`Douyin ${operation} returned an invalid response`);
     }
     if (payload.code !== 10000) {
@@ -1252,13 +1310,31 @@ function inventoryStatusCode(value: unknown): number | null {
 
 class InvalidInventoryMutationResponseError extends Error {}
 
-function inventoryMutationResultIsUnknown(error: unknown): boolean {
+function mutationResultIsUnknown(error: unknown, operation: string): boolean {
   if (!(error instanceof Error)) return false;
+  const httpStatus = new RegExp(`^Douyin ${operation} failed \\(HTTP (\\d{3})\\)$`).exec(
+    error.message,
+  )?.[1];
+  if (httpStatus) {
+    const status = Number(httpStatus);
+    return status === 408 || status === 429 || status >= 500;
+  }
   return (
-    error.message === 'Douyin inventory sync request failed' ||
-    error.message.startsWith('Douyin inventory sync failed (HTTP ') ||
-    error.message === 'Douyin inventory sync returned an invalid response'
+    error.message === `Douyin ${operation} request failed` ||
+    error.message === `Douyin ${operation} returned an invalid response`
   );
+}
+
+function validDouyinTitle(value: unknown): string {
+  const title = stringValue(value).trim();
+  const units = [...title].reduce(
+    (total, character) => total + (/^[\x00-\x7f]$/.test(character) ? 1 : 2),
+    0,
+  );
+  if (!title || /[\r\n]/.test(title) || units < 16 || units > 60) {
+    throw new Error('Douyin product title is invalid');
+  }
+  return title;
 }
 
 function mapCategoryNode(value: unknown, requestedParentId: string): CategoryNode {

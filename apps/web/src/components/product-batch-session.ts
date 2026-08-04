@@ -14,10 +14,11 @@ const INVENTORY_CANDIDATE_FIELDS = [
   'inventorySyncEligible',
   'inventorySyncReason',
 ] as const;
+const TITLE_CANDIDATE_FIELDS = ['titleEditable', 'titleEditReason'] as const;
 
 type LegacyProductBatchCandidate = Omit<
   ProductBatchCandidate,
-  (typeof INVENTORY_CANDIDATE_FIELDS)[number]
+  (typeof INVENTORY_CANDIDATE_FIELDS)[number] | (typeof TITLE_CANDIDATE_FIELDS)[number]
 >;
 
 export interface ProductBatchSessionScope {
@@ -35,6 +36,7 @@ export interface ProductBatchComposerDraft {
   priceDirection: 'increase' | 'decrease';
   percentageInput: string;
   targetInputs: Record<string, string>;
+  titleInputs: Record<string, string>;
   bulkTargetInput: string;
   targetPage: number;
   selected: ProductBatchCandidate[];
@@ -180,7 +182,8 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     typeof value.bulkTargetInput !== 'string' ||
     !Array.isArray(value.selected) ||
     value.selected.length > MAX_SELECTION ||
-    !isStringRecord(value.targetInputs)
+    !isStringRecord(value.targetInputs) ||
+    (value.titleInputs !== undefined && !isStringRecord(value.titleInputs))
   ) {
     return null;
   }
@@ -193,6 +196,11 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
   const targetInputs = Object.fromEntries(
     Object.entries(value.targetInputs).filter(([id]) => selectedIds.has(id)),
   );
+  const titleInputs = Object.fromEntries(
+    Object.entries(isStringRecord(value.titleInputs) ? value.titleInputs : {}).filter(([id]) =>
+      selectedIds.has(id),
+    ),
+  );
   return {
     page: value.page,
     status: value.status,
@@ -203,6 +211,7 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     priceDirection: value.priceDirection,
     percentageInput: value.percentageInput,
     targetInputs,
+    titleInputs,
     bulkTargetInput: value.bulkTargetInput,
     targetPage: value.targetPage,
     selected: candidates,
@@ -232,22 +241,38 @@ function parseProductBatchCandidate(
 ): ProductBatchCandidate | null {
   if (!isLegacyProductBatchCandidate(value)) return null;
   if (isProductBatchCandidate(value)) return value;
+  const hasInventoryFields = INVENTORY_CANDIDATE_FIELDS.some((field) =>
+    Object.hasOwn(value, field),
+  );
+  const hasTitleFields = TITLE_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
+  const inventoryFieldsValid = hasInventoryCandidateFields(value);
+  const titleFieldsValid = hasTitleCandidateFields(value);
   if (
-    action === 'sync_inventory' ||
-    INVENTORY_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field))
+    (hasInventoryFields && !inventoryFieldsValid) ||
+    (hasTitleFields && !titleFieldsValid) ||
+    (action === 'sync_inventory' && !inventoryFieldsValid) ||
+    (action === 'edit_title' && !titleFieldsValid)
   ) {
     return null;
   }
   return {
     ...value,
-    sourceTotalStock: 0,
-    sourceSkuCount: 0,
-    sourceInventoryVersion: 0,
-    syncedInventoryVersion: 0,
-    inventoryLastSyncedAt: null,
-    inventorySyncError: null,
-    inventorySyncEligible: false,
-    inventorySyncReason: '旧版会话缺少库存快照，请刷新商品后再同步库存',
+    sourceTotalStock: inventoryFieldsValid ? (value.sourceTotalStock as number) : 0,
+    sourceSkuCount: inventoryFieldsValid ? (value.sourceSkuCount as number) : 0,
+    sourceInventoryVersion: inventoryFieldsValid ? (value.sourceInventoryVersion as number) : 0,
+    syncedInventoryVersion: inventoryFieldsValid ? (value.syncedInventoryVersion as number) : 0,
+    inventoryLastSyncedAt: inventoryFieldsValid
+      ? (value.inventoryLastSyncedAt as string | null)
+      : null,
+    inventorySyncError: inventoryFieldsValid ? (value.inventorySyncError as string | null) : null,
+    inventorySyncEligible: inventoryFieldsValid ? (value.inventorySyncEligible as boolean) : false,
+    inventorySyncReason: inventoryFieldsValid
+      ? (value.inventorySyncReason as string | null)
+      : '旧版会话缺少库存快照，请刷新商品后再同步库存',
+    titleEditable: titleFieldsValid ? (value.titleEditable as boolean) : false,
+    titleEditReason: titleFieldsValid
+      ? (value.titleEditReason as string | null)
+      : '旧版会话缺少标题编辑状态，请刷新商品后再修改标题',
   };
 }
 
@@ -282,6 +307,10 @@ function isLegacyProductBatchCandidate(
 function isProductBatchCandidate(
   value: LegacyProductBatchCandidate & Record<string, unknown>,
 ): value is ProductBatchCandidate & Record<string, unknown> {
+  return hasInventoryCandidateFields(value) && hasTitleCandidateFields(value);
+}
+
+function hasInventoryCandidateFields(value: Record<string, unknown>): boolean {
   return (
     isNonNegativeInteger(value.sourceTotalStock) &&
     isNonNegativeInteger(value.sourceSkuCount) &&
@@ -291,6 +320,13 @@ function isProductBatchCandidate(
     (value.inventorySyncError === null || typeof value.inventorySyncError === 'string') &&
     typeof value.inventorySyncEligible === 'boolean' &&
     (value.inventorySyncReason === null || typeof value.inventorySyncReason === 'string')
+  );
+}
+
+function hasTitleCandidateFields(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.titleEditable === 'boolean' &&
+    (value.titleEditReason === null || typeof value.titleEditReason === 'string')
   );
 }
 
@@ -305,7 +341,12 @@ function isPriceRange(value: unknown): value is [number, number] | null {
 }
 
 function isProductBatchAction(value: unknown): value is ProductBatchAction {
-  return value === 'offline' || value === 'edit_price' || value === 'sync_inventory';
+  return (
+    value === 'offline' ||
+    value === 'edit_title' ||
+    value === 'edit_price' ||
+    value === 'sync_inventory'
+  );
 }
 
 function isPriceMode(value: unknown): value is 'percentage' | 'targets' {

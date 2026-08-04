@@ -1,9 +1,182 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { assertPublicSchemaIsolation, describeStagingDatasource } from './audit-staging.mjs';
+import {
+  assertExpectedPendingStatus,
+  assertMigrationHistory,
+  assertNoDuplicatePlatformProductIds,
+  assertPublicSchemaIsolation,
+  describeStagingDatasource,
+  readAuditOptions,
+} from './audit-staging.mjs';
 
 const PROJECT_REF = 'abcdefghijklmnopqrst';
+const LOCAL_MIGRATIONS = [
+  { name: '20260801000000_first', checksum: 'checksum-first' },
+  { name: '20260802000000_second', checksum: 'checksum-second' },
+  { name: '20260803000000_third', checksum: 'checksum-third' },
+];
+
+function appliedMigration(localMigration, overrides = {}) {
+  return {
+    migration_name: localMigration.name,
+    checksum: localMigration.checksum,
+    finished_at: new Date('2026-08-03T00:00:00.000Z'),
+    rolled_back_at: null,
+    applied_steps_count: 1,
+    ...overrides,
+  };
+}
+
+test('accepts only the explicit allow-pending option', () => {
+  assert.deepEqual(readAuditOptions([]), { allowPending: false });
+  assert.deepEqual(readAuditOptions(['--allow-pending']), { allowPending: true });
+  assert.throws(() => readAuditOptions(['--unknown']), /Usage: audit-staging/);
+  assert.throws(
+    () => readAuditOptions(['--allow-pending', '--allow-pending']),
+    /Usage: audit-staging/,
+  );
+});
+
+test('strict migration history requires every local migration to be applied in order', () => {
+  const remote = LOCAL_MIGRATIONS.map((migration) => appliedMigration(migration));
+  assert.deepEqual(assertMigrationHistory(LOCAL_MIGRATIONS, remote), {
+    pendingMigrations: [],
+  });
+
+  assert.throws(
+    () => assertMigrationHistory(LOCAL_MIGRATIONS, remote.slice(0, 2)),
+    /"pendingDisallowed":\["20260803000000_third"\]/,
+  );
+});
+
+test('allow-pending accepts only a continuous local migration suffix', () => {
+  const remote = LOCAL_MIGRATIONS.slice(0, 2).map((migration) => appliedMigration(migration));
+  assert.deepEqual(assertMigrationHistory(LOCAL_MIGRATIONS, remote, { allowPending: true }), {
+    pendingMigrations: ['20260803000000_third'],
+  });
+
+  assert.throws(
+    () =>
+      assertMigrationHistory(
+        LOCAL_MIGRATIONS,
+        [appliedMigration(LOCAL_MIGRATIONS[0]), appliedMigration(LOCAL_MIGRATIONS[2])],
+        { allowPending: true },
+      ),
+    /"orderMismatches":\[/,
+  );
+});
+
+test('migration history rejects unknown, duplicate, checksum, unfinished, and rolled-back rows', () => {
+  const validFirst = appliedMigration(LOCAL_MIGRATIONS[0]);
+  const cases = [
+    [
+      [validFirst, appliedMigration({ name: '20260801500000_unknown', checksum: 'unknown' })],
+      /"unknownRemote":\["20260801500000_unknown"\]/,
+    ],
+    [[validFirst, validFirst], /"duplicateRemote":\["20260801000000_first"\]/],
+    [
+      [appliedMigration(LOCAL_MIGRATIONS[0], { checksum: 'changed' })],
+      /"checksumMismatches":\["20260801000000_first"\]/,
+    ],
+    [
+      [appliedMigration(LOCAL_MIGRATIONS[0], { finished_at: null })],
+      /"unfinished":\["20260801000000_first"\]/,
+    ],
+    [
+      [
+        appliedMigration(LOCAL_MIGRATIONS[0], {
+          finished_at: null,
+          rolled_back_at: new Date('2026-08-03T01:00:00.000Z'),
+        }),
+      ],
+      /"rolledBack":\["20260801000000_first"\]/,
+    ],
+    [
+      [appliedMigration(LOCAL_MIGRATIONS[0], { applied_steps_count: 0 })],
+      /"emptyApplied":\["20260801000000_first"\]/,
+    ],
+  ];
+
+  for (const [remote, expected] of cases) {
+    assert.throws(
+      () => assertMigrationHistory(LOCAL_MIGRATIONS, remote, { allowPending: true }),
+      expected,
+    );
+  }
+});
+
+test('accepts Prisma status exit 1 only when it reports the exact pending suffix', () => {
+  const pending = ['20260802000000_second', '20260803000000_third'];
+  assert.doesNotThrow(() =>
+    assertExpectedPendingStatus(
+      {
+        status: 1,
+        signal: null,
+        stdout: `3 migrations found in prisma/migrations\nFollowing migrations have not yet been applied:\n${pending.join('\n')}\n`,
+        stderr: '',
+      },
+      pending,
+    ),
+  );
+
+  assert.throws(
+    () =>
+      assertExpectedPendingStatus(
+        { status: 1, signal: null, stdout: '', stderr: 'Error: P1001 cannot reach database' },
+        pending,
+      ),
+    /reason other than expected pending migrations/,
+  );
+  assert.throws(
+    () =>
+      assertExpectedPendingStatus(
+        {
+          status: 1,
+          signal: null,
+          stdout: `Following migrations have not yet been applied:\n${pending.join('\n')}\n`,
+          stderr: 'Error: P1001 cannot reach database',
+        },
+        pending,
+      ),
+    /reason other than expected pending migrations/,
+  );
+  assert.throws(
+    () =>
+      assertExpectedPendingStatus(
+        {
+          status: 1,
+          signal: null,
+          stdout:
+            'Following migrations have not yet been applied:\n20260802000000_second\n20260802500000_unexpected\n',
+          stderr: '',
+        },
+        pending,
+      ),
+    /did not report the expected pending migration suffix/,
+  );
+  assert.throws(
+    () =>
+      assertExpectedPendingStatus(
+        {
+          status: 2,
+          signal: null,
+          stdout: `Following migrations have not yet been applied:\n${pending.join('\n')}\n`,
+          stderr: '',
+        },
+        pending,
+      ),
+    /reason other than expected pending migrations/,
+  );
+});
+
+test('fails the staging precondition when platform product ids are duplicated within a shop', () => {
+  assert.doesNotThrow(() => assertNoDuplicatePlatformProductIds(0));
+  assert.throws(
+    () => assertNoDuplicatePlatformProductIds(2),
+    /Duplicate non-null platform_product_id groups found within a shop: 2/,
+  );
+});
 
 test('accepts pooler URLs that identify the same Supabase project and database', () => {
   const datasource = describeStagingDatasource({

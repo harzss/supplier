@@ -144,6 +144,14 @@ jobs:
             psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
             < infra/postgres/assert-public-schema-isolation.sql
 
+          docker exec -i supplier-postgres-ci \
+            psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
+            < infra/postgres/assert-workflow-check-constraints.sql
+
+          docker exec -i supplier-postgres-ci \
+            psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
+            < infra/postgres/assert-33-to-43-upgrade-data.sql
+
           docker run -d --name supplier-bff-ci --network supplier-ci -p 3101:3001 \
             -e NODE_ENV=production -e AUTH_MODE=supabase \
             -e SUPABASE_URL=https://auth.ci.example \

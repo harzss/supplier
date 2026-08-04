@@ -76,6 +76,14 @@ export function assertPublicSchemaIsolation(
   }
 }
 
+export function assertNoDuplicatePlatformProductIds(duplicateGroups) {
+  if (duplicateGroups > 0) {
+    throw new Error(
+      `Duplicate non-null platform_product_id groups found within a shop: ${duplicateGroups}`,
+    );
+  }
+}
+
 function describeDatabaseUrl(value, name, expectedProjectRef) {
   let url;
   try {
@@ -112,7 +120,7 @@ function describeDatabaseUrl(value, name, expectedProjectRef) {
   };
 }
 
-function runPrisma(args) {
+function spawnPrisma(args) {
   const result = spawnSync(process.execPath, [prismaCliPath, ...args], {
     cwd: repositoryRoot,
     env: process.env,
@@ -125,9 +133,72 @@ function runPrisma(args) {
   if (result.stderr) {
     process.stderr.write(result.stderr);
   }
+  if (result.error) {
+    throw new Error(
+      `Prisma ${args.slice(0, 2).join(' ')} could not start: ${result.error.message}`,
+    );
+  }
+
+  return result;
+}
+
+function runPrisma(args) {
+  const result = spawnPrisma(args);
   if (result.status !== 0) {
     throw new Error(`Prisma ${args.slice(0, 2).join(' ')} failed.`);
   }
+}
+
+export function readAuditOptions(args) {
+  if (args.length === 0) return { allowPending: false };
+  if (args.length === 1 && args[0] === '--allow-pending') return { allowPending: true };
+  throw new Error('Usage: audit-staging.mjs [--allow-pending]');
+}
+
+export function assertExpectedPendingStatus(result, pendingMigrations) {
+  if (
+    result.error ||
+    result.signal ||
+    result.status !== 1 ||
+    (result.stderr ?? '').trim().length > 0
+  ) {
+    throw new Error(
+      'Prisma migrate status failed for a reason other than expected pending migrations.',
+    );
+  }
+
+  const output = result.stdout ?? '';
+  const reportedPending = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^\d{14}_[A-Za-z0-9_-]+$/.test(line));
+  const expectedHeader = `Following migration${pendingMigrations.length === 1 ? '' : 's'} have not yet been applied:`;
+
+  if (
+    !output.includes(expectedHeader) ||
+    reportedPending.length !== pendingMigrations.length ||
+    reportedPending.some((migration, index) => migration !== pendingMigrations[index])
+  ) {
+    throw new Error('Prisma migrate status did not report the expected pending migration suffix.');
+  }
+}
+
+function runPrismaStatus(pendingMigrations, allowPending) {
+  const args = ['migrate', 'status', '--schema', schemaPath];
+  const result = spawnPrisma(args);
+  if (result.status === 0) {
+    if (pendingMigrations.length > 0) {
+      throw new Error('Prisma migrate status no longer matches the read-only migration snapshot.');
+    }
+    return;
+  }
+
+  if (allowPending && pendingMigrations.length > 0) {
+    assertExpectedPendingStatus(result, pendingMigrations);
+    return;
+  }
+
+  throw new Error('Prisma migrate status failed.');
 }
 
 async function readLocalMigrations() {
@@ -149,22 +220,32 @@ async function readLocalMigrations() {
   return migrations.sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function assertMigrationHistory(localMigrations, remoteMigrations) {
+export function assertMigrationHistory(
+  localMigrations,
+  remoteMigrations,
+  { allowPending = false } = {},
+) {
   const localByName = new Map(
     localMigrations.map((migration) => [migration.name, migration.checksum]),
   );
-  const remoteByName = new Map(
-    remoteMigrations.map((migration) => [migration.migration_name, migration]),
-  );
+  const remoteNames = remoteMigrations.map((migration) => migration.migration_name);
+  const remoteNameCounts = new Map();
+  for (const name of remoteNames) {
+    remoteNameCounts.set(name, (remoteNameCounts.get(name) ?? 0) + 1);
+  }
 
-  const missingRemote = localMigrations
-    .filter((migration) => !remoteByName.has(migration.name))
-    .map((migration) => migration.name);
   const unknownRemote = remoteMigrations
     .filter((migration) => !localByName.has(migration.migration_name))
     .map((migration) => migration.migration_name);
+  const duplicateRemote = [...remoteNameCounts]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name);
   const checksumMismatches = remoteMigrations
-    .filter((migration) => localByName.get(migration.migration_name) !== migration.checksum)
+    .filter(
+      (migration) =>
+        localByName.has(migration.migration_name) &&
+        localByName.get(migration.migration_name) !== migration.checksum,
+    )
     .map((migration) => migration.migration_name);
   const unfinished = remoteMigrations
     .filter((migration) => migration.finished_at === null && migration.rolled_back_at === null)
@@ -172,21 +253,37 @@ function assertMigrationHistory(localMigrations, remoteMigrations) {
   const rolledBack = remoteMigrations
     .filter((migration) => migration.rolled_back_at !== null)
     .map((migration) => migration.migration_name);
+  const emptyApplied = remoteMigrations
+    .filter((migration) => migration.applied_steps_count <= 0)
+    .map((migration) => migration.migration_name);
+  const orderMismatches = remoteNames
+    .map((name, index) => {
+      const expected = localMigrations[index]?.name ?? null;
+      return name === expected ? null : { index, expected, actual: name };
+    })
+    .filter(Boolean);
+  const pendingMigrations = localMigrations.slice(remoteMigrations.length).map(({ name }) => name);
 
   const failures = {
-    missingRemote,
     unknownRemote,
+    duplicateRemote,
     checksumMismatches,
     unfinished,
     rolledBack,
+    emptyApplied,
+    orderMismatches,
+    pendingDisallowed: allowPending ? [] : pendingMigrations,
   };
 
   if (Object.values(failures).some((items) => items.length > 0)) {
     throw new Error(`Migration history mismatch: ${JSON.stringify(failures)}`);
   }
+
+  return { pendingMigrations };
 }
 
 async function main() {
+  const { allowPending } = readAuditOptions(process.argv.slice(2));
   requireDatabaseConfig();
   const datasource = describeStagingDatasource({
     projectRef: process.env.STAGING_PROJECT_REF,
@@ -198,17 +295,6 @@ async function main() {
   console.log(
     `Auditing Supabase staging project ${datasource.projectRef} (${datasource.runtime.host}:${datasource.runtime.port}/${datasource.database}; direct ${datasource.direct.host}:${datasource.direct.port})`,
   );
-
-  runPrisma(['migrate', 'status', '--schema', schemaPath]);
-  runPrisma([
-    'migrate',
-    'diff',
-    '--exit-code',
-    '--from-schema-datasource',
-    schemaPath,
-    '--to-schema-datamodel',
-    schemaPath,
-  ]);
 
   const prisma = new PrismaClient();
   try {
@@ -246,6 +332,16 @@ async function main() {
           FROM published_products
           WHERE task_id IS NOT NULL
           GROUP BY task_id, shop_id
+          HAVING COUNT(*) > 1
+        ) duplicates
+      `);
+      const duplicatePlatformProductIds = await transaction.$queryRawUnsafe(`
+        SELECT COUNT(*)::int AS duplicate_groups
+        FROM (
+          SELECT shop_id, platform_product_id
+          FROM published_products
+          WHERE platform_product_id IS NOT NULL
+          GROUP BY shop_id, platform_product_id
           HAVING COUNT(*) > 1
         ) duplicates
       `);
@@ -330,18 +426,42 @@ async function main() {
         migrations,
         dataCounts: dataCounts[0],
         duplicateRecoveryKeys: duplicateRecoveryKeys[0],
+        duplicatePlatformProductIds: duplicatePlatformProductIds[0],
         publicTables,
         publicSequences,
         unsafeDefaultPrivileges,
       };
     });
 
-    assertMigrationHistory(localMigrations, audit.migrations);
+    const { pendingMigrations } = assertMigrationHistory(localMigrations, audit.migrations, {
+      allowPending,
+    });
     assertPublicSchemaIsolation(
       audit.publicTables,
       audit.publicSequences,
       audit.unsafeDefaultPrivileges,
     );
+    assertNoDuplicatePlatformProductIds(audit.duplicatePlatformProductIds.duplicate_groups);
+
+    runPrismaStatus(pendingMigrations, allowPending);
+    const schemaDiff =
+      pendingMigrations.length > 0
+        ? {
+            status: 'deferred',
+            reason: 'pending migrations must be applied before comparing the live schema',
+          }
+        : { status: 'matched' };
+    if (schemaDiff.status === 'matched') {
+      runPrisma([
+        'migrate',
+        'diff',
+        '--exit-code',
+        '--from-schema-datasource',
+        schemaPath,
+        '--to-schema-datamodel',
+        schemaPath,
+      ]);
+    }
 
     const latestMigration = audit.migrations.at(-1);
     console.log(
@@ -351,6 +471,8 @@ async function main() {
           migrations: {
             local: localMigrations.length,
             applied: audit.migrations.length,
+            pending: pendingMigrations.length,
+            pendingNames: pendingMigrations,
             unfinished: 0,
             rolledBack: 0,
             checksumMismatches: 0,
@@ -359,6 +481,7 @@ async function main() {
           },
           dataCounts: audit.dataCounts,
           duplicateRecoveryKeyGroups: audit.duplicateRecoveryKeys.duplicate_groups,
+          duplicatePlatformProductIdGroups: audit.duplicatePlatformProductIds.duplicate_groups,
           publicSchemaIsolation: {
             tables: audit.publicTables.length,
             rlsEnabled: audit.publicTables.length,
@@ -367,12 +490,23 @@ async function main() {
             sequencePrivilegesForAnonOrAuthenticated: 0,
             defaultPrivilegesForAnonOrAuthenticated: 0,
           },
+          schemaDiff,
+          conclusion:
+            pendingMigrations.length > 0
+              ? 'Pre-migration audit passed; pending migrations form a continuous local suffix and schema diff is deferred.'
+              : 'Staging schema audit passed.',
         },
         null,
         2,
       ),
     );
-    console.log('Staging schema audit passed.');
+    if (pendingMigrations.length > 0) {
+      console.log(
+        `Staging pre-migration audit passed with ${pendingMigrations.length} pending migration(s); schema diff deferred.`,
+      );
+    } else {
+      console.log('Staging schema audit passed.');
+    }
   } finally {
     await prisma.$disconnect();
   }

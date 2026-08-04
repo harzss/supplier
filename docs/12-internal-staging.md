@@ -49,20 +49,29 @@ node --test deploy/cloudflare/staging-gateway/worker.test.mjs
 1. 新建 `supplier-staging` 免费项目，优先选择 Singapore 区域。
 2. 保存 Project URL、新式 Publishable Key（`sb_publishable_*`）、新式 Secret Key（`sb_secret_*`）、数据库密码、Pooler URL 和 Direct URL；不要放入 Git、聊天或日志。legacy anon / service-role JWT 只用于迁移期兼容，不能作为新环境默认值。
 3. 从模板创建本地文件 `packages/db/.env.staging.local`，权限设为仅当前用户可读写。
-4. 每次先运行只读审计；脚本会检查 migration 状态、live schema diff、远端 migration checksum、失败/回滚记录和关键数据前置条件：
+4. 每次先运行只读审计。脚本会先在只读事务内检查远端 migration、checksum、失败/回滚记录、RLS/ACL 和关键数据前置条件；默认严格模式要求 0 pending，并继续执行 live schema diff：
 
 ```bash
 node --env-file=packages/db/.env.staging.local \
   packages/db/scripts/audit-staging.mjs
 ```
 
-审计通过且输出 `Database schema is up to date!`、`No difference detected.` 时，**不要再运行 `migrate deploy`**。
+如果预期存在待发布 migration，迁移前审计必须显式使用 `--allow-pending`：
+
+```bash
+node --env-file=packages/db/.env.staging.local \
+  packages/db/scripts/audit-staging.mjs --allow-pending
+```
+
+该模式只接受“远端已应用 migration 严格匹配本地前缀、pending 为连续本地尾部”；unknown、乱序、checksum 不一致、unfinished、rolled back、RLS/ACL 失配或同一店铺非空 `platform_product_id` 重复都会失败。Prisma `migrate status` 只有在精确返回同一 pending 清单时才允许退出 1；输出会列出 `pendingNames`，并将 datamodel schema diff 标为 `deferred`，不能作为 schema 已一致或 migration 已完成的证据。
+
+默认严格审计通过且输出 `Database schema is up to date!`、`No difference detected.` 时，**不要再运行 `migrate deploy`**。
 
 5. 只有出现 pending migration 时，才进入受控迁移流程：
    1. 停止 BFF、队列和全部 worker 写入，记录 Git SHA、审计输出和维护窗口。
    2. 确认 Supabase 当前套餐的快照/PITR 能力；如果不能恢复，使用 PostgreSQL 17 `pg_dump --format=custom --schema=public --no-owner --no-privileges` 创建强制 TLS 的一致性备份。
    3. 使用 `pg_restore --list` 校验归档，并先恢复到隔离 PostgreSQL 17 数据库完成恢复演练。
-   4. 为隔离库创建不入 Git 的 `packages/db/.env.restore.local`，只填写指向隔离库的 `DATABASE_URL` 和 `DIRECT_URL`，并用单引号包住完整 URL，使文件可被 Node 与 shell 安全加载。在隔离恢复库实际执行待发布 migration，再验证 migration status、schema diff、关键数据量和数据回填；只有全部通过，才允许对 staging 执行一次 `migrate deploy`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～42 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表、`source_import_tasks`、`source_import_items`、`user_source_products`、`published_product_source_bindings`、两张 `exception_*` 表和四张 `after_sale_*` 表的唯一索引、复合租户/订单外键、生命周期与事件 CHECK、RLS 及表/sequence 权限。第 42 个 migration 必须先在隔离库证明 42/42、schema diff 为空，且一单一工单、工单/子单/采购同订单及 UUID 命令唯一键均生效。
+   4. 为隔离库创建不入 Git 的 `packages/db/.env.restore.local`，只填写指向隔离库的 `DATABASE_URL` 和 `DIRECT_URL`，并用单引号包住完整 URL，使文件可被 Node 与 shell 安全加载。在隔离恢复库实际执行待发布 migration，再验证 migration status、schema diff、关键数据量和数据回填；只有全部通过，才允许对 staging 执行一次 `migrate deploy`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～43 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表、`source_import_tasks`、`source_import_items`、`user_source_products`、`published_product_source_bindings`、两张 `exception_*` 表和四张 `after_sale_*` 表的唯一索引、复合租户/订单外键、生命周期与事件 CHECK、RLS 及表/sequence 权限。隔离库必须证明 43/43、schema diff 为空，一单一工单、工单/子单/采购同订单及 UUID 命令唯一键均生效，并通过第 43 个 migration 对三个 NULL/UNKNOWN 绕过的回滚式负向探针。
 
 ```bash
 set -a
@@ -88,6 +97,12 @@ node --env-file=packages/db/.env.restore.local \
 
 psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
   -f infra/postgres/assert-public-schema-isolation.sql
+
+psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
+  -f infra/postgres/assert-workflow-check-constraints.sql
+
+psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
+  -f infra/postgres/assert-33-to-43-upgrade-data.sql
 ```
 
 角色初始化脚本是幂等的，用于模拟 Supabase 在 application migration 前已存在的 `anon` / `authenticated` 角色；它不能替代权限断言。隔离库还必须用发布前记录的表级行数和关键业务断言核对恢复结果。不要在普通 PostgreSQL 隔离库运行 `audit-staging.mjs`：该脚本刻意只接受同一个 Supabase project 的 pooler/direct host，用于防止把 staging 审计误连到其他数据库。
@@ -96,6 +111,13 @@ psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
 node --env-file=packages/db/.env.staging.local \
   packages/db/node_modules/prisma/build/index.js migrate deploy \
   --schema packages/db/prisma/schema.prisma
+
+set -a
+. packages/db/.env.staging.local
+set +a
+
+psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
+  -f infra/postgres/assert-workflow-check-constraints.sql
 
 node --env-file=packages/db/.env.staging.local \
   packages/db/scripts/audit-staging.mjs
@@ -114,7 +136,7 @@ pnpm audit:supabase-boundary
 
 完成标准：仓库 migration 全部 applied，0 unfinished、0 rolled back、checksum 全匹配，live schema diff 为空。BFF/Redis readiness 属于下一节环境 smoke，不作为数据库审计的循环前置条件。
 
-2026-08-03 审计快照：PostgreSQL 17.6，当时仓库与 staging 为 33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。当前仓库共有 42 个 migration，尚无第 34～42 个已应用的实时证据，因此当前候选发布账面为 33/42（9 个待应用）。PostgreSQL 15.18 空库 42/42、schema diff、约束、RLS/ACL 和负向断言已通过；部署新代码前仍必须重新完成本节只读审计、备份，并用 staging 真实数据完成隔离恢复/升级演练，再由单一 migration-once 应用第 34～42 个，最后复核 42/42、checksum、schema diff 与 RLS/ACL；不得写成已迁移。
+2026-08-03 的旧基线审计确认当时 staging 为 PostgreSQL 17.6、33/33 migration applied、0 unfinished、0 rolled back、checksum 全匹配且 live schema diff 为空；28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。当前候选的实时只读预检现已完成：staging 仍为 33/43，第 34～43 个是连续 pending 尾部，已应用前缀 checksum、unfinished/rolled back、RLS/ACL 与同店铺非空 `platform_product_id` 重复前置条件全部通过；因存在 pending，当前 datamodel schema diff 按规则标记 `deferred`。本次 staging 真实数据一致性备份为 150265 bytes，SHA256 `b4eb1f374c75f5aa6244568443143394628b9a252dfbad3114473ae9d2e6fc54`；归档已在隔离临时 PostgreSQL 17 数据库完成 33→43 恢复升级，43/43、schema diff 无差异、数据量为 10 条货源/0 条铺货/0 条订单/0 条采购、41/41 public 表 RLS，以及 ACL、工作流约束和升级数据断言全部通过。`supplier-assets` 上传、公开读取、删除与关闭公开注册、匿名业务表拒绝仍沿用旧候选证据。第 34～43 个尚未实际应用到 staging；下一步必须取得维护窗口授权，停止 BFF、队列和全部 worker 写入，由单一 migration-once 执行，再复核 43/43、checksum、schema diff、工作流负向约束与 RLS/ACL，随后重部署并完成 smoke。隔离演练不得写成 staging 已迁移。
 
 ## 4. 部署 Cloudflare staging gateway
 
@@ -179,7 +201,7 @@ curl -fsS http://127.0.0.1:3001/api/health/live
 curl -fsS http://127.0.0.1:3001/api/health/ready
 ```
 
-当前 Redis `supplier-staging-redis` 仅监听 `127.0.0.1:6379`，使用 `supplier-staging-redis-data` 命名卷、AOF 和 `unless-stopped`。BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、批量商品执行和批量货源采集六项开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本已前移到 `20260805030000_add_after_sale_cases`，因此第 42 个 migration 未应用时新 BFF 必须保持 503，不能绕过后接流量。
+当前 Redis `supplier-staging-redis` 仅监听 `127.0.0.1:6379`，使用 `supplier-staging-redis-data` 命名卷、AOF 和 `unless-stopped`。BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、批量商品执行和批量货源采集六项开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本已前移到 `20260805040000_harden_workflow_check_null_semantics`，因此第 43 个 migration 未应用时新 BFF 必须保持 503，不能绕过后接流量。
 
 批量货源采集不得仅因页面可见就开启。先保持 `SOURCE_IMPORT_ENABLED=false`，用两个受控 1688 买家账号对同一组 offer 分别取证标题、SKU、分销价和库存；只有确认这些字段不随账号变化，并完成方案配额、限流和曝光回传要求核验后，才在维护窗口写入 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 并开启 worker。开启后至少用两个 Supabase 测试用户分别验证任务列表、按 client request 恢复和“我的货源”互不可见；再演练 BFF 重启、Redis 不可用、停止未开始项、单个失败项重试、相同 UUID 同参恢复和异参 409。任何一项失败都应重新关闭开关，不得回退 Mock。
 
@@ -334,7 +356,7 @@ pnpm deploy:verify
 
 ## 10. 当前未关闭项
 
-截至 2026-08-04，最后一次实时环境证据采集于 2026-08-03；Supabase、Storage、Auth 服务端边界、Worker、Redis、BFF readiness、告警状态机和非空重启持久性已有旧候选真实环境证据，但 R0-03 仍未完成：
+截至 2026-08-04，R0-02 数据库实时预检、真实备份和隔离升级证据已更新；Supabase Storage、Auth 服务端边界、Worker、Redis、BFF readiness、告警状态机和非空重启持久性仍沿用 2026-08-03 的旧候选真实环境证据，R0-03 尚未完成：
 
 已部署旧候选的固定 Worker + 固定 Cloudflare Web 通过 15 项部署验证，包括 live/ready、四个生产文档路由 404、三种鉴权拒绝、OAuth、运维状态/检查/指标和 Web 200。远端已部署版本的 Web URL 为 `https://supplier-staging-web.chenjie.workers.dev`，BFF 精确 CORS/OAuth 结果地址及 Supabase Site/Redirect URL 已回填。
 
@@ -343,7 +365,7 @@ pnpm deploy:verify
 - 操作员二次确认的单请求管理员邀请脚本及安全测试已完成；尚无真实邀请邮箱完成收信、设置密码、登录、刷新、受保护 API、退出、恢复邮件回跳和旧密码失效验收。
 - Redis AOF / 命名卷与数据库队列已分别通过非空探针重启演练；探针均已清理，旧候选重启后本机与固定 Worker readiness 为 200。
 - 当前 M80 候选的全仓 `pnpm test` 14/14 个任务共 1182 项（BFF 807、Web 99）、typecheck 15/15、lint 2/2、build 9/9、Prisma validate 与 `git diff --check` 已通过，`/after-sales` 已静态生成；这些是代码门禁证据，不替代下述 migration、重部署或真实环境验收。
-- 第 36～42 个批量经营、采集、版本化货源绑定、统一异常中心与售后工单 migration，以及 `/published/batch`、`/sources`、`/exceptions`、`/after-sales` 等候选能力已有仓库代码、本地测试和空库 42/42 证据；尚未完成 staging 真实数据隔离升级演练与迁移、重部署、30 天订单历史回补、staging worker 启动、真实抖店/1688 批量验收、真实六域异常或售后工单 E2E，不能计入既有 staging 证据。
+- 第 36～43 个批量经营、采集、版本化货源绑定、统一异常中心、售后工单与状态机约束加固 migration，以及 `/published/batch`、`/sources`、`/exceptions`、`/after-sales` 等候选能力已有仓库代码、本地测试、空库 43/43 和 staging 真实数据隔离 33→43 升级证据；staging 仍为 33/43，尚未实际迁移、重部署、完成 30 天订单历史回补、启动 staging worker、执行真实抖店/1688 批量验收、真实六域异常或售后工单 E2E，不能计入已部署 staging 能力。
 - BFF / Quick Tunnel supervisor、LaunchAgent 安装器及 15 项测试已完成，Worker 更新只执行仓库锁定的 Wrangler 4.118.0；但持续后台暴露本机 BFF 并自动修改 Worker upstream 属于长期权限变更，尚未获得用户明确授权安装；当前仍是临时前台进程。Quick Tunnel 仍无 SLA。
 - Vercel Hobby 只允许非商业个人验证，不作为公司商业内测的回退方案。
 

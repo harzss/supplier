@@ -8,6 +8,7 @@ import {
   assertPublicSchemaIsolation,
   describeStagingDatasource,
   readAuditOptions,
+  summarizeMockPublishReadiness,
 } from './audit-staging.mjs';
 
 const PROJECT_REF = 'abcdefghijklmnopqrst';
@@ -176,6 +177,99 @@ test('fails the staging precondition when platform product ids are duplicated wi
     () => assertNoDuplicatePlatformProductIds(2),
     /Duplicate non-null platform_product_id groups found within a shop: 2/,
   );
+});
+
+test('marks compatible mock supplier ids as eligible for targeted backfill', () => {
+  assert.deepEqual(
+    summarizeMockPublishReadiness(
+      {
+        source_products: 10,
+        unexpected_mock_products: 0,
+        missing_mock_products: 0,
+        missing_supplier_ids: 10,
+        unexpected_supplier_ids: 0,
+        not_available: 0,
+        not_one_piece_drop: 0,
+        published_source_bindings_exist: false,
+      },
+      {
+        published_products: 0,
+        orders: 0,
+        purchase_orders: 0,
+        publish_tasks: 0,
+      },
+    ),
+    {
+      sourceProductCount: 10,
+      isExactMockProductSet: true,
+      unexpectedMockProductCount: 0,
+      missingMockProductCount: 0,
+      missingSupplierIdCount: 10,
+      unexpectedSupplierIdCount: 0,
+      notAvailableCount: 0,
+      notOnePieceDropCount: 0,
+      publishTaskCount: 0,
+      publishedSourceBindingsExist: false,
+      publishReady: false,
+      mockSupplierIdBackfillDataCompatible: true,
+      mockSupplierIdBackfillRequired: true,
+    },
+  );
+});
+
+test('reports ordinary source data without making it eligible for targeted backfill', () => {
+  const summary = summarizeMockPublishReadiness(
+    {
+      source_products: 3,
+      unexpected_mock_products: 3,
+      missing_mock_products: 10,
+      missing_supplier_ids: 1,
+      unexpected_supplier_ids: 1,
+      not_available: 2,
+      not_one_piece_drop: 1,
+      published_source_bindings_exist: true,
+    },
+    {
+      published_products: 0,
+      orders: 0,
+      purchase_orders: 0,
+      publish_tasks: 1,
+    },
+  );
+
+  assert.equal(summary.isExactMockProductSet, false);
+  assert.equal(summary.notAvailableCount, 2);
+  assert.equal(summary.publishReady, false);
+  assert.equal(summary.mockSupplierIdBackfillDataCompatible, false);
+  assert.equal(summary.mockSupplierIdBackfillRequired, false);
+});
+
+test('rejects a ten-row mock set when a duplicate masks a missing mock id', () => {
+  const summary = summarizeMockPublishReadiness(
+    {
+      source_products: 10,
+      unexpected_mock_products: 0,
+      missing_mock_products: 1,
+      missing_supplier_ids: 0,
+      unexpected_supplier_ids: 0,
+      not_available: 0,
+      not_one_piece_drop: 0,
+      published_source_bindings_exist: false,
+    },
+    {
+      published_products: 0,
+      orders: 0,
+      purchase_orders: 0,
+      publish_tasks: 0,
+    },
+  );
+
+  assert.equal(summary.sourceProductCount, 10);
+  assert.equal(summary.missingMockProductCount, 1);
+  assert.equal(summary.isExactMockProductSet, false);
+  assert.equal(summary.publishReady, true);
+  assert.equal(summary.mockSupplierIdBackfillDataCompatible, false);
+  assert.equal(summary.mockSupplierIdBackfillRequired, false);
 });
 
 test('accepts pooler URLs that identify the same Supabase project and database', () => {

@@ -3,16 +3,17 @@
  * 写入演示用的种子数据（10 个货源 + 打分 + 1 个测试用户）
  *
  * 用法：
- *   1. apps/bff/.env 或 packages/db/.env 配好 DATABASE_URL（Supabase 或本地 docker）
+ *   1. apps/bff/.env 或 packages/db/.env 配好本地 DATABASE_URL；脚本拒绝任何 Supabase/staging 目标
  *   2. pnpm db:migrate -- --name init   # 第一次先建表
  *   3. pnpm db:seed
  */
 
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const scriptPath = fileURLToPath(import.meta.url);
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = join(__dirname, '..');
 
@@ -27,17 +28,35 @@ function loadEnv(path) {
     }
   } catch {}
 }
-loadEnv(join(ROOT, 'packages/db/.env'));
-loadEnv(join(ROOT, 'apps/bff/.env'));
-loadEnv(join(ROOT, '.env'));
+export function readSeedOptions(args, environment) {
+  if (
+    environment.STAGING_PROJECT_REF !== undefined ||
+    isSupabaseDatabaseUrl(environment.DATABASE_URL)
+  ) {
+    throw new Error(
+      'Refusing to run the full seed against staging. Use packages/db/scripts/backfill-staging-mock-supplier-ids.mjs for the targeted repair.',
+    );
+  }
 
-if (!process.env.DATABASE_URL) {
-  console.error('❌ DATABASE_URL 未配置，请先填 packages/db/.env');
-  process.exit(1);
+  if (args.length > 0) {
+    throw new Error('Usage: seed.mjs');
+  }
+
+  return {};
 }
 
-const { PrismaClient } = await import(join(ROOT, 'packages/db/dist/index.js'));
-const prisma = new PrismaClient();
+export function isSupabaseDatabaseUrl(value) {
+  if (!value) return false;
+  try {
+    const hostname = new URL(value).hostname.replace(/\.$/, '');
+    return (
+      /^db\.[a-z0-9]{20}\.supabase\.co$/.test(hostname) ||
+      /^[a-z0-9-]+\.pooler\.supabase\.com$/.test(hostname)
+    );
+  } catch {
+    return false;
+  }
+}
 
 // ---- 样本数据 ----
 const PRODUCTS = [
@@ -267,7 +286,7 @@ function mockSupplierId(productId1688) {
   return `mock-supplier-${productId1688}`;
 }
 
-async function main() {
+async function seed(prisma) {
   console.log('→ Connecting...');
   await prisma.$connect();
   console.log('✓ Connected');
@@ -381,9 +400,28 @@ async function main() {
   console.log('\n✓ 完成。打开 Prisma Studio: pnpm db:studio');
 }
 
-main()
-  .catch((err) => {
+async function main() {
+  loadEnv(join(ROOT, 'packages/db/.env'));
+  loadEnv(join(ROOT, 'apps/bff/.env'));
+  loadEnv(join(ROOT, '.env'));
+
+  readSeedOptions(process.argv.slice(2), process.env);
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL 未配置，请先填 packages/db/.env');
+  }
+
+  const { PrismaClient } = await import(join(ROOT, 'packages/db/dist/index.js'));
+  const prisma = new PrismaClient();
+  try {
+    await seed(prisma);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
+  main().catch((err) => {
     console.error('❌', err.message);
-    process.exit(1);
-  })
-  .finally(() => prisma.$disconnect());
+    process.exitCode = 1;
+  });
+}

@@ -72,6 +72,7 @@ node --env-file=packages/db/.env.staging.local \
    2. 确认 Supabase 当前套餐的快照/PITR 能力；如果不能恢复，使用 PostgreSQL 17 `pg_dump --format=custom --schema=public --no-owner --no-privileges` 创建强制 TLS 的一致性备份。
    3. 使用 `pg_restore --list` 校验归档，并先恢复到隔离 PostgreSQL 17 数据库完成恢复演练。
    4. 为隔离库创建不入 Git 的 `packages/db/.env.restore.local`，只填写指向隔离库的 `DATABASE_URL` 和 `DIRECT_URL`，并用单引号包住完整 URL，使文件可被 Node 与 shell 安全加载。在隔离恢复库实际执行待发布 migration，再验证 migration status、schema diff、关键数据量和数据回填；只有全部通过，才允许对 staging 执行一次 `migrate deploy`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～43 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表、`source_import_tasks`、`source_import_items`、`user_source_products`、`published_product_source_bindings`、两张 `exception_*` 表和四张 `after_sale_*` 表的唯一索引、复合租户/订单外键、生命周期与事件 CHECK、RLS 及表/sequence 权限。隔离库必须证明 43/43、schema diff 为空，一单一工单、工单/子单/采购同订单及 UUID 命令唯一键均生效，并通过第 43 个 migration 对三个 NULL/UNKNOWN 绕过的回滚式负向探针。
+   5. 如果最终只读审计仍报告 `mockSupplierIdBackfillRequired=true`，必须在 migration 前使用专用脚本；默认模式只读检查，写模式要求显式 `--apply`、精确 project ref、33/43、最新第 33 个 migration、binding 表不存在、十个 mock 集合与现有元数据全部匹配。它只更新空白 `supplier_id` 并在同一事务回读；禁止运行通用 `scripts/seed.mjs`。
 
 ```bash
 set -a
@@ -108,6 +109,21 @@ psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
 角色初始化脚本是幂等的，用于模拟 Supabase 在 application migration 前已存在的 `anon` / `authenticated` 角色；它不能替代权限断言。隔离库还必须用发布前记录的表级行数和关键业务断言核对恢复结果。不要在普通 PostgreSQL 隔离库运行 `audit-staging.mjs`：该脚本刻意只接受同一个 Supabase project 的 pooler/direct host，用于防止把 staging 审计误连到其他数据库。
 
 ```bash
+node --env-file=packages/db/.env.staging.local \
+  packages/db/scripts/backfill-staging-mock-supplier-ids.mjs
+
+# 仅在上一步显示 pendingUpdates=10 且本次维护授权明确包含 backfill 时执行；
+# 将 YOUR_20_CHAR_PROJECT_REF 替换为控制台中的实际 Project Ref。
+node --env-file=packages/db/.env.staging.local \
+  packages/db/scripts/backfill-staging-mock-supplier-ids.mjs \
+  --apply --confirm-project=YOUR_20_CHAR_PROJECT_REF
+
+node --env-file=packages/db/.env.staging.local \
+  packages/db/scripts/backfill-staging-mock-supplier-ids.mjs
+
+node --env-file=packages/db/.env.staging.local \
+  packages/db/scripts/audit-staging.mjs --allow-pending
+
 node --env-file=packages/db/.env.staging.local \
   packages/db/node_modules/prisma/build/index.js migrate deploy \
   --schema packages/db/prisma/schema.prisma
@@ -366,6 +382,8 @@ pnpm deploy:verify
 - Redis AOF / 命名卷与数据库队列已分别通过非空探针重启演练；探针均已清理，旧候选重启后本机与固定 Worker readiness 为 200。
 - 当前 M80 候选的全仓 `pnpm test` 14/14 个任务共 1182 项（BFF 807、Web 99）、typecheck 15/15、lint 2/2、build 9/9、Prisma validate 与 `git diff --check` 已通过，`/after-sales` 已静态生成；这些是代码门禁证据，不替代下述 migration、重部署或真实环境验收。
 - 当前 M82 候选已修复 CI demo seed 缺 `supplierId` 导致的 pricing-preview 400，seed 会回读十个 mock 货源的可发布元数据；部署验证从已部署旧候选的 15 项扩为 18 项，分别执行草稿 PUT/DELETE CORS 正向和恶意 Origin 负向 OPTIONS，并禁止重定向、脱敏并释放错误响应。合并后本地 `pnpm test` 1192/1192、运维 59/59、CORS 1/1、Chromium 1/1、typecheck、lint 与 BFF build 通过；[GitHub Release gates #23](https://github.com/harzss/supplier/actions/runs/30910322944) 已在提交 `a48fb43` 上完成 verify、browser、images 三个 job 全绿；images 在临时 PostgreSQL 15/Redis 中完成当前 SHA 三镜像构建、43/43 migration/status/schema/约束断言与 18 项 production smoke。镜像未推送，staging 仍为 33/43，候选尚未迁移或重部署。
+- M83 只读审计确认现有十条货源精确为 `mock-1001`～`mock-1010`，已核对的铺货、订单、采购和发布任务计数均为 0，但十条 `supplierId` 全部缺失，当前 `publishReady=false`、`mockSupplierIdBackfillDataCompatible=true`。审计只返回聚合计数且事务第一句设为 read only；专用 backfill 还会强制 33/43、binding 表不存在和精确项目确认，因此仅可在维护窗口停写、完成最终备份且再次得到同样结果后，按明确授权定向补齐十条确定性供应商标识并立即回读。通用 seed 会覆盖货源与评分，禁止用于 staging；尚未执行 backfill。
+- 旧候选 `8ddac05` 没有与 Git SHA 绑定的 BFF 镜像或动态回滚 smoke；更重要的是，它不会维护第 34～43 个 migration 对应的版本化货源绑定、发布幂等、价格/库存与订单成本快照、异常和售后语义，不能在迁移后恢复写流量。维护失败时保持停写并前向修复；不得把旧 BFF readiness 可能返回 200 当作安全回滚证据。
 - 第 36～43 个批量经营、采集、版本化货源绑定、统一异常中心、售后工单与状态机约束加固 migration，以及 `/published/batch`、`/sources`、`/exceptions`、`/after-sales` 等候选能力已有仓库代码、本地测试、空库 43/43 和 staging 真实数据隔离 33→43 升级证据；staging 仍为 33/43，尚未实际迁移、重部署、完成 30 天订单历史回补、启动 staging worker、执行真实抖店/1688 批量验收、真实六域异常或售后工单 E2E，不能计入已部署 staging 能力。
 - BFF / Quick Tunnel supervisor、LaunchAgent 安装器及 15 项测试已完成，Worker 更新只执行仓库锁定的 Wrangler 4.118.0；但持续后台暴露本机 BFF 并自动修改 Worker upstream 属于长期权限变更，尚未获得用户明确授权安装；当前仍是临时前台进程。Quick Tunnel 仍无 SLA。
 - Vercel Hobby 只允许非商业个人验证，不作为公司商业内测的回退方案。

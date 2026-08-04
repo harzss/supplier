@@ -180,6 +180,8 @@ pnpm deploy:verify
 
 不重新运行旧版 migration，不执行 `prisma migrate reset`，不删除 `_prisma_migrations` 记录。
 
+当前 33→43 staging 窗口不满足上述“旧应用向后兼容”前提。最后一个有旧环境记录的 `8ddac05` 只要求第 33 个 migration，SQL 结构上可连接 43 schema，但不会维护第 34～43 个引入的发布请求幂等键、mutation revision、价格/库存快照、版本化货源 binding、订单冻结成本、异常和售后工单语义；第 40 个 migration 又只 backfill 迁移时已有数据。把它切回并恢复写流量会产生新语义空洞，因此不得作为可写回滚。该窗口失败时必须保持 BFF、队列和 worker 停写，保留最终备份并前向修复当前候选；只有另行证明全局只读、任务已 drain 且旧版本有不可变产物与 smoke 后，才可把旧版本用于紧急只读查看。当前没有这样的资格化证据。
+
 ## 6. 数据库变更失败与前向修复
 
 Prisma migration 按前向历史管理。已应用到任何共享环境的 migration 文件不得修改、改名或删除。

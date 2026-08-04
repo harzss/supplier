@@ -84,6 +84,41 @@ export function assertNoDuplicatePlatformProductIds(duplicateGroups) {
   }
 }
 
+export function summarizeMockPublishReadiness(sourceProducts, dataCounts) {
+  const isExactMockProductSet =
+    sourceProducts.source_products === 10 &&
+    sourceProducts.unexpected_mock_products === 0 &&
+    sourceProducts.missing_mock_products === 0;
+  const publishReady =
+    sourceProducts.missing_supplier_ids === 0 &&
+    sourceProducts.unexpected_supplier_ids === 0 &&
+    sourceProducts.not_available === 0 &&
+    sourceProducts.not_one_piece_drop === 0;
+  const mockSupplierIdBackfillDataCompatible =
+    isExactMockProductSet &&
+    !sourceProducts.published_source_bindings_exist &&
+    sourceProducts.unexpected_supplier_ids === 0 &&
+    sourceProducts.not_available === 0 &&
+    sourceProducts.not_one_piece_drop === 0;
+
+  return {
+    sourceProductCount: sourceProducts.source_products,
+    isExactMockProductSet,
+    unexpectedMockProductCount: sourceProducts.unexpected_mock_products,
+    missingMockProductCount: sourceProducts.missing_mock_products,
+    missingSupplierIdCount: sourceProducts.missing_supplier_ids,
+    unexpectedSupplierIdCount: sourceProducts.unexpected_supplier_ids,
+    notAvailableCount: sourceProducts.not_available,
+    notOnePieceDropCount: sourceProducts.not_one_piece_drop,
+    publishTaskCount: dataCounts.publish_tasks,
+    publishedSourceBindingsExist: sourceProducts.published_source_bindings_exist,
+    publishReady,
+    mockSupplierIdBackfillDataCompatible,
+    mockSupplierIdBackfillRequired:
+      mockSupplierIdBackfillDataCompatible && sourceProducts.missing_supplier_ids > 0,
+  };
+}
+
 function describeDatabaseUrl(value, name, expectedProjectRef) {
   let url;
   try {
@@ -323,7 +358,37 @@ async function main() {
           (SELECT COUNT(*)::int FROM source_products) AS source_products,
           (SELECT COUNT(*)::int FROM published_products) AS published_products,
           (SELECT COUNT(*)::int FROM orders) AS orders,
-          (SELECT COUNT(*)::int FROM purchase_orders) AS purchase_orders
+          (SELECT COUNT(*)::int FROM purchase_orders) AS purchase_orders,
+          (SELECT COUNT(*)::int FROM publish_tasks) AS publish_tasks
+      `);
+      const sourceProducts = await transaction.$queryRawUnsafe(`
+        SELECT
+          COUNT(*)::int AS source_products,
+          COUNT(*) FILTER (
+            WHERE NOT (product_id_1688 = ANY (ARRAY[
+              'mock-1001', 'mock-1002', 'mock-1003', 'mock-1004', 'mock-1005',
+              'mock-1006', 'mock-1007', 'mock-1008', 'mock-1009', 'mock-1010'
+            ]::text[]))
+          )::int AS unexpected_mock_products,
+          (10 - COUNT(DISTINCT product_id_1688) FILTER (
+            WHERE product_id_1688 = ANY (ARRAY[
+              'mock-1001', 'mock-1002', 'mock-1003', 'mock-1004', 'mock-1005',
+              'mock-1006', 'mock-1007', 'mock-1008', 'mock-1009', 'mock-1010'
+            ]::text[])
+          ))::int AS missing_mock_products,
+          COUNT(*) FILTER (WHERE supplier_id IS NULL OR BTRIM(supplier_id) = '')::int
+            AS missing_supplier_ids,
+          COUNT(*) FILTER (
+            WHERE supplier_id IS NOT NULL
+              AND BTRIM(supplier_id) <> ''
+              AND supplier_id <> 'mock-supplier-' || product_id_1688
+          )::int AS unexpected_supplier_ids,
+          COUNT(*) FILTER (WHERE availability IS DISTINCT FROM 'available')::int AS not_available,
+          COUNT(*) FILTER (WHERE is_one_piece_drop IS NOT TRUE)::int AS not_one_piece_drop
+        FROM source_products
+      `);
+      const publishedSourceBindings = await transaction.$queryRawUnsafe(`
+        SELECT to_regclass('public.published_product_source_bindings') IS NOT NULL AS table_exists
       `);
       const duplicateRecoveryKeys = await transaction.$queryRawUnsafe(`
         SELECT COUNT(*)::int AS duplicate_groups
@@ -425,6 +490,10 @@ async function main() {
         database: database[0],
         migrations,
         dataCounts: dataCounts[0],
+        sourceProducts: {
+          ...sourceProducts[0],
+          published_source_bindings_exist: publishedSourceBindings[0].table_exists,
+        },
         duplicateRecoveryKeys: duplicateRecoveryKeys[0],
         duplicatePlatformProductIds: duplicatePlatformProductIds[0],
         publicTables,
@@ -480,6 +549,10 @@ async function main() {
             latestFinishedAt: latestMigration?.finished_at ?? null,
           },
           dataCounts: audit.dataCounts,
+          mockPublishReadiness: summarizeMockPublishReadiness(
+            audit.sourceProducts,
+            audit.dataCounts,
+          ),
           duplicateRecoveryKeyGroups: audit.duplicateRecoveryKeys.duplicate_groups,
           duplicatePlatformProductIdGroups: audit.duplicatePlatformProductIds.duplicate_groups,
           publicSchemaIsolation: {

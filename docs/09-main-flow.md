@@ -5,7 +5,7 @@
 > [00-roadmap.md](./00-roadmap.md) 为唯一来源；能否上线以
 > [10-production-readiness.md](./10-production-readiness.md) 的 P0 门禁为准。
 >
-> 本文包含 M1～M82 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
+> 本文包含 M1～M83 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
 
 ## 1. 主流程定义（核心闭环）
 
@@ -59,6 +59,8 @@ flowchart LR
 **2026-08-04 当前结论**：M80 当前候选新增售后工单基础闭环，把订单同步得到的权威销售售后状态物化为可认领、有责任人和处理时限的租户工单，并关联销售子单、1688 采购、人工平台动作、外部凭证、关闭阻断项和 append-only 事件。M81 审计发现第 41/42 个 migration 的三个 nullable CHECK 可因 PostgreSQL 将 UNKNOWN 视为通过而被 NULL 绕过，已新增第 43 个前向修复，未修改既有 migration checksum；数据库静态测试 22/22，一次性 PostgreSQL 15 已完成 43/43 deploy/status、schema diff、三个回滚式负向探针、合法状态正向探针及 RLS/ACL 复核。M82 修复浏览器门禁种子缺失供应商标识的问题，并把部署验证扩展为 PUT/DELETE CORS 正向及恶意 Origin 负向探针。当前候选代码测试合计 1192/1192（BFF 807/807、DB 22/22），运维测试 59/59，隔离 Chromium 1/1，typecheck 15/15、lint 2/2、BFF build、Prettier 与 diff check 全部通过。[GitHub Release gates #23](https://github.com/harzss/supplier/actions/runs/30910322944) 已在提交 `a48fb43` 上完成 verify、browser、images 三个 job 全绿：verify 覆盖依赖审计、静态检查、全仓测试和构建，browser 覆盖全新库 migration/seed 与 Chromium E2E，images 覆盖当前 SHA 三镜像构建及临时 PostgreSQL/Redis production smoke。当前实时只读预检确认 staging 仍为 33/43，第 34～43 个构成连续 pending 尾部，已应用前缀 checksum、unfinished/rolled back、RLS/ACL 和同店铺平台商品 ID 重复前置条件均通过；存在 pending，因此当前 datamodel schema diff 按规则 deferred。staging 真实数据一致性备份为 150265 bytes，SHA256 `b4eb1f374c75f5aa6244568443143394628b9a252dfbad3114473ae9d2e6fc54`；隔离临时库已完成 33→43 恢复升级，43/43、schema diff、10/0/0/0 数据量、41/41 public 表 RLS、ACL、约束和升级数据断言全部通过。实际 staging migration、镜像发布和 staging 重部署、双租户、真实抖店/1688 售后及关闭重开 E2E 仍未执行。R0-02/R0-03 仍未关闭，只能表述为“旧候选已部署、当前候选已完成迁移前演练但尚未部署”，不能宣称 staging 已完成、可生产使用或已具备 1688 服务市场上架条件。
 
 **2026-08-04 R0-03 / M82 当前增量**：`f922b30` 起发布安全边界要求可售货源必须有非空 `supplierId`，但 CI 演示 seed 仍写入 NULL，导致 Playwright 的定价试算接口返回 400；这解释了 Release gates #19～#22 均为 verify 通过、browser 失败。seed 现为十个 mock 货源写入稳定供应商标识并在结束前回读验证 `availability / supplierId / isOnePieceDrop`，E2E 对三次 pricing-preview 都直接等待并断言 HTTP 成功，不再只表现为 UI 文案超时。部署验证从旧候选的 15 项扩为当前候选 18 项：对发布草稿的 PUT、DELETE 分别执行无写入 OPTIONS，精确校验 Origin、credentials、method 与 authorization/content-type，并用固定无效 Origin 阻断反射型 CORS；所有请求禁止重定向，状态和错误响应会释放正文但不会把正文或 Token 写入错误。BFF CORS 改为精确 Origin 回调，非法 Origin 不返回 credentialed CORS。当前本地 `pnpm test` 1192/1192、运维测试 59/59、CORS 定向 1/1、合并后 Chromium 1/1、typecheck 15/15、lint 2/2 与 BFF build 均通过；[GitHub Release gates #23](https://github.com/harzss/supplier/actions/runs/30910322944) 已在提交 `a48fb43` 上完成 verify、browser、images 三个 job 全绿；images 仅在临时 Runner 构建并验证当前 SHA 镜像，未推送镜像、未应用 staging migration，也未重部署 staging。
+
+**2026-08-04 R0-02 / M83 当前增量**：只读 staging 审计新增 mock 发布就绪汇总，不输出供应商标识或产品行值。当前实测仍为 33/43；十条货源精确等于 `mock-1001`～`mock-1010`，已核对的铺货、订单、采购和发布任务计数均为 0，但十条 `supplierId` 全部缺失，因此 `publishReady=false`、`mockSupplierIdBackfillDataCompatible=true`、`mockSupplierIdBackfillRequired=true`。维护操作改为只补这十条确定性供应商标识，专用脚本还会强制 33/43、binding 表不存在和精确项目确认；禁止在 staging 运行会覆盖货源与评分的通用 seed。该证据不代表修复、migration 或部署已经发生；数据库脚本测试计数以本候选最终门禁为准。
 
 **2026-08-04 R2-01 当前增量**：新增 `GET /api/me/activation`，只用当前租户的真实店铺、商品详情审计、利润试算审计和平台商品结果派生四步进度；Web 在所有业务页提供“连接店铺 → 选择货源 → 预览利润 → 完成铺货”的继续入口，已完成桌面与 390×844 响应式检查且无横向溢出，引导链接会定位并自动展开铺货面板。利润试算由服务端签发 30 分钟加密凭证，绑定当前用户、商品、定价策略、SKU 结构与逐 SKU 采购成本；创建任务时固化确认成本和最终售价，Worker 在任何外部发布前再次核对货源定价指纹，变化则 fail-closed，不能静默重算；已全部发布的任务优先按既有平台结果收敛，不受后来缺货或下架影响。`publish_tasks.client_request_id` 在用户内唯一，同键同参恢复原任务、同键异参 409，并提供按请求 ID 查询任务的恢复接口；客户端请求意图包含定价指纹，同一试算重试复用 UUID，成本变化后重新试算会生成新 UUID。统一风险预检由 M68 完成，服务端草稿与浏览器门禁由 M69 完成，上下文绑定的 OAuth 安全回跳由 M70 完成；真实 5 人无指导验收仍未完成，R2-01 保持进行中。
 

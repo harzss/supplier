@@ -38,6 +38,7 @@ export interface PurchaseOrder {
   failureReason?: string;
   retryCount: number;
   exceptionStatus: 'none' | 'stopped' | 'action_required' | 'resolved';
+  exceptionCode?: string;
   exceptionReason?: string;
   exceptionDetectedAt?: Date;
   exceptionResolvedAt?: Date;

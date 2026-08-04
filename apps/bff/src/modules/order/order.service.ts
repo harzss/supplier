@@ -59,6 +59,7 @@ export interface OrderView {
     carrier: string | null;
     exceptionStatus: 'none' | 'stopped' | 'action_required' | 'resolved';
     exceptionRevision: number;
+    exceptionCode: string | null;
     exceptionReason: string | null;
     exceptionDetectedAt: string | null;
     exceptionResolvedAt: string | null;
@@ -458,6 +459,7 @@ export class OrderService {
           syncRevision: { increment: 1 },
           exceptionStatus: 'none',
           exceptionRevision: { increment: 1 },
+          exceptionCode: null,
           exceptionReason: null,
           exceptionDetectedAt: null,
           exceptionResolvedAt: null,
@@ -606,6 +608,7 @@ export class OrderService {
           syncRevision: { increment: 1 },
           exceptionStatus: 'none',
           exceptionRevision: { increment: 1 },
+          exceptionCode: null,
           exceptionReason: null,
           exceptionDetectedAt: null,
           exceptionResolvedAt: null,
@@ -792,6 +795,7 @@ export class OrderService {
         carrier: purchase.carrier,
         exceptionStatus: purchase.exceptionStatus,
         exceptionRevision: purchase.exceptionRevision,
+        exceptionCode: purchase.exceptionCode,
         exceptionReason: purchase.exceptionReason,
         exceptionDetectedAt: purchase.exceptionDetectedAt?.toISOString() ?? null,
         exceptionResolvedAt: purchase.exceptionResolvedAt?.toISOString() ?? null,

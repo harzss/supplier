@@ -2,11 +2,15 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
 import type { CurrentUser } from '../entitlement/user-context.service';
+import { ExceptionCenterService } from '../exception-center/exception-center.service';
 import { PlatformAdapterFactory, isDemoShop } from '../shop/platform-adapter.factory';
 import { ShopTokenService } from '../shop/shop-token.service';
 import { estimatePurchaseCost } from './order-cost';
@@ -14,6 +18,7 @@ import { OrderService, type OrderView } from './order.service';
 import { Alibaba1688PurchaseService } from './alibaba1688-purchase.service';
 import { OrderSyncService } from './order-sync.service';
 import type { PartialRefundDispositionAction } from './dto/resolve-partial-refund.dto';
+import { PURCHASE_EXCEPTION_CODE } from './purchase-exception-code';
 
 /**
  * 自动代发：paid → 向 1688 下单 → 发货 → 回传平台物流 → shipped。
@@ -21,6 +26,8 @@ import type { PartialRefundDispositionAction } from './dto/resolve-partial-refun
  */
 @Injectable()
 export class FulfillmentService {
+  private readonly logger = new Logger(FulfillmentService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly orders: OrderService,
@@ -28,6 +35,7 @@ export class FulfillmentService {
     private readonly adapters: PlatformAdapterFactory,
     private readonly alibaba1688Purchases: Alibaba1688PurchaseService,
     private readonly orderSync: OrderSyncService,
+    @Optional() private readonly exceptionCenter?: ExceptionCenterService,
   ) {}
 
   async fulfill(user: CurrentUser, orderId: string): Promise<OrderView> {
@@ -45,6 +53,24 @@ export class FulfillmentService {
         include: { shop: true, purchaseOrders: true, publishedProduct: true },
       });
       if (!order) throw new NotFoundException('订单不存在');
+      if (order.status === 'shipped' || order.status === 'received') {
+        await Promise.all([
+          this.resolveLogisticsCase(
+            user.userId,
+            'sales_platform_logistics_callback_failed',
+            id,
+            null,
+            order.status,
+          ),
+          this.resolveLogisticsCase(
+            user.userId,
+            'sales_platform_logistics_status_unknown',
+            id,
+            null,
+            order.status,
+          ),
+        ]);
+      }
     }
 
     if (isAfterSaleBlocked(order.afterSaleStatus, order.partialRefundDisposition)) {
@@ -75,28 +101,75 @@ export class FulfillmentService {
       }
       const adapter = this.adapters.create(order.shop);
       const accessToken = await this.shopTokens.getAccessToken(order.shop.id, user.userId);
-      await adapter.shipPackages(accessToken, {
-        platformOrderId: order.platformOrderId,
-        packages: progress.packages,
-        requestId: progress.requestId,
-      });
-      const transitioned = await this.prisma.order.updateMany({
-        where: {
-          id,
-          status: 'purchasing',
-          OR: [
-            { afterSaleStatus: { in: ['none', 'failed'] } },
-            {
-              afterSaleStatus: 'partial_refund',
-              partialRefundDisposition: 'continue_remaining',
-            },
-          ],
-        },
-        data: { status: 'shipped' },
-      });
-      if (transitioned.count === 0) {
-        await this.orderSync.refreshOrder(user, orderId);
+      try {
+        await adapter.shipPackages(accessToken, {
+          platformOrderId: order.platformOrderId,
+          packages: progress.packages,
+          requestId: progress.requestId,
+        });
+      } catch (error) {
+        await this.recordLogisticsCase({
+          userId: user.userId,
+          code: 'sales_platform_logistics_callback_failed',
+          orderId: id,
+          platformOrderId: order.platformOrderId,
+          requestId: progress.requestId,
+          reason: publicFulfillmentError(error, '销售平台拒绝了物流回传请求。'),
+          packageCount: progress.packages.length,
+        });
+        throw error;
       }
+
+      try {
+        await this.orderSync.refreshOrder(user, orderId);
+      } catch (error) {
+        await this.recordLogisticsCase({
+          userId: user.userId,
+          code: 'sales_platform_logistics_status_unknown',
+          orderId: id,
+          platformOrderId: order.platformOrderId,
+          requestId: progress.requestId,
+          reason: publicFulfillmentError(error, '物流已提交，但销售平台状态回读失败。'),
+          packageCount: progress.packages.length,
+        });
+        throw new ServiceUnavailableException(
+          '物流已提交，但平台状态暂时无法确认；请先核验订单状态，系统不会盲目重复发货',
+        );
+      }
+
+      const verified = await this.prisma.order.findUnique({
+        where: { id },
+        select: { status: true },
+      });
+      if (!verified || !['shipped', 'received'].includes(verified.status)) {
+        await this.recordLogisticsCase({
+          userId: user.userId,
+          code: 'sales_platform_logistics_status_unknown',
+          orderId: id,
+          platformOrderId: order.platformOrderId,
+          requestId: progress.requestId,
+          reason: `物流已提交，但平台回读状态为 ${verified?.status ?? 'unknown'}。`,
+          packageCount: progress.packages.length,
+        });
+        return this.orders.getOne(user, orderId);
+      }
+
+      await Promise.all([
+        this.resolveLogisticsCase(
+          user.userId,
+          'sales_platform_logistics_callback_failed',
+          id,
+          progress.requestId,
+          verified.status,
+        ),
+        this.resolveLogisticsCase(
+          user.userId,
+          'sales_platform_logistics_status_unknown',
+          id,
+          progress.requestId,
+          verified.status,
+        ),
+      ]);
       return this.orders.getOne(user, orderId);
     }
 
@@ -223,6 +296,7 @@ export class FulfillmentService {
           },
           data: {
             exceptionStatus: 'stopped',
+            exceptionCode: PURCHASE_EXCEPTION_CODE.salesOrderPartialRefund,
             exceptionReason: '运营已确认部分退款后停止整单自动履约。',
             exceptionDetectedAt: decidedAt,
           },
@@ -260,6 +334,75 @@ export class FulfillmentService {
     if (!order) throw new NotFoundException('订单不存在');
     return order;
   }
+
+  private async recordLogisticsCase(input: {
+    userId: bigint;
+    code: 'sales_platform_logistics_callback_failed' | 'sales_platform_logistics_status_unknown';
+    orderId: bigint;
+    platformOrderId: string;
+    requestId: string;
+    reason: string;
+    packageCount: number;
+  }): Promise<void> {
+    if (!this.exceptionCenter) return;
+    try {
+      await this.exceptionCenter.recordProducerCase({
+        userId: input.userId,
+        code: input.code,
+        sourceType: 'order',
+        sourceId: input.orderId,
+        sourceFingerprint: fulfillmentFingerprint(input.requestId, input.reason),
+        subjectLabel: `销售订单 ${input.platformOrderId}`,
+        reason: input.reason,
+        context: {
+          orderId: input.orderId.toString(),
+          platformOrderId: input.platformOrderId,
+          requestId: input.requestId,
+          packageCount: input.packageCount,
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `物流异常写入统一异常中心失败：${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    }
+  }
+
+  private async resolveLogisticsCase(
+    userId: bigint,
+    code: 'sales_platform_logistics_callback_failed' | 'sales_platform_logistics_status_unknown',
+    orderId: bigint,
+    requestId: string | null,
+    platformStatus: string,
+  ): Promise<void> {
+    if (!this.exceptionCenter) return;
+    try {
+      await this.exceptionCenter.resolveProducerCase({
+        userId,
+        code,
+        sourceType: 'order',
+        sourceId: orderId,
+        evidence: {
+          ...(requestId ? { requestId } : {}),
+          platformStatus,
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `物流异常关闭记录写入失败：${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    }
+  }
+}
+
+function fulfillmentFingerprint(requestId: string, reason: string): string {
+  return createHash('sha256').update(`${requestId}\n${reason}`).digest('hex');
+}
+
+function publicFulfillmentError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const message = error.message.trim();
+  return message ? message.slice(0, 500) : fallback;
 }
 
 function isAfterSaleBlocked(status: string | undefined, disposition?: string): boolean {

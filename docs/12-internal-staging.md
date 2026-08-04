@@ -114,7 +114,7 @@ pnpm audit:supabase-boundary
 
 完成标准：仓库 migration 全部 applied，0 unfinished、0 rolled back、checksum 全匹配，live schema diff 为空。BFF/Redis readiness 属于下一节环境 smoke，不作为数据库审计的循环前置条件。
 
-2026-08-03 审计快照：PostgreSQL 17.6，当时仓库与 staging 为 33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。当前仓库共有 40 个 migration，尚无第 34～40 个已应用的实时证据，因此当前候选发布账面为 33/40（7 个待应用）。部署新代码前必须重新完成本节只读审计、备份和隔离预检，由单一 migration-once 一次应用第 34～40 个，再完成 40/40、checksum、schema diff、RLS/ACL 审计；不得写成已迁移。
+2026-08-03 审计快照：PostgreSQL 17.6，当时仓库与 staging 为 33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。当前仓库共有 41 个 migration，尚无第 34～41 个已应用的实时证据，因此当前候选发布账面为 33/41（8 个待应用）。部署新代码前必须重新完成本节只读审计、备份和隔离预检，由单一 migration-once 一次应用第 34～41 个，再完成 41/41、checksum、schema diff、RLS/ACL 审计；不得写成已迁移。
 
 ## 4. 部署 Cloudflare staging gateway
 
@@ -150,6 +150,9 @@ docker run -d \
 ```env
 DOUYIN_ORDER_SYNC_ENABLED=false
 DOUYIN_ORDER_SYNC_HISTORY_VERIFIED_AT=
+EXCEPTION_CENTER_SCAN_ENABLED=false
+EXCEPTION_CENTER_SCAN_INTERVAL_MS=300000
+EXCEPTION_CENTER_SCAN_BATCH_SIZE=50
 INVENTORY_SYNC_ENABLED=false
 ALIBABA_1688_PURCHASE_ENABLED=false
 ALIBABA_1688_PURCHASE_AUDIT_ENABLED=false
@@ -176,7 +179,7 @@ curl -fsS http://127.0.0.1:3001/api/health/live
 curl -fsS http://127.0.0.1:3001/api/health/ready
 ```
 
-当前 Redis `supplier-staging-redis` 仅监听 `127.0.0.1:6379`，使用 `supplier-staging-redis-data` 命名卷、AOF 和 `unless-stopped`。BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、批量商品执行和批量货源采集六项开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本已前移到 `20260805010000_add_published_source_bindings`，因此第 40 个 migration 未应用时新 BFF 必须保持 503，不能绕过后接流量。
+当前 Redis `supplier-staging-redis` 仅监听 `127.0.0.1:6379`，使用 `supplier-staging-redis-data` 命名卷、AOF 和 `unless-stopped`。BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、批量商品执行和批量货源采集六项开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本已前移到 `20260805020000_add_exception_center`，因此第 41 个 migration 未应用时新 BFF 必须保持 503，不能绕过后接流量。
 
 批量货源采集不得仅因页面可见就开启。先保持 `SOURCE_IMPORT_ENABLED=false`，用两个受控 1688 买家账号对同一组 offer 分别取证标题、SKU、分销价和库存；只有确认这些字段不随账号变化，并完成方案配额、限流和曝光回传要求核验后，才在维护窗口写入 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 并开启 worker。开启后至少用两个 Supabase 测试用户分别验证任务列表、按 client request 恢复和“我的货源”互不可见；再演练 BFF 重启、Redis 不可用、停止未开始项、单个失败项重试、相同 UUID 同参恢复和异参 409。任何一项失败都应重新关闭开关，不得回退 Mock。
 
@@ -306,7 +309,9 @@ pnpm deploy:verify
 
 验证器按顺序执行，避免 Supabase Free 单连接环境因测试自身的并发请求产生假 503；30 秒只是 staging 的单请求上限，不能替代延迟监控或正式 SLA。
 
-再按登录、选品、筛选、收藏、AI 文案、类目/SKU、铺货记录、批量经营、订单和经营看板顺序人工验证。批量经营当前验收 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory`、`cleanup` 与抖店离线 `change_source`。`change_source` 只切换版本化采购绑定，必须保持平台 SKU、售价和离线状态不变；任意平台 SKU 编辑仍是未来能力，不能把换源或数据库 enum 写成已支持平台 SKU 编辑。
+再按登录、选品、筛选、收藏、AI 文案、类目/SKU、铺货记录、批量经营、订单、统一异常中心和经营看板顺序人工验证。批量经营当前验收 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory`、`cleanup` 与抖店离线 `change_source`。`change_source` 只切换版本化采购绑定，必须保持平台 SKU、售价和离线状态不变；任意平台 SKU 编辑仍是未来能力，不能把换源或数据库 enum 写成已支持平台 SKU 编辑。
+
+异常中心先保持 `EXCEPTION_CENTER_SCAN_ENABLED=false`，用两个 Supabase 测试用户验证列表、计数、详情和确认记录完全隔离，再分别准备可清理的发布、订单同步、采购、物流、售后和权益异常。订单域必须覆盖从未同步、水位陈旧、首次同步挂起、授权过期和启用店铺凭证缺失；用户主动停用的 `revoked` 店铺不得重新产生 critical 异常，刚授权或近期首次同步中的店铺也不得提前告警。确认一次六域刷新只关闭权威条件已经消失的 scanner 事项；人为让某一域查询失败时，该域旧事项必须保留。对一条事项写入跟进说明后状态只能变为 `acknowledged`，不能同时关闭；改变来源指纹后必须重新变为 `open`。物流回传失败或成功后平台回读未知必须生成 producer 事项，只有后续回读确认平台已发货才能关闭。所有处理入口只能落在 `/orders`、`/published`、`/settings` 或 `/sources` 站内路径。样本通过后在维护窗口开启 worker，确认账号批次轮转有界、单账号失败不阻断后续账号且同一实例不重入；生产运行不得继续依赖人工刷新。
 
 首次批量 worker 验收分两阶段：
 
@@ -335,7 +340,7 @@ pnpm deploy:verify
 - 已增加新旧 Key 请求头兼容、强制新 Secret 的 Auth/Storage 轮换 smoke、固定私有 Web 配置的边界/会话验证，以及旧密码失效检查；这些仍是代码证据，尚未创建新 Key、重新部署 Web/BFF 或停用 legacy Key。
 - 操作员二次确认的单请求管理员邀请脚本及安全测试已完成；尚无真实邀请邮箱完成收信、设置密码、登录、刷新、受保护 API、退出、恢复邮件回跳和旧密码失效验收。
 - Redis AOF / 命名卷与数据库队列已分别通过非空探针重启演练；探针均已清理，旧候选重启后本机与固定 Worker readiness 为 200。
-- 第 36～38 个批量商品/价格与库存快照 migration、`PRODUCT_BATCH_*` 配置和 `/published/batch` 的上架/下架/改标题/改价/库存同步/滞销安全下架能力已有仓库候选代码及本地测试证据；尚未迁移、重部署、完成 30 天订单历史回补、启动 staging worker 或执行真实抖店批量验收，不能计入既有 staging 证据。
+- 第 36～41 个批量经营、采集、版本化货源绑定与统一异常中心 migration，以及 `/published/batch`、`/sources`、`/exceptions` 等候选能力已有仓库代码和本地测试证据；尚未迁移、重部署、完成 30 天订单历史回补、启动 staging worker、执行真实抖店/1688 批量验收或验证真实六域异常，不能计入既有 staging 证据。
 - BFF / Quick Tunnel supervisor、LaunchAgent 安装器及 15 项测试已完成，Worker 更新只执行仓库锁定的 Wrangler 4.118.0；但持续后台暴露本机 BFF 并自动修改 Worker upstream 属于长期权限变更，尚未获得用户明确授权安装；当前仍是临时前台进程。Quick Tunnel 仍无 SLA。
 - Vercel Hobby 只允许非商业个人验证，不作为公司商业内测的回退方案。
 

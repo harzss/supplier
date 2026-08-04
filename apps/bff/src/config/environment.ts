@@ -134,6 +134,20 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
     500,
     'ALIBABA_1688_PURCHASE_AUDIT_BATCH_SIZE',
   );
+  environment.EXCEPTION_CENTER_SCAN_INTERVAL_MS = integer(
+    environment.EXCEPTION_CENTER_SCAN_INTERVAL_MS,
+    300_000,
+    60_000,
+    3_600_000,
+    'EXCEPTION_CENTER_SCAN_INTERVAL_MS',
+  );
+  environment.EXCEPTION_CENTER_SCAN_BATCH_SIZE = integer(
+    environment.EXCEPTION_CENTER_SCAN_BATCH_SIZE,
+    50,
+    1,
+    500,
+    'EXCEPTION_CENTER_SCAN_BATCH_SIZE',
+  );
   environment.INVENTORY_SYNC_POLL_MS = integer(
     environment.INVENTORY_SYNC_POLL_MS,
     5_000,
@@ -177,6 +191,13 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
     'SOURCE_IMPORT_MAX_ATTEMPTS',
   );
   validateOptionalBoolean(environment.SWAGGER_ENABLED, 'SWAGGER_ENABLED');
+  validateOptionalBoolean(
+    environment.EXCEPTION_CENTER_SCAN_ENABLED,
+    'EXCEPTION_CENTER_SCAN_ENABLED',
+  );
+  if (typeof environment.EXCEPTION_CENTER_SCAN_ENABLED === 'boolean') {
+    environment.EXCEPTION_CENTER_SCAN_ENABLED = String(environment.EXCEPTION_CENTER_SCAN_ENABLED);
+  }
   validateOptionalBoolean(environment.DOUYIN_ORDER_SYNC_ENABLED, 'DOUYIN_ORDER_SYNC_ENABLED');
   if (typeof environment.DOUYIN_ORDER_SYNC_ENABLED === 'boolean') {
     environment.DOUYIN_ORDER_SYNC_ENABLED = String(environment.DOUYIN_ORDER_SYNC_ENABLED);

@@ -96,7 +96,14 @@ describe('FulfillmentService token usage', () => {
           publishedProduct: { costPrice: 18.9 },
           skuInfo: { quantity: 1 },
         }),
-        findUnique: vi.fn().mockResolvedValue({ status: 'purchasing' }),
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce({
+            status: 'purchasing',
+            afterSaleStatus: 'none',
+            partialRefundDisposition: 'none',
+          })
+          .mockResolvedValueOnce({ status: 'shipped' }),
         update: orderUpdate,
       },
       purchaseOrder: { upsert: purchaseUpsert, update: purchaseUpdate },
@@ -142,7 +149,14 @@ describe('FulfillmentService token usage', () => {
           publishedProduct: { costPrice: 18.9 },
           skuInfo: { quantity: 1 },
         }),
-        findUnique: vi.fn().mockResolvedValue({ status: 'purchasing' }),
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce({
+            status: 'purchasing',
+            afterSaleStatus: 'none',
+            partialRefundDisposition: 'none',
+          })
+          .mockResolvedValueOnce({ status: 'shipped' }),
         updateMany: orderUpdateMany,
       },
       purchaseOrder: {
@@ -198,12 +212,20 @@ describe('FulfillmentService token usage', () => {
           publishedProduct: { costPrice: 18.9 },
           skuInfo: { quantity: 1 },
         }),
-        findUnique: vi.fn().mockResolvedValue({ status: 'purchasing' }),
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce({
+            status: 'purchasing',
+            afterSaleStatus: 'none',
+            partialRefundDisposition: 'none',
+          })
+          .mockResolvedValueOnce({ status: 'shipped' }),
         updateMany: orderUpdateMany,
       },
       purchaseOrder: { upsert: purchaseUpsert, update: vi.fn() },
     } as unknown as PrismaService;
     const shipPackages = vi.fn().mockResolvedValue(undefined);
+    const resolveProducerCase = vi.fn().mockResolvedValue(undefined);
     const service = new FulfillmentService(
       prisma,
       { getOne: vi.fn().mockResolvedValue({ status: 'shipped' }) } as unknown as OrderService,
@@ -222,6 +244,7 @@ describe('FulfillmentService token usage', () => {
         }),
       } as never,
       { refreshOrder: vi.fn() } as never,
+      { recordProducerCase: vi.fn(), resolveProducerCase } as never,
     );
 
     await service.fulfill(USER, '5');
@@ -238,24 +261,20 @@ describe('FulfillmentService token usage', () => {
         },
       ],
     });
-    expect(orderUpdateMany).toHaveBeenCalledWith({
-      where: {
-        id: 5n,
-        status: 'purchasing',
-        OR: [
-          { afterSaleStatus: { in: ['none', 'failed'] } },
-          {
-            afterSaleStatus: 'partial_refund',
-            partialRefundDisposition: 'continue_remaining',
-          },
-        ],
-      },
-      data: { status: 'shipped' },
-    });
+    expect(orderUpdateMany).not.toHaveBeenCalled();
+    expect(resolveProducerCase).toHaveBeenCalledTimes(2);
+    expect(resolveProducerCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 1n,
+        code: 'sales_platform_logistics_status_unknown',
+        sourceType: 'order',
+        sourceId: 5n,
+        evidence: { requestId: 'request-1', platformStatus: 'shipped' },
+      }),
+    );
   });
 
-  it('does not overwrite a refund that wins after the platform logistics callback', async () => {
-    const orderUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+  it('records a durable case when the sales-platform logistics callback fails', async () => {
     const prisma = {
       order: {
         findFirst: vi.fn().mockResolvedValue({
@@ -277,6 +296,194 @@ describe('FulfillmentService token usage', () => {
           afterSaleStatus: 'none',
           partialRefundDisposition: 'none',
         }),
+      },
+    } as unknown as PrismaService;
+    const callbackError = new ServiceUnavailableException('平台暂时不可用');
+    const shipPackages = vi.fn().mockRejectedValue(callbackError);
+    const recordProducerCase = vi.fn().mockResolvedValue(undefined);
+    const service = new FulfillmentService(
+      prisma,
+      { getOne: vi.fn() } as unknown as OrderService,
+      { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
+      { create: vi.fn().mockReturnValue({ shipPackages }) } as unknown as PlatformAdapterFactory,
+      {
+        advance: vi.fn().mockResolvedValue({
+          requestId: 'request-1',
+          packages: [
+            {
+              trackingNo: 'SF123',
+              carrier: '顺丰速运',
+              items: [{ platformOrderItemId: 'sku-order-1', quantity: 1 }],
+            },
+          ],
+        }),
+      } as never,
+      { refreshOrder: vi.fn().mockResolvedValue(undefined) } as never,
+      { recordProducerCase, resolveProducerCase: vi.fn() } as never,
+    );
+
+    await expect(service.fulfill(USER, '5')).rejects.toBe(callbackError);
+
+    expect(recordProducerCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 1n,
+        code: 'sales_platform_logistics_callback_failed',
+        sourceType: 'order',
+        sourceId: 5n,
+        subjectLabel: '销售订单 order-1',
+        reason: '平台暂时不可用',
+      }),
+    );
+    expect(recordProducerCase.mock.calls[0]?.[0].sourceFingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('closes logistics cases when the next authoritative readback proves shipment succeeded', async () => {
+    const baseOrder = {
+      id: 5n,
+      status: 'purchasing',
+      afterSaleStatus: 'none',
+      partialRefundDisposition: 'none',
+      platformOrderId: 'order-1',
+      shop: {
+        id: 9n,
+        platform: 'douyin',
+        platformShopId: '4463798',
+        accessTokenEnc: 'encrypted-token',
+      },
+      purchaseOrders: [],
+      publishedProduct: { costPrice: 18.9 },
+      skuInfo: { quantity: 1 },
+    };
+    const prisma = {
+      order: {
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce(baseOrder)
+          .mockResolvedValueOnce({ ...baseOrder, status: 'shipped' }),
+      },
+    } as unknown as PrismaService;
+    const advance = vi.fn();
+    const resolveProducerCase = vi.fn().mockResolvedValue(undefined);
+    const refreshOrder = vi.fn().mockResolvedValue(undefined);
+    const service = new FulfillmentService(
+      prisma,
+      { getOne: vi.fn().mockResolvedValue({ status: 'shipped' }) } as unknown as OrderService,
+      {} as ShopTokenService,
+      { create: vi.fn() } as unknown as PlatformAdapterFactory,
+      { advance } as never,
+      { refreshOrder } as never,
+      { recordProducerCase: vi.fn(), resolveProducerCase } as never,
+    );
+
+    await expect(service.fulfill(USER, '5')).resolves.toMatchObject({ status: 'shipped' });
+
+    expect(refreshOrder).toHaveBeenCalledTimes(1);
+    expect(advance).not.toHaveBeenCalled();
+    expect(resolveProducerCase).toHaveBeenCalledTimes(2);
+    expect(resolveProducerCase).toHaveBeenCalledWith({
+      userId: 1n,
+      code: 'sales_platform_logistics_callback_failed',
+      sourceType: 'order',
+      sourceId: 5n,
+      evidence: { platformStatus: 'shipped' },
+    });
+    expect(resolveProducerCase).toHaveBeenCalledWith({
+      userId: 1n,
+      code: 'sales_platform_logistics_status_unknown',
+      sourceType: 'order',
+      sourceId: 5n,
+      evidence: { platformStatus: 'shipped' },
+    });
+  });
+
+  it('keeps fulfillment unresolved when platform readback fails after the callback', async () => {
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 5n,
+          status: 'purchasing',
+          platformOrderId: 'order-1',
+          shop: {
+            id: 9n,
+            platform: 'douyin',
+            platformShopId: '4463798',
+            accessTokenEnc: 'encrypted-token',
+          },
+          purchaseOrders: [],
+          publishedProduct: { costPrice: 18.9 },
+          skuInfo: { quantity: 1 },
+        }),
+        findUnique: vi.fn().mockResolvedValue({
+          status: 'purchasing',
+          afterSaleStatus: 'none',
+          partialRefundDisposition: 'none',
+        }),
+      },
+    } as unknown as PrismaService;
+    const refreshOrder = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new ServiceUnavailableException('平台回读超时'));
+    const recordProducerCase = vi.fn().mockResolvedValue(undefined);
+    const service = new FulfillmentService(
+      prisma,
+      { getOne: vi.fn() } as unknown as OrderService,
+      { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
+      {
+        create: vi.fn().mockReturnValue({ shipPackages: vi.fn().mockResolvedValue(undefined) }),
+      } as unknown as PlatformAdapterFactory,
+      {
+        advance: vi.fn().mockResolvedValue({
+          requestId: 'request-1',
+          packages: [
+            {
+              trackingNo: 'SF123',
+              carrier: '顺丰速运',
+              items: [{ platformOrderItemId: 'sku-order-1', quantity: 1 }],
+            },
+          ],
+        }),
+      } as never,
+      { refreshOrder } as never,
+      { recordProducerCase, resolveProducerCase: vi.fn() } as never,
+    );
+
+    await expect(service.fulfill(USER, '5')).rejects.toThrow('物流已提交，但平台状态暂时无法确认');
+    expect(recordProducerCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'sales_platform_logistics_status_unknown',
+        reason: '平台回读超时',
+      }),
+    );
+  });
+
+  it('does not overwrite a refund that wins after the platform logistics callback', async () => {
+    const orderUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 5n,
+          status: 'purchasing',
+          platformOrderId: 'order-1',
+          shop: {
+            id: 9n,
+            platform: 'douyin',
+            platformShopId: '4463798',
+            accessTokenEnc: 'encrypted-token',
+          },
+          purchaseOrders: [],
+          publishedProduct: { costPrice: 18.9 },
+          skuInfo: { quantity: 1 },
+        }),
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce({
+            status: 'purchasing',
+            afterSaleStatus: 'none',
+            partialRefundDisposition: 'none',
+          })
+          .mockResolvedValueOnce({ status: 'refunded' }),
         updateMany: orderUpdateMany,
       },
     } as unknown as PrismaService;
@@ -305,7 +512,7 @@ describe('FulfillmentService token usage', () => {
     await expect(service.fulfill(USER, '5')).resolves.toMatchObject({ status: 'refunded' });
 
     expect(shipPackages).toHaveBeenCalledTimes(1);
-    expect(orderUpdateMany).toHaveBeenCalledTimes(1);
+    expect(orderUpdateMany).not.toHaveBeenCalled();
     expect(refreshOrder).toHaveBeenCalledTimes(3);
   });
 

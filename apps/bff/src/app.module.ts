@@ -21,6 +21,7 @@ import { validateEnvironment } from './config/environment';
 import { ObservabilityModule } from './modules/observability/observability.module';
 import { ActivationModule } from './modules/activation/activation.module';
 import { SourceImportModule } from './modules/product/source-import.module';
+import { ExceptionCenterModule } from './modules/exception-center/exception-center.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { SourceImportModule } from './modules/product/source-import.module';
     RedisModule,
     CryptoModule,
     ObservabilityModule,
+    ExceptionCenterModule,
     HealthModule,
     EntitlementModule,
     SettingsModule,

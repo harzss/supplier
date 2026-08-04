@@ -840,6 +840,7 @@ export interface OrderPurchase {
   trackingNo: string | null;
   carrier: string | null;
   exceptionStatus: 'none' | 'stopped' | 'action_required' | 'resolved';
+  exceptionCode: string | null;
   exceptionRevision: number;
   exceptionReason: string | null;
   exceptionDetectedAt: string | null;
@@ -892,6 +893,122 @@ export interface OrderListPage {
   total: number;
   page: number;
   pageSize: number;
+}
+
+export type ExceptionCaseDomain =
+  | 'publish'
+  | 'order'
+  | 'purchase'
+  | 'logistics'
+  | 'after_sale'
+  | 'entitlement';
+
+export type ExceptionCasePriority = 'critical' | 'high' | 'medium';
+export type ExceptionCaseStatus = 'open' | 'acknowledged' | 'resolved';
+export type ExceptionResponsibleParty = 'merchant' | 'supplier' | 'platform' | 'system';
+
+export interface ExceptionCaseSubject {
+  type: string;
+  id: string;
+  label: string;
+  href: string | null;
+}
+
+export interface ExceptionCaseListItem {
+  id: string;
+  domain: ExceptionCaseDomain;
+  code: string;
+  priority: ExceptionCasePriority;
+  status: ExceptionCaseStatus;
+  title: string;
+  subject: ExceptionCaseSubject;
+  impact: string;
+  reason: string;
+  nextAction: string;
+  actionLabel: string | null;
+  actionHref: string | null;
+  responsibleParty: ExceptionResponsibleParty;
+  assigneeUserId: string | null;
+  sourceActive: boolean;
+  occurrences: number;
+  stateRevision: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  resolvedAt: string | null;
+  updatedAt: string;
+}
+
+export interface ExceptionCaseEvidence {
+  type: string;
+  label: string;
+  value?: string;
+}
+
+export interface ExceptionCaseEvent {
+  id: string;
+  caseRevision: number;
+  type: string;
+  actor: {
+    type: 'system' | 'user' | 'worker';
+    userId?: string;
+  };
+  note: string | null;
+  evidence: ExceptionCaseEvidence[];
+  fromStatus: ExceptionCaseStatus | null;
+  toStatus: ExceptionCaseStatus | null;
+  fromAssigneeUserId: string | null;
+  toAssigneeUserId: string | null;
+  fromResponsibleParty: ExceptionResponsibleParty | null;
+  toResponsibleParty: ExceptionResponsibleParty | null;
+  createdAt: string;
+}
+
+export interface ExceptionCaseDetail extends ExceptionCaseListItem {
+  events: ExceptionCaseEvent[];
+}
+
+export interface ExceptionCaseQuery {
+  status?: ExceptionCaseStatus;
+  domain?: ExceptionCaseDomain;
+  priority?: ExceptionCasePriority;
+  q?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface ExceptionCasePage {
+  items: ExceptionCaseListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  counts?: Partial<Record<ExceptionCaseStatus, number>>;
+  criticalOpenCount?: number;
+}
+
+export interface ExceptionCaseRefreshDomainStats {
+  scanned?: number;
+  created?: number;
+  updated?: number;
+  reopened?: number;
+  resolved?: number;
+}
+
+export interface ExceptionCaseRefreshError {
+  domain?: ExceptionCaseDomain;
+  code?: string;
+  message: string;
+}
+
+export interface RefreshExceptionCasesResult {
+  domains: Partial<Record<ExceptionCaseDomain, ExceptionCaseRefreshDomainStats | number>>;
+  errors: Array<ExceptionCaseRefreshError | string>;
+  refreshedAt?: string;
+}
+
+export interface AcknowledgeExceptionCaseRequest {
+  expectedRevision: number;
+  clientRequestId: string;
+  note: string;
 }
 
 /** 结构化 API 错误，携带 HTTP 状态与业务错误码（如 QUOTA_EXCEEDED / BYOK_CALL_FAILED） */
@@ -1499,6 +1616,36 @@ export const api = {
       `/orders/${encodeURIComponent(orderId)}/purchases/${encodeURIComponent(purchaseOrderId)}/repair-settled-logistics`,
       { method: 'POST', body: JSON.stringify({ actualCost, expectedRevision, note }) },
     );
+  },
+
+  exceptionCases(query: ExceptionCaseQuery = {}): Promise<ExceptionCasePage> {
+    const params = new URLSearchParams({
+      page: String(query.page ?? 1),
+      pageSize: String(query.pageSize ?? 30),
+    });
+    if (query.status) params.set('status', query.status);
+    if (query.domain) params.set('domain', query.domain);
+    if (query.priority) params.set('priority', query.priority);
+    if (query.q) params.set('q', query.q);
+    return request(`/exception-cases?${params.toString()}`);
+  },
+
+  exceptionCase(caseId: string): Promise<ExceptionCaseDetail> {
+    return request(`/exception-cases/${encodeURIComponent(caseId)}`);
+  },
+
+  refreshExceptionCases(): Promise<RefreshExceptionCasesResult> {
+    return request('/exception-cases/refresh', { method: 'POST' });
+  },
+
+  acknowledgeExceptionCase(
+    caseId: string,
+    body: AcknowledgeExceptionCaseRequest,
+  ): Promise<ExceptionCaseDetail> {
+    return request(`/exception-cases/${encodeURIComponent(caseId)}/acknowledge`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
   },
 
   analyticsOverview(days: AnalyticsRangeDays): Promise<AnalyticsOverview> {

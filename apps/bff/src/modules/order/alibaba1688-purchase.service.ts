@@ -21,6 +21,7 @@ import type { CurrentUser } from '../entitlement/user-context.service';
 import { OAuthConfigService } from '../shop/oauth-config.service';
 import { ShopTokenService } from '../shop/shop-token.service';
 import { isTerminalOrderStatus, markPurchaseExceptionsForOrderEvent } from './purchase-exception';
+import { PURCHASE_EXCEPTION_CODE, type PurchaseExceptionCode } from './purchase-exception-code';
 
 const MAX_PURCHASE_RETRIES = 3;
 
@@ -621,8 +622,23 @@ export class Alibaba1688PurchaseService {
       status = mapPurchaseStatus(remote.status);
       assertPurchaseStatusTransition(claim.status, status);
     } catch (error) {
-      if (settledOrder && error instanceof PurchaseConsistencyError) {
-        await this.flagSettledPurchase(purchase.id, claim.syncRevision, error.message);
+      if (error instanceof PurchaseConsistencyError) {
+        if (settledOrder) {
+          await this.flagSettledPurchase(
+            purchase.id,
+            claim.syncRevision,
+            PURCHASE_EXCEPTION_CODE.snapshotMismatch,
+            error.message,
+          );
+        } else {
+          await this.flagActivePurchase(
+            purchase.id,
+            claim.syncRevision,
+            PURCHASE_EXCEPTION_CODE.snapshotMismatch,
+            error.message,
+          );
+          throw error;
+        }
         return;
       }
       throw error;
@@ -643,6 +659,11 @@ export class Alibaba1688PurchaseService {
           failureReason: `1688 采购单状态：${safeStatus(remote.status)}`,
           exceptionStatus: 'action_required',
           exceptionRevision: { increment: 1 },
+          exceptionCode: settledOrder
+            ? PURCHASE_EXCEPTION_CODE.remoteCancelledAfterShipment
+            : retryEligible
+              ? PURCHASE_EXCEPTION_CODE.remoteCancelledRetryable
+              : PURCHASE_EXCEPTION_CODE.remoteCancelledManual,
           exceptionReason: settledOrder
             ? '抖店订单已发货，但 1688 采购单后续进入取消或关闭状态；请核对采购成本，并在抖店和 1688 完成人工物流处置。'
             : retryEligible
@@ -660,6 +681,7 @@ export class Alibaba1688PurchaseService {
       await this.flagSettledPurchase(
         purchase.id,
         claim.syncRevision,
+        PURCHASE_EXCEPTION_CODE.costChanged,
         '抖店订单已发货，但 1688 采购金额后续发生变化；系统保留原成本，请人工核对。',
       );
       return;
@@ -683,6 +705,7 @@ export class Alibaba1688PurchaseService {
         await this.flagSettledPurchase(
           purchase.id,
           claim.syncRevision,
+          PURCHASE_EXCEPTION_CODE.logisticsSnapshotMissing,
           '抖店订单已发货，但 1688 不再返回物流快照；系统保留原包裹并停止静默更新，请人工核对。',
         );
         return;
@@ -697,8 +720,23 @@ export class Alibaba1688PurchaseService {
     try {
       mapped = mapLogisticsToItems(purchase, remote, logistics);
     } catch (error) {
-      if (settledOrder && error instanceof PurchaseConsistencyError) {
-        await this.flagSettledPurchase(purchase.id, claim.syncRevision, error.message);
+      if (error instanceof PurchaseConsistencyError) {
+        if (settledOrder) {
+          await this.flagSettledPurchase(
+            purchase.id,
+            claim.syncRevision,
+            PURCHASE_EXCEPTION_CODE.logisticsMappingMismatch,
+            error.message,
+          );
+        } else {
+          await this.flagActivePurchase(
+            purchase.id,
+            claim.syncRevision,
+            PURCHASE_EXCEPTION_CODE.logisticsMappingMismatch,
+            error.message,
+          );
+          throw error;
+        }
         return;
       }
       throw error;
@@ -707,6 +745,7 @@ export class Alibaba1688PurchaseService {
       await this.flagSettledPurchase(
         purchase.id,
         claim.syncRevision,
+        PURCHASE_EXCEPTION_CODE.logisticsRoutingChanged,
         '抖店订单已发货，但 1688 运单、承运商或商品包裹映射已变化；系统保留原快照，请人工同步两端物流。',
       );
       return;
@@ -780,6 +819,7 @@ export class Alibaba1688PurchaseService {
   private async flagSettledPurchase(
     purchaseOrderId: bigint,
     syncRevision: number,
+    code: PurchaseExceptionCode,
     reason: string,
   ): Promise<void> {
     await this.prisma.purchaseOrder.updateMany({
@@ -794,6 +834,33 @@ export class Alibaba1688PurchaseService {
         retryEligible: false,
         exceptionStatus: 'action_required',
         exceptionRevision: { increment: 1 },
+        exceptionCode: code,
+        exceptionReason: reason,
+        exceptionDetectedAt: new Date(),
+        exceptionResolvedAt: null,
+        exceptionResolutionNote: null,
+        reconciledCost: null,
+      },
+    });
+  }
+
+  private async flagActivePurchase(
+    purchaseOrderId: bigint,
+    syncRevision: number,
+    code: PurchaseExceptionCode,
+    reason: string,
+  ): Promise<void> {
+    await this.prisma.purchaseOrder.updateMany({
+      where: {
+        id: purchaseOrderId,
+        syncRevision,
+        exceptionStatus: { in: ['none', 'resolved'] },
+      },
+      data: {
+        retryEligible: false,
+        exceptionStatus: 'action_required',
+        exceptionRevision: { increment: 1 },
+        exceptionCode: code,
         exceptionReason: reason,
         exceptionDetectedAt: new Date(),
         exceptionResolvedAt: null,

@@ -60,6 +60,9 @@ model User {
   auditLogs                     AuditLog[]
   purchaseRecoveries            PurchaseOrderRecovery[]
   orderLogisticsRepairs         OrderLogisticsRepair[]
+  exceptionCases                ExceptionCase[]                       @relation("ExceptionCaseOwner")
+  acknowledgedExceptionCases    ExceptionCase[]                       @relation("ExceptionCaseAcknowledgedBy")
+  exceptionCaseEvents           ExceptionCaseEvent[]                  @relation("ExceptionCaseEventActor")
 
   @@index([plan])
   @@map("users")
@@ -832,6 +835,7 @@ model PurchaseOrder {
   settledAuditNextAt      DateTime?               @map("settled_audit_next_at")
   exceptionStatus         PurchaseExceptionStatus @default(none) @map("exception_status")
   exceptionRevision       Int                     @default(0) @map("exception_revision")
+  exceptionCode           String?                 @map("exception_code") @db.VarChar(64)
   exceptionReason         String?                 @map("exception_reason") @db.Text
   exceptionDetectedAt     DateTime?               @map("exception_detected_at")
   exceptionResolvedAt     DateTime?               @map("exception_resolved_at")
@@ -981,6 +985,115 @@ model PurchaseShipmentItem {
   @@unique([purchaseShipmentId, orderItemId], name: "uk_shipment_order_item")
   @@index([orderItemId])
   @@map("purchase_shipment_items")
+}
+
+// ----- 统一任务与异常中心 -----
+
+enum ExceptionDomain {
+  publish
+  order
+  purchase
+  logistics
+  after_sale
+  entitlement
+}
+
+enum ExceptionPriority {
+  critical
+  high
+  medium
+}
+
+enum ExceptionCaseStatus {
+  open
+  acknowledged
+  resolved
+}
+
+enum ExceptionSourceKind {
+  scanner
+  producer
+}
+
+enum ExceptionResponsibleParty {
+  merchant
+  system
+  platform
+  supplier
+}
+
+enum ExceptionCaseEventType {
+  opened
+  updated
+  reopened
+  acknowledged
+  resolved
+}
+
+model ExceptionCase {
+  id                   BigInt                    @id @default(autoincrement())
+  userId               BigInt                    @map("user_id")
+  dedupeKey            String                    @map("dedupe_key") @db.VarChar(160)
+  domain               ExceptionDomain
+  code                 String                    @db.VarChar(64)
+  priority             ExceptionPriority
+  status               ExceptionCaseStatus       @default(open)
+  sourceKind           ExceptionSourceKind       @map("source_kind")
+  sourceActive         Boolean                   @default(true) @map("source_active")
+  sourceFingerprint    String                    @map("source_fingerprint") @db.VarChar(64)
+  subjectType          String                    @map("subject_type") @db.VarChar(64)
+  subjectId            String                    @map("subject_id") @db.VarChar(128)
+  subjectLabel         String                    @map("subject_label") @db.VarChar(255)
+  responsibleParty     ExceptionResponsibleParty @map("responsible_party")
+  reason               String                    @db.Text
+  impact               String                    @db.Text
+  nextAction           String                    @map("next_action") @db.Text
+  actionLabel          String                    @map("action_label") @db.VarChar(80)
+  actionHref           String                    @map("action_href") @db.VarChar(512)
+  occurrences          Int                       @default(1)
+  stateRevision        Int                       @default(1) @map("state_revision")
+  lastSeenAt           DateTime                  @default(now()) @map("last_seen_at")
+  acknowledgedAt       DateTime?                 @map("acknowledged_at")
+  acknowledgedByUserId BigInt?                   @map("acknowledged_by_user_id")
+  resolvedAt           DateTime?                 @map("resolved_at")
+  resolutionReason     String?                   @map("resolution_reason") @db.Text
+  createdAt            DateTime                  @default(now()) @map("created_at")
+  updatedAt            DateTime                  @updatedAt @map("updated_at")
+
+  user           User                 @relation("ExceptionCaseOwner", fields: [userId], references: [id], onDelete: Cascade)
+  acknowledgedBy User?                @relation("ExceptionCaseAcknowledgedBy", fields: [acknowledgedByUserId], references: [id], onDelete: SetNull)
+  events         ExceptionCaseEvent[]
+
+  @@unique([userId, dedupeKey], name: "uk_exception_case_user_dedupe", map: "uk_exception_case_user_dedupe")
+  @@unique([id, userId], name: "uk_exception_case_id_user", map: "uk_exception_case_id_user")
+  @@index([userId, status, priority, updatedAt(sort: Desc), id(sort: Desc)], map: "exception_cases_user_status_priority_updated_idx")
+  @@index([userId, domain, status, updatedAt(sort: Desc), id(sort: Desc)], map: "exception_cases_user_domain_status_updated_idx")
+  @@index([userId, responsibleParty, status, updatedAt(sort: Desc)], map: "exception_cases_user_party_status_updated_idx")
+  @@index([sourceKind, sourceActive, domain, lastSeenAt], map: "exception_cases_source_active_seen_idx")
+  @@map("exception_cases")
+}
+
+model ExceptionCaseEvent {
+  id                BigInt                 @id @default(autoincrement())
+  userId            BigInt                 @map("user_id")
+  caseId            BigInt                 @map("case_id")
+  caseRevision      Int                    @map("case_revision")
+  type              ExceptionCaseEventType
+  clientRequestId   String?                @unique(map: "exception_case_events_client_request_key") @map("client_request_id") @db.Uuid
+  actorUserId       BigInt?                @map("actor_user_id")
+  note              String?                @db.Text
+  evidence          Json?                  @db.JsonB
+  fromStatus        ExceptionCaseStatus?   @map("from_status")
+  toStatus          ExceptionCaseStatus?   @map("to_status")
+  sourceFingerprint String?                @map("source_fingerprint") @db.VarChar(64)
+  createdAt         DateTime               @default(now()) @map("created_at")
+
+  case  ExceptionCase @relation(fields: [caseId, userId], references: [id, userId], onDelete: Cascade)
+  actor User?         @relation("ExceptionCaseEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@unique([caseId, caseRevision], name: "uk_exception_case_event_revision", map: "uk_exception_case_event_revision")
+  @@index([userId, caseId, caseRevision], map: "exception_case_events_user_case_revision_idx")
+  @@map("exception_case_events")
 }
 
 // ----- 审计与运行告警 -----

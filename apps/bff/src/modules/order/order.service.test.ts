@@ -727,6 +727,7 @@ describe('OrderService.resumePurchaseLogistics', () => {
         syncRevision: { increment: 1 },
         exceptionStatus: 'none',
         exceptionRevision: { increment: 1 },
+        exceptionCode: null,
         exceptionReason: null,
         exceptionDetectedAt: null,
         exceptionResolvedAt: null,

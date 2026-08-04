@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { href: '/sources', label: '我的货源', eyebrow: 'Source library', icon: 'source' },
   { href: '/published', label: '铺货中心', eyebrow: 'Catalog', icon: 'package' },
   { href: '/orders', label: '订单履约', eyebrow: 'Fulfillment', icon: 'orders' },
+  { href: '/exceptions', label: '异常中心', eyebrow: 'Operations', icon: 'inbox' },
   { href: '/analytics', label: '经营分析', eyebrow: 'Intelligence', icon: 'chart' },
   { href: '/favorites', label: '收藏对比', eyebrow: 'Shortlist', icon: 'bookmark' },
   { href: '/settings', label: '系统设置', eyebrow: 'Workspace', icon: 'settings' },
@@ -295,6 +296,7 @@ function NavIcon({ name }: { name: NavIconName }) {
     ),
     package: <path d="m4 7 8-4 8 4v10l-8 4-8-4V7Zm0 0 8 4m8-4-8 4m0 10V11m-4-6 8 4" />,
     orders: <path d="M6 3h12v18H6V3Zm3 5h6M9 12h6M9 16h4" />,
+    inbox: <path d="M4 4h16v13H15.5l-1.8 3h-3.4l-1.8-3H4V4Zm0 9h4.7l1.8 2.5h3L15.3 13H20" />,
     chart: <path d="M4 20V10m5 10V4m6 16v-7m5 7V7M2 20h20" />,
     bookmark: <path d="M6 4.5A2.5 2.5 0 0 1 8.5 2h7A2.5 2.5 0 0 1 18 4.5V22l-6-4-6 4V4.5Z" />,
     settings: (

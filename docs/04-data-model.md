@@ -24,6 +24,8 @@ erDiagram
     PRODUCT_BATCH_TASK ||--o{ PRODUCT_BATCH_ITEM : contains
     PUBLISHED_PRODUCT ||--o{ PRODUCT_BATCH_ITEM : targets
     ORDER ||--o| PURCHASE_ORDER : triggers
+    USER ||--o{ EXCEPTION_CASE : owns
+    EXCEPTION_CASE ||--o{ EXCEPTION_CASE_EVENT : records
     USER ||--o{ AI_USAGE : consumes
     USER ||--o{ AUDIT_LOG : acts
 
@@ -138,6 +140,29 @@ erDiagram
         string order_id_1688
         enum status
         string tracking_no
+        string exception_code
+    }
+    EXCEPTION_CASE {
+        bigint id PK
+        bigint user_id FK
+        string dedupe_key UK
+        enum domain
+        enum priority
+        enum status
+        enum source_kind
+        string source_fingerprint
+        string subject_type
+        string subject_id
+        int state_revision
+    }
+    EXCEPTION_CASE_EVENT {
+        bigint id PK
+        bigint user_id FK
+        bigint case_id FK
+        int case_revision UK
+        enum type
+        uuid client_request_id UK
+        json evidence
     }
     AI_USAGE {
         bigint id PK
@@ -257,7 +282,20 @@ erDiagram
 - `order_items.source_binding_id / source_unit_cost / source_one_piece_drop` 与已有 offer/supplier/spec 字段共同构成付款时采购快照。订单同步按 `paid_at` 唯一匹配绑定；采购必须读取订单项快照，不能读取后来可能已切换的商品当前货源。
 - 库存 worker 以当前 binding 的 revision、货源和指纹做 CAS，再把稳定平台 SKU key 映射到当前 1688 spec 库存。目标货源可以包含未发布 SKU，但所有已发布路由必须非空、唯一且存在；不得用商品总库存推导未知 spec。
 
-第 40 个 migration `20260805010000_add_published_source_bindings` 会为历史已发布商品回填 revision 1，并为已有订单项回填可用的绑定/成本/一件代发快照；新表启用 RLS，`anon` / `authenticated` 对表和 sequence 均无直接权限。该 migration 尚未应用到 staging，当前账面仍为 33/40。
+第 40 个 migration `20260805010000_add_published_source_bindings` 会为历史已发布商品回填 revision 1，并为已有订单项回填可用的绑定/成本/一件代发快照；新表启用 RLS，`anon` / `authenticated` 对表和 sequence 均无直接权限。该 migration 与后续第 41 个 migration 均尚未应用到 staging，当前账面仍为 33/41。
+
+### 3.8 统一异常中心
+
+`exception_cases` 是面向商家运营的当前异常投影，`exception_case_events` 是 append-only 生命周期记录。两者不替代 `operational_alerts`：前者保存租户内可处置的业务事项，后者继续承载数据库、队列、告警投递等平台运维信号。
+
+- `exception_cases` 以 `user_id + dedupe_key` 永久复用同一事项；`source_kind` 区分定期扫描与业务生产者直接上报。`source_fingerprint` 变化会递增 `state_revision / occurrences`、清除旧确认并重新进入 `open`，避免把新的错误沿用为旧的“已接手”。
+- 状态只有 `open / acknowledged / resolved`。`acknowledged` 只表示运营已接手，不能关闭来源；只有某一业务域成功扫描且权威条件消失，或生产者在平台回读成功后显式提交恢复证据，才能写入 `resolved`。
+- 发布、订单、采购、物流、售后和权益六域分别扫描。任一域查询失败时不对该域执行自动关闭，保留旧事项并返回该域错误；生产者事项也不会被扫描器误关。
+- `exception_case_events` 以 `case_id + case_revision` 唯一，并通过复合 `(case_id, user_id)` 外键保证租户一致。确认跟进使用全局唯一 UUID `client_request_id` 支持响应丢失后的幂等重放；case 更新与 event 写入始终处于同一 Serializable 事务。
+- `action_href` 不是外部输入：服务端只能从固定异常目录生成站内相对路径，Web 再按 `/orders`、`/published`、`/settings` 和 `/sources` 白名单校验。事件 evidence 只返回结构化展示项，生产者上下文会对 token、Cookie、密码和密钥字段脱敏。
+- `purchase_orders.exception_code` 为旧的自由文本 `exception_reason` 增加稳定分类键。第 41 个 migration 只依据销售售后状态、采购重试资格和是否曾发货等持久事实回填旧未解决记录，不解析历史自由文本。
+
+第 41 个 migration `20260805020000_add_exception_center` 新增两张异常表、枚举、复合租户外键、生命周期 CHECK、RLS 和客户端权限回收。它已在一次性 PostgreSQL 15 从空库完成 41/41、schema diff、RLS/ACL 与四类旧采购异常回填验证，但尚未应用到 staging；当前账面仍为 33/41。
 
 ## 4. 核心表 Schema（历史 MySQL 设计草案）
 

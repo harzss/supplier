@@ -50,6 +50,8 @@ describe('validateEnvironment', () => {
       PRODUCT_BATCH_MAX_ATTEMPTS: 3,
       SOURCE_IMPORT_POLL_MS: 2000,
       SOURCE_IMPORT_MAX_ATTEMPTS: 3,
+      EXCEPTION_CENTER_SCAN_INTERVAL_MS: 300000,
+      EXCEPTION_CENTER_SCAN_BATCH_SIZE: 50,
     });
   });
 
@@ -132,6 +134,21 @@ describe('validateEnvironment', () => {
     expect(() => validateEnvironment({ ALIBABA_1688_PURCHASE_AUDIT_BATCH_SIZE: 501 })).toThrow(
       'ALIBABA_1688_PURCHASE_AUDIT_BATCH_SIZE must be an integer between 1 and 500',
     );
+  });
+
+  it('requires safe and bounded exception center scan configuration', () => {
+    expect(() => validateEnvironment({ EXCEPTION_CENTER_SCAN_ENABLED: 'enabled' })).toThrow(
+      'EXCEPTION_CENTER_SCAN_ENABLED must be true or false',
+    );
+    expect(() => validateEnvironment({ EXCEPTION_CENTER_SCAN_INTERVAL_MS: 59_999 })).toThrow(
+      'EXCEPTION_CENTER_SCAN_INTERVAL_MS must be an integer between 60000 and 3600000',
+    );
+    expect(() => validateEnvironment({ EXCEPTION_CENTER_SCAN_BATCH_SIZE: 501 })).toThrow(
+      'EXCEPTION_CENTER_SCAN_BATCH_SIZE must be an integer between 1 and 500',
+    );
+    expect(validateEnvironment({ EXCEPTION_CENTER_SCAN_ENABLED: true })).toMatchObject({
+      EXCEPTION_CENTER_SCAN_ENABLED: 'true',
+    });
   });
 
   it('requires manual payment and complete 1688 credentials when production purchasing is enabled', () => {

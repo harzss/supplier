@@ -1,4 +1,5 @@
 import type { Prisma } from '@supplier/db';
+import { purchaseExceptionCodeForOrderEvent } from './purchase-exception-code';
 
 type PurchaseExceptionClient = Pick<Prisma.TransactionClient, 'purchaseOrder'>;
 export type PurchaseExceptionEvent = 'refunded' | 'closed' | 'partial_refund';
@@ -9,6 +10,7 @@ export async function markPurchaseExceptionsForOrderEvent(
   event: PurchaseExceptionEvent,
   detectedAt = new Date(),
 ): Promise<{ stopped: number; actionRequired: number }> {
+  const exceptionCode = purchaseExceptionCodeForOrderEvent(event);
   if (event === 'partial_refund') {
     const stopped = await db.purchaseOrder.updateMany({
       where: {
@@ -20,6 +22,7 @@ export async function markPurchaseExceptionsForOrderEvent(
       data: {
         exceptionStatus: 'stopped',
         exceptionRevision: { increment: 1 },
+        exceptionCode,
         exceptionReason:
           '销售订单存在部分退款，采购尚未提交到 1688，系统已停止；可在核对剩余子单后选择仅履约未退款商品。',
         exceptionDetectedAt: detectedAt,
@@ -37,6 +40,7 @@ export async function markPurchaseExceptionsForOrderEvent(
       data: {
         exceptionStatus: 'action_required',
         exceptionRevision: { increment: 1 },
+        exceptionCode,
         exceptionReason:
           '销售订单存在部分退款成功的商品，系统已暂停整单采购和物流回传；请核对未退款商品、调整或取消 1688 采购后回到系统确认。',
         exceptionDetectedAt: detectedAt,
@@ -58,6 +62,7 @@ export async function markPurchaseExceptionsForOrderEvent(
     data: {
       exceptionStatus: 'stopped',
       exceptionRevision: { increment: 1 },
+      exceptionCode,
       exceptionReason: `销售订单已${label}，采购尚未提交到 1688，系统已自动停止。`,
       exceptionDetectedAt: detectedAt,
       exceptionResolvedAt: null,
@@ -74,6 +79,7 @@ export async function markPurchaseExceptionsForOrderEvent(
     data: {
       exceptionStatus: 'action_required',
       exceptionRevision: { increment: 1 },
+      exceptionCode,
       exceptionReason: `销售订单已${label}，但 1688 采购单已创建或已推进；请停止付款或发货，并在 1688 完成取消、退款或物流拦截后回到系统确认。`,
       exceptionDetectedAt: detectedAt,
       exceptionResolvedAt: null,

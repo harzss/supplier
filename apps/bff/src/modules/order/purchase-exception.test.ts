@@ -27,6 +27,7 @@ describe('markPurchaseExceptionsForOrderEvent', () => {
         data: expect.objectContaining({
           exceptionStatus: 'stopped',
           exceptionRevision: { increment: 1 },
+          exceptionCode: 'sales_order_refunded',
           reconciledCost: null,
         }),
       }),
@@ -41,6 +42,7 @@ describe('markPurchaseExceptionsForOrderEvent', () => {
         data: expect.objectContaining({
           exceptionStatus: 'action_required',
           exceptionRevision: { increment: 1 },
+          exceptionCode: 'sales_order_refunded',
           reconciledCost: null,
         }),
       }),
@@ -68,6 +70,7 @@ describe('markPurchaseExceptionsForOrderEvent', () => {
         data: expect.objectContaining({
           exceptionStatus: 'stopped',
           exceptionRevision: { increment: 1 },
+          exceptionCode: 'sales_order_partial_refund',
           reconciledCost: null,
         }),
       }),
@@ -79,6 +82,7 @@ describe('markPurchaseExceptionsForOrderEvent', () => {
         data: expect.objectContaining({
           exceptionStatus: 'action_required',
           exceptionRevision: { increment: 1 },
+          exceptionCode: 'sales_order_partial_refund',
           reconciledCost: null,
         }),
       }),

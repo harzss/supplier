@@ -15,6 +15,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
 import { REDIS_CLIENT } from '../../common/redis.module';
+import { AfterSaleService } from '../after-sale/after-sale.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import {
   findSourceBindingRoute,
@@ -73,6 +74,7 @@ export class OrderSyncService {
     private readonly adapters: PlatformAdapterFactory,
     private readonly config: ConfigService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly afterSales: AfterSaleService,
   ) {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
   }
@@ -136,26 +138,36 @@ export class OrderSyncService {
       include: { shop: true },
     });
     if (!local) throw new NotFoundException('订单不存在或店铺授权已失效');
-    const adapter = this.adapters.create(local.shop);
-    if (!adapter.getOrder) throw new BadRequestException('当前平台暂不支持订单即时刷新');
-    const accessToken = local.shop.accessTokenEnc
-      ? await this.shopTokens.getAccessToken(local.shop.id, user.userId)
-      : 'mock-token';
-    const platformOrder = await adapter.getOrder(accessToken, local.platformOrderId);
-    if (platformOrder.platformOrderId !== local.platformOrderId) {
-      throw new ServiceUnavailableException('平台订单详情与请求订单不一致，已停止刷新并保留原状态');
+    const lock = await this.acquireSyncLock(local.shopId);
+    if (!lock) throw new ServiceUnavailableException('该店铺订单正在同步，请稍后重试');
+    try {
+      const adapter = this.adapters.create(local.shop);
+      if (!adapter.getOrder) throw new BadRequestException('当前平台暂不支持订单即时刷新');
+      const accessToken = local.shop.accessTokenEnc
+        ? await this.shopTokens.getAccessToken(local.shop.id, user.userId)
+        : 'mock-token';
+      await this.renewSyncLock(local.shopId, lock);
+      const platformOrder = await adapter.getOrder(accessToken, local.platformOrderId);
+      await this.renewSyncLock(local.shopId, lock);
+      if (platformOrder.platformOrderId !== local.platformOrderId) {
+        throw new ServiceUnavailableException(
+          '平台订单详情与请求订单不一致，已停止刷新并保留原状态',
+        );
+      }
+      await this.upsertOrders(local.shopId, [platformOrder]);
+      const refreshed = await this.prisma.order.findUnique({
+        where: { id: local.id },
+        select: { status: true, afterSaleStatus: true },
+      });
+      if (!refreshed) throw new NotFoundException('订单不存在');
+      return {
+        orderId: local.id.toString(),
+        status: refreshed.status,
+        afterSaleStatus: refreshed.afterSaleStatus,
+      };
+    } finally {
+      await this.releaseSyncLock(local.shopId, lock);
     }
-    await this.upsertOrders(local.shopId, [platformOrder]);
-    const refreshed = await this.prisma.order.findUnique({
-      where: { id: local.id },
-      select: { status: true, afterSaleStatus: true },
-    });
-    if (!refreshed) throw new NotFoundException('订单不存在');
-    return {
-      orderId: local.id.toString(),
-      status: refreshed.status,
-      afterSaleStatus: refreshed.afterSaleStatus,
-    };
   }
 
   private async pullOrders(
@@ -467,6 +479,7 @@ export class OrderSyncService {
             );
           }
         }
+        await this.afterSales.materializeOrder(tx, storedOrder.id);
         return;
       }
 
@@ -510,6 +523,7 @@ export class OrderSyncService {
           update: data,
         });
       }
+      await this.afterSales.materializeOrder(tx, storedOrder.id);
     });
   }
 

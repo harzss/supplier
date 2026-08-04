@@ -408,6 +408,9 @@ describe('OrderService.getOne', () => {
 describe('OrderService.resolvePurchaseException', () => {
   it('records the operator resolution note for the current tenant', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const transaction = vi.fn(async (operation: (tx: PrismaService) => Promise<unknown>) =>
+      operation(prisma),
+    );
     const prisma = {
       purchaseOrder: {
         findFirst: vi.fn().mockResolvedValue({
@@ -466,11 +469,15 @@ describe('OrderService.resolvePurchaseException', () => {
           ],
         }),
       },
+      $transaction: transaction,
     } as unknown as PrismaService;
+    const materializeOrder = vi.fn().mockResolvedValue(undefined);
     const service = new OrderService(
       prisma,
       new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
       authConfig(),
+      undefined,
+      { materializeOrder } as never,
     );
 
     const result = await service.resolvePurchaseException(
@@ -497,6 +504,8 @@ describe('OrderService.resolvePurchaseException', () => {
         exceptionResolutionNote: '已在 1688 取消未付款订单',
       },
     });
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(materializeOrder).toHaveBeenCalledWith(prisma, 5n, expect.any(Date));
     expect(result.fulfillmentExceptionStatus).toBe('resolved');
     expect(result.purchases[0]).toMatchObject({
       reconciledCost: 0,
@@ -567,14 +576,13 @@ describe('OrderService.retryFailedPurchase', () => {
     const attemptCreate = vi.fn().mockResolvedValue({ id: 21n });
     const shipmentDeleteMany = vi.fn().mockResolvedValue({ count: 0 });
     const orderUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
-    const transaction = vi.fn(async (callback) =>
-      callback({
-        purchaseOrder: { updateMany: purchaseUpdateMany },
-        purchaseOrderAttempt: { create: attemptCreate },
-        purchaseShipment: { deleteMany: shipmentDeleteMany },
-        order: { updateMany: orderUpdateMany },
-      }),
-    );
+    const transactionClient = {
+      purchaseOrder: { updateMany: purchaseUpdateMany },
+      purchaseOrderAttempt: { create: attemptCreate },
+      purchaseShipment: { deleteMany: shipmentDeleteMany },
+      order: { updateMany: orderUpdateMany },
+    };
+    const transaction = vi.fn(async (callback) => callback(transactionClient));
     const prisma = {
       purchaseOrder: {
         findFirst: vi.fn().mockResolvedValue({
@@ -598,10 +606,13 @@ describe('OrderService.retryFailedPurchase', () => {
       },
       $transaction: transaction,
     } as unknown as PrismaService;
+    const materializeOrder = vi.fn().mockResolvedValue(undefined);
     const service = new OrderService(
       prisma,
       new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
       authConfig(),
+      undefined,
+      { materializeOrder } as never,
     );
     vi.spyOn(service, 'getOne').mockResolvedValue({ status: 'paid' } as never);
 
@@ -655,6 +666,10 @@ describe('OrderService.retryFailedPurchase', () => {
       },
       data: { status: 'paid' },
     });
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: 'Serializable',
+    });
+    expect(materializeOrder).toHaveBeenCalledWith(transactionClient, 5n, expect.any(Date));
   });
 });
 
@@ -663,13 +678,12 @@ describe('OrderService.resumePurchaseLogistics', () => {
     const purchaseUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const recoveryCreate = vi.fn().mockResolvedValue({ id: 31n });
     const shipmentDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
-    const transaction = vi.fn(async (callback) =>
-      callback({
-        purchaseOrder: { updateMany: purchaseUpdateMany },
-        purchaseOrderRecovery: { create: recoveryCreate },
-        purchaseShipment: { deleteMany: shipmentDeleteMany },
-      }),
-    );
+    const transactionClient = {
+      purchaseOrder: { updateMany: purchaseUpdateMany },
+      purchaseOrderRecovery: { create: recoveryCreate },
+      purchaseShipment: { deleteMany: shipmentDeleteMany },
+    };
+    const transaction = vi.fn(async (callback) => callback(transactionClient));
     const prisma = {
       purchaseOrder: {
         findFirst: vi.fn().mockResolvedValue({
@@ -697,10 +711,13 @@ describe('OrderService.resumePurchaseLogistics', () => {
       },
       $transaction: transaction,
     } as unknown as PrismaService;
+    const materializeOrder = vi.fn().mockResolvedValue(undefined);
     const service = new OrderService(
       prisma,
       new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
       authConfig(),
+      undefined,
+      { materializeOrder } as never,
     );
     vi.spyOn(service, 'getOne').mockResolvedValue({ status: 'purchasing' } as never);
 
@@ -754,6 +771,10 @@ describe('OrderService.resumePurchaseLogistics', () => {
       },
     });
     expect(shipmentDeleteMany).toHaveBeenCalledWith({ where: { purchaseOrderId: 7n } });
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: 'Serializable',
+    });
+    expect(materializeOrder).toHaveBeenCalledWith(transactionClient, 5n);
   });
 });
 

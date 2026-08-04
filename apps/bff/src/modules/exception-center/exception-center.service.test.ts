@@ -4,6 +4,7 @@ import type { ExceptionCase, ExceptionCaseEvent, Prisma } from '@supplier/db';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
+import type { AfterSaleService } from '../after-sale/after-sale.service';
 import { ExceptionCenterService } from './exception-center.service';
 
 const USER_ID = 42n;
@@ -646,12 +647,75 @@ describe('ExceptionCenterService', () => {
       }),
     });
   });
+
+  it('reads every bounded after-sale signal page before reconciling the domain', async () => {
+    const exceptionSignals = vi
+      .fn()
+      .mockResolvedValueOnce({
+        items: [afterSaleSignal('7', 'after_sale_case_overdue')],
+        hasMore: true,
+        nextCursor: '500',
+      })
+      .mockResolvedValueOnce({
+        items: [afterSaleSignal('501', 'after_sale_case_blocked')],
+        hasMore: false,
+        nextCursor: null,
+      });
+    const service = createService(prismaFixture(), { exceptionSignals } as never);
+    const internals = service as unknown as {
+      scanAfterSaleCases(
+        userId: bigint,
+        now: Date,
+      ): Promise<Array<{ code: string; subjectId: string; actionHref: string }>>;
+    };
+
+    const observed = await internals.scanAfterSaleCases(USER_ID, NOW);
+
+    expect(exceptionSignals).toHaveBeenNthCalledWith(1, USER_ID, NOW, undefined);
+    expect(exceptionSignals).toHaveBeenNthCalledWith(2, USER_ID, NOW, '500');
+    expect(observed).toEqual([
+      expect.objectContaining({
+        code: 'after_sale_case_overdue',
+        subjectId: '7',
+        actionHref: '/after-sales',
+      }),
+      expect.objectContaining({
+        code: 'after_sale_case_blocked',
+        subjectId: '501',
+        actionHref: '/after-sales',
+      }),
+    ]);
+  });
 });
 
-function createService(prisma: ReturnType<typeof prismaFixture>) {
+function afterSaleSignal(
+  caseId: string,
+  code: 'after_sale_case_overdue' | 'after_sale_case_blocked',
+) {
+  return {
+    dedupeKey: `scanner:after_sale_case:${caseId}:${code}`,
+    code,
+    caseId,
+    priority: code === 'after_sale_case_overdue' ? ('critical' as const) : ('high' as const),
+    sourceFingerprint: createHash('sha256').update(`${caseId}:${code}`).digest('hex'),
+    subjectLabel: `销售订单 ${caseId}`,
+    reason: code === 'after_sale_case_overdue' ? '售后工单已超过处理时限' : '采购成本待核对',
+    nextAction: '打开售后工单处理',
+    actionHref: '/after-sales' as const,
+    overdue: code === 'after_sale_case_overdue',
+  };
+}
+
+function createService(
+  prisma: ReturnType<typeof prismaFixture>,
+  afterSales: Pick<AfterSaleService, 'exceptionSignals'> = {
+    exceptionSignals: vi.fn().mockResolvedValue({ items: [], hasMore: false, nextCursor: null }),
+  },
+) {
   return new ExceptionCenterService(
     prisma as unknown as PrismaService,
     { get: vi.fn().mockReturnValue('demo') } as unknown as ConfigService,
+    afterSales as AfterSaleService,
   );
 }
 

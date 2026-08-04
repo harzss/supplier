@@ -9,6 +9,7 @@ import type { OrderLogisticsRepair, Prisma } from '@supplier/db';
 import type { PlatformExecutionGuard, ShipPackageDto } from '@supplier/platform-sdk';
 import { createHash, randomUUID } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
+import { AfterSaleService } from '../after-sale/after-sale.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import { AlertService } from '../observability/alert.service';
 import { PlatformAdapterFactory } from '../shop/platform-adapter.factory';
@@ -22,6 +23,9 @@ import { OrderService, type OrderView } from './order.service';
 
 const STALE_REPAIR_LOCK_MS = 5 * 60_000;
 export const ORDER_LOGISTICS_REPAIR_HEARTBEAT_MS = 60_000;
+const NOOP_AFTER_SALE_MATERIALIZER = {
+  materializeOrder: async () => undefined,
+} as unknown as AfterSaleService;
 
 @Injectable()
 export class OrderLogisticsRepairService {
@@ -32,6 +36,7 @@ export class OrderLogisticsRepairService {
     private readonly adapters: PlatformAdapterFactory,
     private readonly purchases: Alibaba1688PurchaseService,
     private readonly alerts: AlertService,
+    private readonly afterSales: AfterSaleService = NOOP_AFTER_SALE_MATERIALIZER,
   ) {}
 
   async repair(
@@ -232,7 +237,7 @@ export class OrderLogisticsRepairService {
     targetShipments: SettledPurchaseShipmentTarget[],
     completedAt: Date,
   ): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
+    await this.withSerializableTransaction(async (tx) => {
       const purchase = await tx.purchaseOrder.findFirst({
         where: {
           id: repair.purchaseOrderId,
@@ -338,7 +343,14 @@ export class OrderLogisticsRepairService {
       if (completed.count !== 1) {
         throw new ConflictException('物流修复执行权已失效，请刷新后重试');
       }
+      await this.afterSales.materializeOrder(tx, repair.orderId, completedAt);
     });
+  }
+
+  private withSerializableTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return this.prisma.$transaction(operation, { isolationLevel: 'Serializable' });
   }
 }
 

@@ -7,6 +7,7 @@ import type { ShopTokenService } from '../shop/shop-token.service';
 import { CryptoService } from '../../common/crypto.module';
 import type { PrismaService } from '../../common/prisma.module';
 import type { CurrentUser } from '../entitlement/user-context.service';
+import type { AfterSaleService } from '../after-sale/after-sale.service';
 import { OrderSyncService } from './order-sync.service';
 
 const USER: CurrentUser = { userId: 1n, plan: 'pro' };
@@ -26,6 +27,10 @@ function redis(setResult: 'OK' | null = 'OK'): Redis {
     set: vi.fn().mockResolvedValue(setResult),
     eval: vi.fn().mockResolvedValue(1),
   } as unknown as Redis;
+}
+
+function afterSales(materializeOrder = vi.fn().mockResolvedValue({ change: 'ignored' })) {
+  return { materializeOrder } as unknown as AfterSaleService;
 }
 
 function sourceBindingHarness(
@@ -123,6 +128,7 @@ function sourceBindingHarness(
     } as unknown as PlatformAdapterFactory,
     runtimeConfig(),
     redis(),
+    afterSales(),
   );
   return {
     orderItemUpsert,
@@ -144,6 +150,7 @@ describe('OrderSyncService', () => {
       {} as PlatformAdapterFactory,
       runtimeConfig({ AUTH_MODE: 'supabase' }),
       redisClient,
+      afterSales(),
     );
 
     await expect(service.syncShop(1n, 9n)).rejects.toThrow('店铺不存在或授权已失效');
@@ -210,6 +217,7 @@ describe('OrderSyncService', () => {
       ),
     } as unknown as PrismaService;
     const getAccessToken = vi.fn().mockResolvedValue('plain-token');
+    const materializeOrder = vi.fn().mockResolvedValue({ change: 'created' });
     const service = new OrderSyncService(
       prisma,
       new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
@@ -219,6 +227,7 @@ describe('OrderSyncService', () => {
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(),
+      afterSales(materializeOrder),
     );
 
     await expect(service.refreshOrder(USER, '20')).resolves.toEqual({
@@ -231,6 +240,45 @@ describe('OrderSyncService', () => {
     expect(getOrder).toHaveBeenCalledWith('plain-token', 'order-1');
     expect(orderUpsert.mock.calls[0]![0].update.afterSaleStatus).toBe('pending');
     expect(orderItemUpsert.mock.calls[0]![0].create.refundStatusRaw).toBe(1);
+    expect(materializeOrder).toHaveBeenCalledWith(expect.any(Object), 20n);
+  });
+
+  it('refuses an immediate order refresh while the same shop is being synchronized', async () => {
+    const redisClient = redis(null);
+    const getOrder = vi.fn();
+    const service = new OrderSyncService(
+      {
+        order: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: 20n,
+            shopId: 9n,
+            platformOrderId: 'order-1',
+            shop: {
+              id: 9n,
+              userId: 1n,
+              platform: 'douyin',
+              platformShopId: '4463798',
+              accessTokenEnc: 'encrypted-token',
+              status: 'active',
+            },
+          }),
+        },
+      } as unknown as PrismaService,
+      new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
+      { getAccessToken: vi.fn() } as unknown as ShopTokenService,
+      {
+        create: vi.fn().mockReturnValue({ listOrders: vi.fn(), getOrder }),
+      } as unknown as PlatformAdapterFactory,
+      runtimeConfig(),
+      redisClient,
+      afterSales(),
+    );
+
+    await expect(service.refreshOrder(USER, '20')).rejects.toThrow(
+      '该店铺订单正在同步，请稍后重试',
+    );
+    expect(getOrder).not.toHaveBeenCalled();
+    expect(redisClient.eval).not.toHaveBeenCalled();
   });
 
   it('rejects a mismatched order detail before writing another platform order', async () => {
@@ -293,6 +341,7 @@ describe('OrderSyncService', () => {
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(),
+      afterSales(),
     );
 
     await expect(service.refreshOrder(USER, '20')).rejects.toThrow('平台订单详情与请求订单不一致');
@@ -367,6 +416,7 @@ describe('OrderSyncService', () => {
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(),
+      afterSales(),
     );
 
     await expect(service.refreshOrder(USER, '20')).resolves.toMatchObject({ status: 'paid' });
@@ -463,6 +513,7 @@ describe('OrderSyncService', () => {
       adapters,
       runtimeConfig(),
       redis(),
+      afterSales(),
     );
 
     const result = await service.sync(USER, '9');
@@ -682,6 +733,7 @@ describe('OrderSyncService', () => {
     const orderItemDeleteMany = vi.fn();
     const orderItemUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const shopUpdate = vi.fn().mockResolvedValue({ count: 1 });
+    const materializeOrder = vi.fn().mockResolvedValue({ change: 'updated' });
     const prisma = {
       shop: {
         findFirst: vi.fn().mockResolvedValue({
@@ -746,6 +798,7 @@ describe('OrderSyncService', () => {
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(),
+      afterSales(materializeOrder),
     );
 
     await service.sync(USER, '9');
@@ -754,6 +807,7 @@ describe('OrderSyncService', () => {
     expect(orderItemDeleteMany).not.toHaveBeenCalled();
     expect(orderItemUpsert).not.toHaveBeenCalled();
     expect(orderItemUpdateMany).toHaveBeenCalledTimes(1);
+    expect(materializeOrder).toHaveBeenCalledWith(expect.any(Object), 20n);
   });
 
   it('fails closed when platform child orders diverge from the procurement snapshot', async () => {
@@ -819,6 +873,7 @@ describe('OrderSyncService', () => {
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(),
+      afterSales(),
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow(
@@ -955,6 +1010,7 @@ describe('OrderSyncService', () => {
         } as unknown as PlatformAdapterFactory,
         runtimeConfig(),
         redis(),
+        afterSales(),
       );
 
       await service.sync(USER, '9');
@@ -1076,6 +1132,7 @@ describe('OrderSyncService', () => {
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(),
+      afterSales(),
     );
 
     await service.sync(USER, '9');
@@ -1139,6 +1196,7 @@ describe('OrderSyncService', () => {
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(),
+      afterSales(),
     );
 
     const result = await service.sync(USER, '9');
@@ -1211,6 +1269,7 @@ describe('OrderSyncService', () => {
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redisClient,
+      afterSales(),
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow('订单同步执行权已失效');
@@ -1271,6 +1330,7 @@ describe('OrderSyncService', () => {
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig({ DOUYIN_ORDER_SYNC_MAX_PAGES: 1 }),
       redis(),
+      afterSales(),
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow('订单同步超过 1 页安全上限');
@@ -1330,6 +1390,7 @@ describe('OrderSyncService', () => {
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(),
+      afterSales(),
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow(
@@ -1375,6 +1436,7 @@ describe('OrderSyncService', () => {
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
       redis(null),
+      afterSales(),
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow('该店铺订单正在同步');

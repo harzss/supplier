@@ -15,6 +15,7 @@ import type {
 } from '@supplier/db';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
+import { AfterSaleService } from '../after-sale/after-sale.service';
 import { PURCHASE_EXCEPTION_CODE, purchaseExceptionDomain } from '../order/purchase-exception-code';
 import { runtimeShopWhere } from '../shop/platform-adapter.factory';
 import type { AcknowledgeExceptionCaseDto } from './dto/acknowledge-exception-case.dto';
@@ -27,6 +28,7 @@ const ORDER_SYNC_HANG_MS = 15 * 60_000;
 const ORDER_SYNC_MIN_STALE_MS = 5 * 60_000;
 const DEFAULT_ORDER_SYNC_INTERVAL_MS = 60_000;
 const MAX_TRANSACTION_ATTEMPTS = 3;
+const MAX_AFTER_SALE_SIGNAL_PAGES = 20;
 const ACTIVE_ORDER_STATUSES = ['paid', 'purchasing', 'shipped', 'received'] as const;
 
 interface CaseCatalogEntry {
@@ -218,7 +220,7 @@ const CASE_CATALOG = {
     impact: '采购和物流动作需要等待售后状态收敛。',
     nextAction: '同步平台最新状态，并跟进售后处理结果。',
     actionLabel: '处理售后订单',
-    actionHref: '/orders',
+    actionHref: '/after-sales',
     responsibleParty: 'merchant',
   },
   partial_refund_action_required: {
@@ -228,7 +230,7 @@ const CASE_CATALOG = {
     impact: '整单采购和物流回传已暂停。',
     nextAction: '核对退款子单，选择仅履约剩余商品或停止整单。',
     actionLabel: '处理部分退款',
-    actionHref: '/orders',
+    actionHref: '/after-sales',
     responsibleParty: 'merchant',
   },
   refund_amount_reconciliation_required: {
@@ -238,7 +240,27 @@ const CASE_CATALOG = {
     impact: '净 GMV、利润和退款损失暂时无法可靠计算。',
     nextAction: '按销售平台后台核对累计实际退款金额并保存依据。',
     actionLabel: '核对退款金额',
-    actionHref: '/orders',
+    actionHref: '/after-sales',
+    responsibleParty: 'merchant',
+  },
+  after_sale_case_overdue: {
+    domain: 'after_sale',
+    priority: 'critical',
+    title: '售后工单已超过处理时限',
+    impact: '销售退款、采购成本或外部处理可能继续扩大损失。',
+    nextAction: '打开售后工单，按当前销售与采购版本完成处置。',
+    actionLabel: '处理售后工单',
+    actionHref: '/after-sales',
+    responsibleParty: 'merchant',
+  },
+  after_sale_case_blocked: {
+    domain: 'after_sale',
+    priority: 'high',
+    title: '售后工单存在关闭阻塞',
+    impact: '售后责任、退款或采购成本尚未形成可审计闭环。',
+    nextAction: '打开售后工单，完成当前阻塞项后重新核验关闭。',
+    actionLabel: '处理售后工单',
+    actionHref: '/after-sales',
     responsibleParty: 'merchant',
   },
   entitlement_subscription_date_invalid: entitlementCatalog(
@@ -339,6 +361,7 @@ export class ExceptionCenterService {
   constructor(
     private readonly prisma: PrismaService,
     config: ConfigService,
+    private readonly afterSales: AfterSaleService,
   ) {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
     const configuredIntervalMs = Number(
@@ -445,6 +468,7 @@ export class ExceptionCenterService {
         scan: async () => [
           ...(await this.scanAfterSaleOrders(userId)),
           ...(await this.scanPurchaseExceptions(userId, 'after_sale')),
+          ...(await this.scanAfterSaleCases(userId, now)),
         ],
         scope: { domain: 'after_sale' },
       },
@@ -859,6 +883,53 @@ export class ExceptionCenterService {
     });
   }
 
+  private async scanAfterSaleCases(userId: bigint, now: Date): Promise<ObservedCase[]> {
+    const observed: ObservedCase[] = [];
+    let cursor: string | undefined;
+    for (let pageNumber = 0; pageNumber < MAX_AFTER_SALE_SIGNAL_PAGES; pageNumber++) {
+      const page = await this.afterSales.exceptionSignals(userId, now, cursor);
+      observed.push(
+        ...page.items.map((signal): ObservedCase => {
+          const catalog = CASE_CATALOG[signal.code];
+          return {
+            dedupeKey: signal.dedupeKey,
+            code: signal.code,
+            domain: catalog.domain,
+            priority: signal.priority,
+            sourceFingerprint: signal.sourceFingerprint,
+            subjectType: 'after_sale_case',
+            subjectId: signal.caseId,
+            subjectLabel: signal.subjectLabel,
+            responsibleParty: catalog.responsibleParty,
+            reason: signal.reason,
+            impact: catalog.impact,
+            nextAction: signal.nextAction,
+            actionLabel: catalog.actionLabel,
+            actionHref: signal.actionHref,
+            evidence: {
+              items: [
+                {
+                  type: signal.code,
+                  label: signal.reason,
+                  value: signal.caseId,
+                },
+              ],
+              overdue: signal.overdue,
+            },
+          };
+        }),
+      );
+      if (!page.hasMore) return observed;
+      if (!page.nextCursor || page.nextCursor === cursor) {
+        throw new Error('售后工单异常扫描游标未推进');
+      }
+      cursor = page.nextCursor;
+    }
+    throw new Error(
+      `售后工单异常扫描超过 ${MAX_AFTER_SALE_SIGNAL_PAGES} 页安全上限，已保留原有事项`,
+    );
+  }
+
   private async scanEntitlement(userId: bigint, now: Date): Promise<ObservedCase[]> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -1140,7 +1211,7 @@ function purchaseCatalog(
     impact,
     nextAction,
     actionLabel: domain === 'after_sale' ? '处理售后订单' : '处理采购订单',
-    actionHref: '/orders',
+    actionHref: domain === 'after_sale' ? '/after-sales' : '/orders',
     responsibleParty: 'merchant',
   };
 }

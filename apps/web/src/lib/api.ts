@@ -126,6 +126,12 @@ export interface OrderSyncResult {
   skipped: number;
 }
 
+export interface OrderRefreshResult {
+  orderId: string;
+  status: string;
+  afterSaleStatus: string;
+}
+
 export interface OAuthAuthorizationResult {
   platform: 'douyin' | 'alibaba_1688';
   authorizationUrl: string;
@@ -1011,6 +1017,177 @@ export interface AcknowledgeExceptionCaseRequest {
   note: string;
 }
 
+export type AfterSaleCaseStatus = 'open' | 'handling' | 'waiting_external' | 'verifying' | 'closed';
+export type AfterSaleCasePriority = 'critical' | 'high' | 'medium';
+export type AfterSalePurchaseLinkStatus =
+  | 'not_required'
+  | 'action_required'
+  | 'waiting_external'
+  | 'confirmed'
+  | 'failed';
+export type AfterSalePurchaseAction =
+  | 'cancel'
+  | 'refund'
+  | 'return_refund'
+  | 'intercept'
+  | 'accept_loss'
+  | 'manual_review';
+export type AfterSaleRemoteReferenceType =
+  | 'purchase_order'
+  | 'refund'
+  | 'return_order'
+  | 'logistics'
+  | 'other';
+export type AfterSalePurchaseActionResult = 'confirmed' | 'failed';
+
+export interface AfterSaleOrderSummary {
+  id: string;
+  platformOrderId: string;
+  shopName: string | null;
+  platform?: string;
+  status: string;
+  afterSaleStatus: string;
+  amount?: number;
+}
+
+export interface AfterSaleCaseItem {
+  id: string;
+  orderItemId?: string;
+  platformOrderItemId: string;
+  title: string;
+  quantity: number;
+  afterSaleStatusRaw?: number | null;
+  afterSaleTypeRaw?: number | null;
+  refundStatusRaw?: number | null;
+}
+
+export interface AfterSalePurchaseLink {
+  id: string;
+  purchaseOrderId: string;
+  purchaseOrderItemId?: string | null;
+  orderId1688: string | null;
+  outOrderId?: string | null;
+  status: AfterSalePurchaseLinkStatus;
+  exceptionStatus: string;
+  purchaseExceptionRevision: number;
+  purchaseSyncRevision: number;
+  action?: AfterSalePurchaseAction | 'none' | null;
+  remoteReferenceType?: AfterSaleRemoteReferenceType | null;
+  remoteReferenceId?: string | null;
+  result?: AfterSalePurchaseActionResult | null;
+  actionStartedAt?: string | null;
+  actionConfirmedAt?: string | null;
+}
+
+export interface AfterSaleClosureBlocker {
+  code: string;
+  label: string;
+  detail?: string | null;
+  purchaseOrderId?: string | null;
+}
+
+export interface AfterSaleCaseEvidence {
+  type: string;
+  label: string;
+  value?: string;
+}
+
+export interface AfterSaleCaseEvent {
+  id: string;
+  caseRevision?: number;
+  stateRevision?: number;
+  type: string;
+  actor: {
+    type: 'system' | 'user' | 'worker';
+    userId?: string;
+  };
+  note: string | null;
+  evidence: AfterSaleCaseEvidence[];
+  fromStatus: AfterSaleCaseStatus | null;
+  toStatus: AfterSaleCaseStatus | null;
+  createdAt: string;
+}
+
+export interface AfterSaleCaseListItem {
+  id: string;
+  status: AfterSaleCaseStatus;
+  waitingOn: string | null;
+  priority: AfterSaleCasePriority;
+  sourceRevision: number;
+  stateRevision: number;
+  sourceActive: boolean;
+  assigneeUserId: string | null;
+  nextAction: string;
+  nextActionDueAt: string | null;
+  overdue: boolean;
+  order: AfterSaleOrderSummary;
+  items: AfterSaleCaseItem[];
+  purchaseLinks: AfterSalePurchaseLink[];
+  closureBlockers: Array<AfterSaleClosureBlocker | string>;
+  openedAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+}
+
+export interface AfterSaleCaseDetail extends AfterSaleCaseListItem {
+  events: AfterSaleCaseEvent[];
+}
+
+export interface AfterSaleCaseQuery {
+  status?: AfterSaleCaseStatus;
+  overdue?: boolean;
+  q?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface AfterSaleCasePage {
+  items: AfterSaleCaseListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  counts?: Partial<{
+    open: number;
+    handling: number;
+    waitingExternal: number;
+    verifying: number;
+    closed: number;
+  }>;
+  overdueCount?: number;
+}
+
+export interface RefreshAfterSaleCasesResult {
+  scanned?: number;
+  created?: number;
+  updated?: number;
+  reopened?: number;
+  closed?: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  errors?: Array<{ code?: string; message: string } | string>;
+  refreshedAt?: string;
+}
+
+export interface AfterSaleCaseCommand {
+  clientRequestId: string;
+  expectedRevision: number;
+  note: string;
+}
+
+export interface StartAfterSalePurchaseActionRequest extends AfterSaleCaseCommand {
+  action: AfterSalePurchaseAction;
+  remoteReferenceType: AfterSaleRemoteReferenceType;
+  remoteReferenceId: string;
+  expectedPurchaseExceptionRevision: number;
+  expectedPurchaseSyncRevision: number;
+}
+
+export interface ConfirmAfterSalePurchaseActionRequest extends AfterSaleCaseCommand {
+  result: AfterSalePurchaseActionResult;
+  expectedPurchaseExceptionRevision: number;
+  expectedPurchaseSyncRevision: number;
+}
+
 /** 结构化 API 错误，携带 HTTP 状态与业务错误码（如 QUOTA_EXCEEDED / BYOK_CALL_FAILED） */
 export class ApiError extends Error {
   constructor(
@@ -1538,6 +1715,10 @@ export const api = {
     return request(`/orders/sync/${encodeURIComponent(shopId)}`, { method: 'POST' });
   },
 
+  refreshOrder(orderId: string): Promise<OrderRefreshResult> {
+    return request(`/orders/${encodeURIComponent(orderId)}/refresh`, { method: 'POST' });
+  },
+
   simulateOrder(publishedProductId: string): Promise<Order> {
     return request('/orders/simulate', {
       method: 'POST',
@@ -1643,6 +1824,67 @@ export const api = {
     body: AcknowledgeExceptionCaseRequest,
   ): Promise<ExceptionCaseDetail> {
     return request(`/exception-cases/${encodeURIComponent(caseId)}/acknowledge`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  afterSaleCases(query: AfterSaleCaseQuery = {}): Promise<AfterSaleCasePage> {
+    const params = new URLSearchParams({
+      page: String(query.page ?? 1),
+      pageSize: String(query.pageSize ?? 30),
+    });
+    if (query.status) params.set('status', query.status);
+    if (query.overdue !== undefined) params.set('overdue', String(query.overdue));
+    if (query.q) params.set('q', query.q);
+    return request(`/after-sale-cases?${params.toString()}`);
+  },
+
+  afterSaleCase(caseId: string): Promise<AfterSaleCaseDetail> {
+    return request(`/after-sale-cases/${encodeURIComponent(caseId)}`);
+  },
+
+  refreshAfterSaleCases(afterOrderId?: string): Promise<RefreshAfterSaleCasesResult> {
+    const params = new URLSearchParams();
+    if (afterOrderId) params.set('afterOrderId', afterOrderId);
+    const query = params.size > 0 ? `?${params.toString()}` : '';
+    return request(`/after-sale-cases/refresh${query}`, { method: 'POST' });
+  },
+
+  claimAfterSaleCase(caseId: string, body: AfterSaleCaseCommand): Promise<AfterSaleCaseDetail> {
+    return request(`/after-sale-cases/${encodeURIComponent(caseId)}/claim`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  startAfterSalePurchaseAction(
+    caseId: string,
+    linkId: string,
+    body: StartAfterSalePurchaseActionRequest,
+  ): Promise<AfterSaleCaseDetail> {
+    return request(
+      `/after-sale-cases/${encodeURIComponent(caseId)}/purchase-links/${encodeURIComponent(linkId)}/start`,
+      { method: 'POST', body: JSON.stringify(body) },
+    );
+  },
+
+  confirmAfterSalePurchaseAction(
+    caseId: string,
+    linkId: string,
+    body: ConfirmAfterSalePurchaseActionRequest,
+  ): Promise<AfterSaleCaseDetail> {
+    return request(
+      `/after-sale-cases/${encodeURIComponent(caseId)}/purchase-links/${encodeURIComponent(linkId)}/confirm`,
+      { method: 'POST', body: JSON.stringify(body) },
+    );
+  },
+
+  verifyCloseAfterSaleCase(
+    caseId: string,
+    body: AfterSaleCaseCommand,
+  ): Promise<AfterSaleCaseDetail> {
+    return request(`/after-sale-cases/${encodeURIComponent(caseId)}/verify-close`, {
       method: 'POST',
       body: JSON.stringify(body),
     });

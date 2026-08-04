@@ -63,6 +63,11 @@ model User {
   exceptionCases                ExceptionCase[]                       @relation("ExceptionCaseOwner")
   acknowledgedExceptionCases    ExceptionCase[]                       @relation("ExceptionCaseAcknowledgedBy")
   exceptionCaseEvents           ExceptionCaseEvent[]                  @relation("ExceptionCaseEventActor")
+  afterSaleCases                AfterSaleCase[]                       @relation("AfterSaleCaseOwner")
+  assignedAfterSaleCases        AfterSaleCase[]                       @relation("AfterSaleCaseAssignee")
+  closedAfterSaleCases          AfterSaleCase[]                       @relation("AfterSaleCaseClosedBy")
+  confirmedAfterSaleLinks       AfterSalePurchaseLink[]               @relation("AfterSalePurchaseLinkConfirmedBy")
+  afterSaleCaseEvents           AfterSaleCaseEvent[]                  @relation("AfterSaleCaseEventActor")
 
   @@index([plan])
   @@map("users")
@@ -743,6 +748,7 @@ model Order {
   purchaseOrders   PurchaseOrder[]
   items            OrderItem[]
   logisticsRepairs OrderLogisticsRepair[]
+  afterSaleCase    AfterSaleCase?
 
   @@unique([shopId, platformOrderId])
   @@index([status])
@@ -774,13 +780,15 @@ model OrderItem {
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
-  order             Order                          @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  publishedProduct  PublishedProduct?              @relation(fields: [publishedProductId], references: [id], onDelete: SetNull)
-  sourceBinding     PublishedProductSourceBinding? @relation(fields: [sourceBindingId], references: [id], onDelete: SetNull)
-  purchaseOrderItem PurchaseOrderItem?
-  shipmentItems     PurchaseShipmentItem[]
+  order              Order                          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  publishedProduct   PublishedProduct?              @relation(fields: [publishedProductId], references: [id], onDelete: SetNull)
+  sourceBinding      PublishedProductSourceBinding? @relation(fields: [sourceBindingId], references: [id], onDelete: SetNull)
+  purchaseOrderItem  PurchaseOrderItem?
+  shipmentItems      PurchaseShipmentItem[]
+  afterSaleCaseItems AfterSaleCaseItem[]
 
   @@unique([orderId, platformOrderItemId], name: "uk_order_platform_item")
+  @@unique([id, orderId], name: "uk_order_item_id_order", map: "uk_order_item_id_order")
   @@index([sourceOfferId, sourceSpecId])
   @@index([sourceSupplierId])
   @@index([publishedProductId])
@@ -849,8 +857,10 @@ model PurchaseOrder {
   attempts         PurchaseOrderAttempt[]
   recoveries       PurchaseOrderRecovery[]
   logisticsRepairs OrderLogisticsRepair[]
+  afterSaleLinks   AfterSalePurchaseLink[]
 
   @@unique([orderId, supplierKey], name: "uk_order_supplier_purchase")
+  @@unique([id, orderId], name: "uk_purchase_order_id_order", map: "uk_purchase_order_id_order")
   @@index([orderId])
   @@index([buyerShopId])
   @@index([status])
@@ -985,6 +995,191 @@ model PurchaseShipmentItem {
   @@unique([purchaseShipmentId, orderItemId], name: "uk_shipment_order_item")
   @@index([orderItemId])
   @@map("purchase_shipment_items")
+}
+
+// ----- 售后工单 -----
+
+enum AfterSaleCaseStatus {
+  open
+  handling
+  waiting_external
+  verifying
+  closed
+}
+
+enum AfterSaleWaitingOn {
+  merchant
+  sales_platform
+  supplier
+  system
+  none
+}
+
+enum AfterSaleResolutionCode {
+  sales_rejected_or_withdrawn
+  partial_refund_handled
+  full_refund_handled
+  price_protection_reconciled
+  order_closed_handled
+}
+
+enum AfterSalePurchaseLinkStatus {
+  not_required
+  action_required
+  waiting_external
+  confirmed
+  failed
+}
+
+enum AfterSalePurchaseAction {
+  none
+  cancel
+  refund
+  return_refund
+  intercept
+  accept_loss
+  manual_review
+}
+
+enum AfterSalePurchaseResult {
+  confirmed
+  failed
+}
+
+enum AfterSaleRemoteReferenceType {
+  purchase_order
+  refund
+  return_order
+  logistics
+  other
+}
+
+enum AfterSaleCaseEventType {
+  opened
+  source_updated
+  reopened
+  claimed
+  action_started
+  action_confirmed
+  verification_failed
+  closed
+}
+
+model AfterSaleCase {
+  id                 BigInt                   @id @default(autoincrement())
+  userId             BigInt                   @map("user_id")
+  orderId            BigInt                   @unique(map: "after_sale_cases_order_id_key") @map("order_id")
+  status             AfterSaleCaseStatus      @default(open)
+  waitingOn          AfterSaleWaitingOn       @default(merchant) @map("waiting_on")
+  priority           ExceptionPriority        @default(high)
+  sourceActive       Boolean                  @default(true) @map("source_active")
+  sourceFingerprint  String                   @map("source_fingerprint") @db.VarChar(64)
+  sourceRevision     Int                      @default(1) @map("source_revision")
+  stateRevision      Int                      @default(1) @map("state_revision")
+  occurrences        Int                      @default(1)
+  assigneeUserId     BigInt?                  @map("assignee_user_id")
+  firstDetectedAt    DateTime                 @default(now()) @map("first_detected_at")
+  lastObservedAt     DateTime                 @default(now()) @map("last_observed_at")
+  nextActionDueAt    DateTime                 @map("next_action_due_at")
+  platformDeadlineAt DateTime?                @map("platform_deadline_at")
+  resolutionCode     AfterSaleResolutionCode? @map("resolution_code")
+  resolutionNote     String?                  @map("resolution_note") @db.Text
+  closedAt           DateTime?                @map("closed_at")
+  closedByUserId     BigInt?                  @map("closed_by_user_id")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+  updatedAt          DateTime                 @updatedAt @map("updated_at")
+
+  user     User                    @relation("AfterSaleCaseOwner", fields: [userId], references: [id], onDelete: Cascade)
+  assignee User?                   @relation("AfterSaleCaseAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
+  closedBy User?                   @relation("AfterSaleCaseClosedBy", fields: [closedByUserId], references: [id], onDelete: SetNull)
+  order    Order                   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items    AfterSaleCaseItem[]
+  links    AfterSalePurchaseLink[]
+  events   AfterSaleCaseEvent[]
+
+  @@unique([id, userId], name: "uk_after_sale_case_id_user", map: "uk_after_sale_case_id_user")
+  @@unique([id, userId, orderId], name: "uk_after_sale_case_id_user_order", map: "uk_after_sale_case_id_user_order")
+  @@index([userId, status, priority, updatedAt(sort: Desc), id(sort: Desc)], map: "after_sale_cases_user_status_priority_updated_idx")
+  @@index([userId, nextActionDueAt, status], map: "after_sale_cases_user_due_status_idx")
+  @@index([userId, assigneeUserId, status, updatedAt(sort: Desc)], map: "after_sale_cases_user_assignee_status_idx")
+  @@map("after_sale_cases")
+}
+
+model AfterSaleCaseItem {
+  id                  BigInt   @id @default(autoincrement())
+  userId              BigInt   @map("user_id")
+  caseId              BigInt   @map("case_id")
+  orderId             BigInt   @map("order_id")
+  orderItemId         BigInt   @map("order_item_id")
+  sourceRevision      Int      @map("source_revision")
+  active              Boolean  @default(true)
+  platformAfterSaleId String?  @map("platform_after_sale_id") @db.VarChar(128)
+  firstSeenAt         DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt          DateTime @default(now()) @map("last_seen_at")
+
+  case      AfterSaleCase @relation(fields: [caseId, userId, orderId], references: [id, userId, orderId], onDelete: Cascade, map: "after_sale_case_items_case_user_order_fkey")
+  orderItem OrderItem     @relation(fields: [orderItemId, orderId], references: [id, orderId], onDelete: Cascade, map: "after_sale_case_items_order_item_order_fkey")
+
+  @@unique([caseId, orderItemId], name: "uk_after_sale_case_item", map: "uk_after_sale_case_item")
+  @@index([userId, caseId, active], map: "after_sale_case_items_user_case_active_idx")
+  @@index([orderItemId], map: "after_sale_case_items_order_item_idx")
+  @@map("after_sale_case_items")
+}
+
+model AfterSalePurchaseLink {
+  id                                BigInt                        @id @default(autoincrement())
+  userId                            BigInt                        @map("user_id")
+  caseId                            BigInt                        @map("case_id")
+  orderId                           BigInt                        @map("order_id")
+  purchaseOrderId                   BigInt                        @map("purchase_order_id")
+  status                            AfterSalePurchaseLinkStatus   @default(action_required)
+  action                            AfterSalePurchaseAction       @default(none)
+  result                            AfterSalePurchaseResult?
+  remoteReferenceType               AfterSaleRemoteReferenceType? @map("remote_reference_type")
+  remoteReferenceId                 String?                       @map("remote_reference_id") @db.VarChar(128)
+  purchaseFingerprint               String                        @map("purchase_fingerprint") @db.VarChar(64)
+  boundSourceRevision               Int                           @map("bound_source_revision")
+  expectedPurchaseExceptionRevision Int                           @map("expected_purchase_exception_revision")
+  expectedPurchaseSyncRevision      Int                           @map("expected_purchase_sync_revision")
+  startedAt                         DateTime?                     @map("started_at")
+  confirmedAt                       DateTime?                     @map("confirmed_at")
+  confirmedByUserId                 BigInt?                       @map("confirmed_by_user_id")
+  createdAt                         DateTime                      @default(now()) @map("created_at")
+  updatedAt                         DateTime                      @updatedAt @map("updated_at")
+
+  case          AfterSaleCase @relation(fields: [caseId, userId, orderId], references: [id, userId, orderId], onDelete: Cascade, map: "after_sale_purchase_links_case_user_order_fkey")
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId, orderId], references: [id, orderId], onDelete: Cascade, map: "after_sale_purchase_links_purchase_order_fkey")
+  confirmedBy   User?         @relation("AfterSalePurchaseLinkConfirmedBy", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([caseId, purchaseOrderId], name: "uk_after_sale_case_purchase", map: "uk_after_sale_case_purchase")
+  @@index([userId, status, updatedAt(sort: Desc)], map: "after_sale_purchase_links_user_status_idx")
+  @@index([purchaseOrderId], map: "after_sale_purchase_links_purchase_idx")
+  @@map("after_sale_purchase_links")
+}
+
+model AfterSaleCaseEvent {
+  id                 BigInt                 @id @default(autoincrement())
+  userId             BigInt                 @map("user_id")
+  caseId             BigInt                 @map("case_id")
+  caseRevision       Int                    @map("case_revision")
+  type               AfterSaleCaseEventType
+  clientRequestId    String?                @unique(map: "after_sale_case_events_client_request_key") @map("client_request_id") @db.Uuid
+  requestFingerprint String?                @map("request_fingerprint") @db.VarChar(64)
+  actorUserId        BigInt?                @map("actor_user_id")
+  note               String?                @db.Text
+  evidence           Json?                  @db.JsonB
+  fromStatus         AfterSaleCaseStatus?   @map("from_status")
+  toStatus           AfterSaleCaseStatus?   @map("to_status")
+  sourceRevision     Int                    @map("source_revision")
+  sourceFingerprint  String                 @map("source_fingerprint") @db.VarChar(64)
+  createdAt          DateTime               @default(now()) @map("created_at")
+
+  case  AfterSaleCase @relation(fields: [caseId, userId], references: [id, userId], onDelete: Cascade, map: "after_sale_case_events_case_user_fkey")
+  actor User?         @relation("AfterSaleCaseEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@unique([caseId, caseRevision], name: "uk_after_sale_case_event_revision", map: "uk_after_sale_case_event_revision")
+  @@index([userId, caseId, caseRevision], map: "after_sale_case_events_user_case_revision_idx")
+  @@map("after_sale_case_events")
 }
 
 // ----- 统一任务与异常中心 -----

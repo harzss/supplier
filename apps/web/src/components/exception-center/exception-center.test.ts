@@ -44,6 +44,7 @@ describe('exception center query parsing', () => {
 describe('exception action navigation', () => {
   it('allows only known same-origin workbench routes', () => {
     expect(safeInternalActionHref('/orders?orderId=42')).toBe('/orders?orderId=42');
+    expect(safeInternalActionHref('/after-sales?case=42')).toBe('/after-sales?case=42');
     expect(safeInternalActionHref('/published/batch?task=abc#result')).toBe(
       '/published/batch?task=abc#result',
     );

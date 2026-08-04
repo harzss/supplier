@@ -27,7 +27,13 @@ export const EXCEPTION_STATUSES: Array<{ value: ExceptionCaseStatus; label: stri
   { value: 'resolved', label: '已关闭' },
 ];
 
-const ALLOWED_ACTION_ROOTS = ['/orders', '/published', '/settings', '/sources'] as const;
+const ALLOWED_ACTION_ROOTS = [
+  '/orders',
+  '/after-sales',
+  '/published',
+  '/settings',
+  '/sources',
+] as const;
 
 export function parseExceptionStatus(value: string | null): ExceptionCaseStatus {
   return value === 'acknowledged' || value === 'resolved' ? value : 'open';

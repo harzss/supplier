@@ -1162,11 +1162,14 @@ describe('Alibaba1688PurchaseService', () => {
     const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
     const localItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
     const flagUpdate = vi.fn().mockResolvedValue({ count: 1 });
-    const transaction = vi.fn();
+    const transaction = vi.fn(async (operation: (tx: PrismaService) => Promise<unknown>) =>
+      operation(prisma),
+    );
     const prisma = {
       purchaseOrder: {
         findFirst: vi.fn().mockResolvedValue({
           id: 101n,
+          orderId: 5n,
           buyerShopId: 20n,
           orderId1688: '900001',
           status: 'shipped',
@@ -1209,12 +1212,14 @@ describe('Alibaba1688PurchaseService', () => {
         return logisticsResponse('NEW222');
       }),
     );
+    const materializeOrder = vi.fn().mockResolvedValue(undefined);
     const service = new Alibaba1688PurchaseService(
       prisma,
       crypto,
       values,
       new OAuthConfigService(values),
       { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
+      { materializeOrder } as never,
     );
 
     await expect(service.auditSettledPurchase(1n, 101n)).resolves.toBe('action_required');
@@ -1234,7 +1239,9 @@ describe('Alibaba1688PurchaseService', () => {
         reconciledCost: null,
       }),
     });
-    expect(transaction).not.toHaveBeenCalled();
+    expect(transaction).toHaveBeenCalledTimes(2);
+    expect(materializeOrder).toHaveBeenCalledTimes(2);
+    expect(materializeOrder).toHaveBeenLastCalledWith(prisma, 5n);
   });
 
   it('builds an immutable settled-logistics repair proposal from verified remote data', async () => {

@@ -53,6 +53,13 @@ export class OrderController {
     return this.orderSync.sync(user, shopId);
   }
 
+  /** 回读单笔平台订单并刷新本地售后快照 */
+  @AuditAction('order.refresh', 'order')
+  @Post(':id/refresh')
+  refresh(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
+    return this.orderSync.refreshOrder(user, id);
+  }
+
   /** 一键代发：向 1688 下单并回传物流 */
   @Post(':id/fulfill')
   fulfill(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {

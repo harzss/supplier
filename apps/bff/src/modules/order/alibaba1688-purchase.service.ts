@@ -17,6 +17,7 @@ import {
 import { createHash } from 'node:crypto';
 import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
+import { AfterSaleService } from '../after-sale/after-sale.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import { OAuthConfigService } from '../shop/oauth-config.service';
 import { ShopTokenService } from '../shop/shop-token.service';
@@ -24,6 +25,9 @@ import { isTerminalOrderStatus, markPurchaseExceptionsForOrderEvent } from './pu
 import { PURCHASE_EXCEPTION_CODE, type PurchaseExceptionCode } from './purchase-exception-code';
 
 const MAX_PURCHASE_RETRIES = 3;
+const NOOP_AFTER_SALE_MATERIALIZER = {
+  materializeOrder: async () => undefined,
+} as unknown as AfterSaleService;
 
 type PurchaseOrderGraph = Prisma.PurchaseOrderGetPayload<{
   include: {
@@ -77,7 +81,10 @@ export interface SettledLogisticsRepairProposal {
 }
 
 interface PreparedPurchase {
-  purchase: Pick<PurchaseOrderGraph, 'id' | 'outOrderId' | 'orderId1688' | 'status' | 'retryCount'>;
+  purchase: Pick<
+    PurchaseOrderGraph,
+    'id' | 'orderId' | 'outOrderId' | 'orderId1688' | 'status' | 'retryCount'
+  >;
   items: GroupedPurchaseItem[];
   address: Alibaba1688CreateOrderInput['address'];
 }
@@ -94,6 +101,7 @@ export class Alibaba1688PurchaseService {
     private readonly config: ConfigService,
     private readonly oauthConfig: OAuthConfigService,
     private readonly shopTokens: ShopTokenService,
+    private readonly afterSales: AfterSaleService = NOOP_AFTER_SALE_MATERIALIZER,
   ) {}
 
   async advance(user: CurrentUser, orderId: bigint): Promise<Alibaba1688PurchaseProgress> {
@@ -150,9 +158,16 @@ export class Alibaba1688PurchaseService {
           select: { status: true, afterSaleStatus: true, partialRefundDisposition: true },
         });
         if (current && isTerminalOrderStatus(current.status)) {
-          await markPurchaseExceptionsForOrderEvent(this.prisma, order.id, current.status);
+          const event = current.status;
+          await this.withPurchaseFactTransaction(async (tx) => {
+            await markPurchaseExceptionsForOrderEvent(tx, order.id, event);
+            await this.afterSales.materializeOrder(tx, order.id);
+          });
         } else if (current?.afterSaleStatus === 'partial_refund') {
-          await markPurchaseExceptionsForOrderEvent(this.prisma, order.id, 'partial_refund');
+          await this.withPurchaseFactTransaction(async (tx) => {
+            await markPurchaseExceptionsForOrderEvent(tx, order.id, 'partial_refund');
+            await this.afterSales.materializeOrder(tx, order.id);
+          });
         }
       }
       return { packages: [], requestId: null };
@@ -407,17 +422,19 @@ export class Alibaba1688PurchaseService {
             '1688 恢复采购单商品明细与本地快照不一致，已停止自动处理',
           );
         }
-        const persisted = await this.prisma.purchaseOrder.updateMany({
-          where: {
-            id: purchase.id,
-            OR: [{ orderId1688: null }, { orderId1688: remote.orderId }],
-          },
-          data: {
-            orderId1688: remote.orderId,
-            status: 'awaiting_payment',
-            failureReason: null,
-          },
-        });
+        const persisted = await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+          tx.purchaseOrder.updateMany({
+            where: {
+              id: purchase.id,
+              OR: [{ orderId1688: null }, { orderId1688: remote.orderId }],
+            },
+            data: {
+              orderId1688: remote.orderId,
+              status: 'awaiting_payment',
+              failureReason: null,
+            },
+          }),
+        );
         if (persisted.count !== 1) {
           throw new ServiceUnavailableException(
             '1688 采购单恢复结果与本地记录冲突，已停止自动处理',
@@ -425,18 +442,20 @@ export class Alibaba1688PurchaseService {
         }
       } catch (error) {
         try {
-          await this.prisma.purchaseOrder.updateMany({
-            where: {
-              id: purchase.id,
-              orderId1688: null,
-              status: { in: ['pending', 'failed'] },
-            },
-            data: {
-              status: 'failed',
-              retryCount: { increment: 1 },
-              failureReason: safeFailure(error),
-            },
-          });
+          await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+            tx.purchaseOrder.updateMany({
+              where: {
+                id: purchase.id,
+                orderId1688: null,
+                status: { in: ['pending', 'failed'] },
+              },
+              data: {
+                status: 'failed',
+                retryCount: { increment: 1 },
+                failureReason: safeFailure(error),
+              },
+            }),
+          );
         } catch (persistenceError) {
           this.logger.error(`1688 采购失败状态保存失败：${safeFailure(persistenceError)}`);
         }
@@ -600,10 +619,14 @@ export class Alibaba1688PurchaseService {
   ): Promise<void> {
     const claim = settledOrder
       ? await this.claimSettledPurchase(purchase)
-      : await this.prisma.purchaseOrder.update({
-          where: { id: purchase.id },
-          data: { syncRevision: { increment: 1 } },
-          select: { syncRevision: true, status: true },
+      : await this.withPurchaseFactTransaction(async (tx) => {
+          const updated = await tx.purchaseOrder.update({
+            where: { id: purchase.id },
+            data: { syncRevision: { increment: 1 } },
+            select: { syncRevision: true, status: true },
+          });
+          await this.afterSales.materializeOrder(tx, purchase.orderId);
+          return updated;
         });
     if (!claim) return;
 
@@ -626,6 +649,7 @@ export class Alibaba1688PurchaseService {
         if (settledOrder) {
           await this.flagSettledPurchase(
             purchase.id,
+            purchase.orderId,
             claim.syncRevision,
             PURCHASE_EXCEPTION_CODE.snapshotMismatch,
             error.message,
@@ -633,6 +657,7 @@ export class Alibaba1688PurchaseService {
         } else {
           await this.flagActivePurchase(
             purchase.id,
+            purchase.orderId,
             claim.syncRevision,
             PURCHASE_EXCEPTION_CODE.snapshotMismatch,
             error.message,
@@ -648,38 +673,41 @@ export class Alibaba1688PurchaseService {
         ['pending', 'placed', 'awaiting_payment', 'paid'].includes(claim.status) &&
         !purchase.everShipped &&
         purchase.shipments.length === 0;
-      await this.prisma.purchaseOrder.updateMany({
-        where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
-        data: {
-          status: 'failed',
-          purchaseCost: settledOrder
-            ? purchase.purchaseCost
-            : (remote.totalAmount ?? purchase.purchaseCost),
-          retryEligible,
-          failureReason: `1688 采购单状态：${safeStatus(remote.status)}`,
-          exceptionStatus: 'action_required',
-          exceptionRevision: { increment: 1 },
-          exceptionCode: settledOrder
-            ? PURCHASE_EXCEPTION_CODE.remoteCancelledAfterShipment
-            : retryEligible
-              ? PURCHASE_EXCEPTION_CODE.remoteCancelledRetryable
-              : PURCHASE_EXCEPTION_CODE.remoteCancelledManual,
-          exceptionReason: settledOrder
-            ? '抖店订单已发货，但 1688 采购单后续进入取消或关闭状态；请核对采购成本，并在抖店和 1688 完成人工物流处置。'
-            : retryEligible
-              ? '1688 采购单已取消或关闭，自动履约已停止；请核对本次实际成本后重新采购。'
-              : '1688 采购单在发货后进入取消或关闭状态，自动履约已停止；请核对实际成本和物流后人工处理。',
-          exceptionDetectedAt: new Date(),
-          exceptionResolvedAt: null,
-          exceptionResolutionNote: null,
-          reconciledCost: null,
-        },
-      });
+      await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+        tx.purchaseOrder.updateMany({
+          where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
+          data: {
+            status: 'failed',
+            purchaseCost: settledOrder
+              ? purchase.purchaseCost
+              : (remote.totalAmount ?? purchase.purchaseCost),
+            retryEligible,
+            failureReason: `1688 采购单状态：${safeStatus(remote.status)}`,
+            exceptionStatus: 'action_required',
+            exceptionRevision: { increment: 1 },
+            exceptionCode: settledOrder
+              ? PURCHASE_EXCEPTION_CODE.remoteCancelledAfterShipment
+              : retryEligible
+                ? PURCHASE_EXCEPTION_CODE.remoteCancelledRetryable
+                : PURCHASE_EXCEPTION_CODE.remoteCancelledManual,
+            exceptionReason: settledOrder
+              ? '抖店订单已发货，但 1688 采购单后续进入取消或关闭状态；请核对采购成本，并在抖店和 1688 完成人工物流处置。'
+              : retryEligible
+                ? '1688 采购单已取消或关闭，自动履约已停止；请核对本次实际成本后重新采购。'
+                : '1688 采购单在发货后进入取消或关闭状态，自动履约已停止；请核对实际成本和物流后人工处理。',
+            exceptionDetectedAt: new Date(),
+            exceptionResolvedAt: null,
+            exceptionResolutionNote: null,
+            reconciledCost: null,
+          },
+        }),
+      );
       return;
     }
     if (settledOrder && !samePurchaseCost(purchase.purchaseCost, remote.totalAmount)) {
       await this.flagSettledPurchase(
         purchase.id,
+        purchase.orderId,
         claim.syncRevision,
         PURCHASE_EXCEPTION_CODE.costChanged,
         '抖店订单已发货，但 1688 采购金额后续发生变化；系统保留原成本，请人工核对。',
@@ -692,10 +720,12 @@ export class Alibaba1688PurchaseService {
       failureReason: null,
     };
     if (status !== 'shipped' && status !== 'received') {
-      await this.prisma.purchaseOrder.updateMany({
-        where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
-        data: purchaseData,
-      });
+      await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+        tx.purchaseOrder.updateMany({
+          where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
+          data: purchaseData,
+        }),
+      );
       return;
     }
 
@@ -704,16 +734,19 @@ export class Alibaba1688PurchaseService {
       if (settledOrder) {
         await this.flagSettledPurchase(
           purchase.id,
+          purchase.orderId,
           claim.syncRevision,
           PURCHASE_EXCEPTION_CODE.logisticsSnapshotMissing,
           '抖店订单已发货，但 1688 不再返回物流快照；系统保留原包裹并停止静默更新，请人工核对。',
         );
         return;
       }
-      await this.prisma.purchaseOrder.updateMany({
-        where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
-        data: purchaseData,
-      });
+      await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+        tx.purchaseOrder.updateMany({
+          where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
+          data: purchaseData,
+        }),
+      );
       return;
     }
     let mapped: ReturnType<typeof mapLogisticsToItems>;
@@ -724,6 +757,7 @@ export class Alibaba1688PurchaseService {
         if (settledOrder) {
           await this.flagSettledPurchase(
             purchase.id,
+            purchase.orderId,
             claim.syncRevision,
             PURCHASE_EXCEPTION_CODE.logisticsMappingMismatch,
             error.message,
@@ -731,6 +765,7 @@ export class Alibaba1688PurchaseService {
         } else {
           await this.flagActivePurchase(
             purchase.id,
+            purchase.orderId,
             claim.syncRevision,
             PURCHASE_EXCEPTION_CODE.logisticsMappingMismatch,
             error.message,
@@ -744,13 +779,14 @@ export class Alibaba1688PurchaseService {
     if (settledOrder && !sameShipmentRouting(purchase, mapped)) {
       await this.flagSettledPurchase(
         purchase.id,
+        purchase.orderId,
         claim.syncRevision,
         PURCHASE_EXCEPTION_CODE.logisticsRoutingChanged,
         '抖店订单已发货，但 1688 运单、承运商或商品包裹映射已变化；系统保留原快照，请人工同步两端物流。',
       );
       return;
     }
-    await this.prisma.$transaction(async (tx) => {
+    await this.withSerializableTransaction(async (tx) => {
       const persisted = await tx.purchaseOrder.updateMany({
         where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
         data: {
@@ -794,23 +830,26 @@ export class Alibaba1688PurchaseService {
           })),
         });
       }
+      await this.afterSales.materializeOrder(tx, purchase.orderId);
     });
   }
 
   private async claimSettledPurchase(
     purchase: PurchaseOrderGraph,
   ): Promise<{ syncRevision: number; status: PurchaseOrderGraph['status'] } | null> {
-    const claimed = await this.prisma.purchaseOrder.updateMany({
-      where: {
-        id: purchase.id,
-        syncRevision: purchase.syncRevision,
-        everShipped: true,
-        exceptionStatus: { in: ['none', 'resolved'] },
-        status: { in: ['shipped', 'received'] },
-        order: { status: { in: ['shipped', 'received'] } },
-      },
-      data: { syncRevision: { increment: 1 } },
-    });
+    const claimed = await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+      tx.purchaseOrder.updateMany({
+        where: {
+          id: purchase.id,
+          syncRevision: purchase.syncRevision,
+          everShipped: true,
+          exceptionStatus: { in: ['none', 'resolved'] },
+          status: { in: ['shipped', 'received'] },
+          order: { status: { in: ['shipped', 'received'] } },
+        },
+        data: { syncRevision: { increment: 1 } },
+      }),
+    );
     return claimed.count === 1
       ? { syncRevision: purchase.syncRevision + 1, status: purchase.status }
       : null;
@@ -818,56 +857,82 @@ export class Alibaba1688PurchaseService {
 
   private async flagSettledPurchase(
     purchaseOrderId: bigint,
+    orderId: bigint,
     syncRevision: number,
     code: PurchaseExceptionCode,
     reason: string,
   ): Promise<void> {
-    await this.prisma.purchaseOrder.updateMany({
-      where: {
-        id: purchaseOrderId,
-        syncRevision,
-        exceptionStatus: { in: ['none', 'resolved'] },
-        status: { in: ['shipped', 'received'] },
-        order: { status: { in: ['shipped', 'received'] } },
-      },
-      data: {
-        retryEligible: false,
-        exceptionStatus: 'action_required',
-        exceptionRevision: { increment: 1 },
-        exceptionCode: code,
-        exceptionReason: reason,
-        exceptionDetectedAt: new Date(),
-        exceptionResolvedAt: null,
-        exceptionResolutionNote: null,
-        reconciledCost: null,
-      },
-    });
+    await this.mutatePurchaseFacts(orderId, (tx) =>
+      tx.purchaseOrder.updateMany({
+        where: {
+          id: purchaseOrderId,
+          syncRevision,
+          exceptionStatus: { in: ['none', 'resolved'] },
+          status: { in: ['shipped', 'received'] },
+          order: { status: { in: ['shipped', 'received'] } },
+        },
+        data: {
+          retryEligible: false,
+          exceptionStatus: 'action_required',
+          exceptionRevision: { increment: 1 },
+          exceptionCode: code,
+          exceptionReason: reason,
+          exceptionDetectedAt: new Date(),
+          exceptionResolvedAt: null,
+          exceptionResolutionNote: null,
+          reconciledCost: null,
+        },
+      }),
+    );
   }
 
   private async flagActivePurchase(
     purchaseOrderId: bigint,
+    orderId: bigint,
     syncRevision: number,
     code: PurchaseExceptionCode,
     reason: string,
   ): Promise<void> {
-    await this.prisma.purchaseOrder.updateMany({
-      where: {
-        id: purchaseOrderId,
-        syncRevision,
-        exceptionStatus: { in: ['none', 'resolved'] },
-      },
-      data: {
-        retryEligible: false,
-        exceptionStatus: 'action_required',
-        exceptionRevision: { increment: 1 },
-        exceptionCode: code,
-        exceptionReason: reason,
-        exceptionDetectedAt: new Date(),
-        exceptionResolvedAt: null,
-        exceptionResolutionNote: null,
-        reconciledCost: null,
-      },
+    await this.mutatePurchaseFacts(orderId, (tx) =>
+      tx.purchaseOrder.updateMany({
+        where: {
+          id: purchaseOrderId,
+          syncRevision,
+          exceptionStatus: { in: ['none', 'resolved'] },
+        },
+        data: {
+          retryEligible: false,
+          exceptionStatus: 'action_required',
+          exceptionRevision: { increment: 1 },
+          exceptionCode: code,
+          exceptionReason: reason,
+          exceptionDetectedAt: new Date(),
+          exceptionResolvedAt: null,
+          exceptionResolutionNote: null,
+          reconciledCost: null,
+        },
+      }),
+    );
+  }
+
+  private async mutatePurchaseFacts(
+    orderId: bigint,
+    operation: (tx: Prisma.TransactionClient) => Promise<Prisma.BatchPayload>,
+  ): Promise<Prisma.BatchPayload> {
+    return this.withPurchaseFactTransaction(async (tx) => {
+      const result = await operation(tx);
+      if (result?.count > 0) await this.afterSales.materializeOrder(tx, orderId);
+      return result;
     });
+  }
+
+  private withPurchaseFactTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    if (this.afterSales === NOOP_AFTER_SALE_MATERIALIZER) {
+      return operation(this.prisma as unknown as Prisma.TransactionClient);
+    }
+    return this.withSerializableTransaction(operation);
   }
 }
 

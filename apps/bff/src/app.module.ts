@@ -22,6 +22,7 @@ import { ObservabilityModule } from './modules/observability/observability.modul
 import { ActivationModule } from './modules/activation/activation.module';
 import { SourceImportModule } from './modules/product/source-import.module';
 import { ExceptionCenterModule } from './modules/exception-center/exception-center.module';
+import { AfterSaleModule } from './modules/after-sale/after-sale.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { ExceptionCenterModule } from './modules/exception-center/exception-cent
     RedisModule,
     CryptoModule,
     ObservabilityModule,
+    AfterSaleModule,
     ExceptionCenterModule,
     HealthModule,
     EntitlementModule,

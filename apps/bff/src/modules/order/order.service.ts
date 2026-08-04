@@ -9,11 +9,16 @@ import { ConfigService } from '@nestjs/config';
 import type { Prisma } from '@supplier/db';
 import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
+import { AfterSaleService } from '../after-sale/after-sale.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import { AlertService } from '../observability/alert.service';
 import { runtimeShopWhere } from '../shop/platform-adapter.factory';
 import type { OrderListStatus } from './dto/order-list-query.dto';
 import { FINANCIAL_RECONCILIATION_ORDER_WHERE } from './financial-reconciliation';
+
+const NOOP_AFTER_SALE_MATERIALIZER = {
+  materializeOrder: async () => undefined,
+} as unknown as AfterSaleService;
 
 export interface OrderView {
   orderId: string;
@@ -118,6 +123,7 @@ export class OrderService {
     private readonly crypto: CryptoService,
     config: ConfigService,
     @Optional() private readonly alerts?: AlertService,
+    private readonly afterSales: AfterSaleService = NOOP_AFTER_SALE_MATERIALIZER,
   ) {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
   }
@@ -330,26 +336,29 @@ export class OrderService {
     }
 
     const resolvedAt = new Date();
-    const updated = await this.prisma.purchaseOrder.updateMany({
-      where: {
-        id: purchaseOrderId,
-        orderId,
-        exceptionStatus: purchase.exceptionStatus,
-        exceptionRevision: expectedRevisionValue,
-        order: {
-          shop: { userId: user.userId, ...runtimeShopWhere(this.demoMode) },
+    await this.withPurchaseFactTransaction(async (tx) => {
+      const updated = await tx.purchaseOrder.updateMany({
+        where: {
+          id: purchaseOrderId,
+          orderId,
+          exceptionStatus: purchase.exceptionStatus,
+          exceptionRevision: expectedRevisionValue,
+          order: {
+            shop: { userId: user.userId, ...runtimeShopWhere(this.demoMode) },
+          },
         },
-      },
-      data: {
-        exceptionStatus: 'resolved',
-        reconciledCost: actualCost,
-        exceptionResolvedAt: resolvedAt,
-        exceptionResolutionNote: note,
-      },
+        data: {
+          exceptionStatus: 'resolved',
+          reconciledCost: actualCost,
+          exceptionResolvedAt: resolvedAt,
+          exceptionResolutionNote: note,
+        },
+      });
+      if (updated.count === 0) {
+        throw new BadRequestException('采购异常状态已变化，请刷新订单后重新核销');
+      }
+      await this.afterSales.materializeOrder(tx, orderId, resolvedAt);
     });
-    if (updated.count === 0) {
-      throw new BadRequestException('采购异常状态已变化，请刷新订单后重新核销');
-    }
     await this.resolvePurchaseAuditAlert(purchaseOrderId, orderId);
     return this.getOne(user, orderIdValue);
   }
@@ -425,7 +434,7 @@ export class OrderService {
     const failedOrderId1688 = purchase.orderId1688;
     const nextOutOrderId = nextPurchaseOutOrderId(purchase.outOrderId, purchase.attemptNo);
     const resolvedAt = new Date();
-    await this.prisma.$transaction(async (tx) => {
+    await this.withPurchaseFactTransaction(async (tx) => {
       const reset = await tx.purchaseOrder.updateMany({
         where: {
           id: purchaseOrderId,
@@ -502,6 +511,7 @@ export class OrderService {
       if (resumed.count !== 1) {
         throw new BadRequestException('销售订单状态已变化，请刷新后重新处理');
       }
+      await this.afterSales.materializeOrder(tx, orderId, resolvedAt);
     });
     await this.resolvePurchaseAuditAlert(purchaseOrderId, orderId);
     return this.getOne(user, orderIdValue);
@@ -585,7 +595,7 @@ export class OrderService {
       })),
     })) satisfies Prisma.InputJsonValue;
     const failedOrderId1688 = purchase.orderId1688;
-    await this.prisma.$transaction(async (tx) => {
+    await this.withPurchaseFactTransaction(async (tx) => {
       const resumed = await tx.purchaseOrder.updateMany({
         where: {
           id: purchaseOrderId,
@@ -631,6 +641,7 @@ export class OrderService {
         },
       });
       await tx.purchaseShipment.deleteMany({ where: { purchaseOrderId } });
+      await this.afterSales.materializeOrder(tx, orderId);
     });
     await this.resolvePurchaseAuditAlert(purchaseOrderId, orderId);
     return this.getOne(user, orderIdValue);
@@ -682,25 +693,37 @@ export class OrderService {
     }
 
     const confirmedAt = new Date();
-    const updated = await this.prisma.order.updateMany({
-      where: {
-        id: orderId,
-        status: order.status,
-        amount: order.amount,
-        partialRefundFingerprint: order.partialRefundFingerprint,
-        shop: { userId: user.userId, ...runtimeShopWhere(this.demoMode) },
-      },
-      data: {
-        refundAmount: amount,
-        refundAmountFingerprint: order.partialRefundFingerprint,
-        refundAmountConfirmedAt: confirmedAt,
-        refundAmountNote: note,
-      },
+    await this.withPurchaseFactTransaction(async (tx) => {
+      const updated = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          status: order.status,
+          amount: order.amount,
+          partialRefundFingerprint: order.partialRefundFingerprint,
+          shop: { userId: user.userId, ...runtimeShopWhere(this.demoMode) },
+        },
+        data: {
+          refundAmount: amount,
+          refundAmountFingerprint: order.partialRefundFingerprint,
+          refundAmountConfirmedAt: confirmedAt,
+          refundAmountNote: note,
+        },
+      });
+      if (updated.count === 0) {
+        throw new BadRequestException('售后状态已变化，请刷新订单后重新核对退款金额');
+      }
+      await this.afterSales.materializeOrder(tx, orderId, confirmedAt);
     });
-    if (updated.count === 0) {
-      throw new BadRequestException('售后状态已变化，请刷新订单后重新核对退款金额');
-    }
     return this.getOne(user, orderIdValue);
+  }
+
+  private withPurchaseFactTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    if (this.afterSales === NOOP_AFTER_SALE_MATERIALIZER) {
+      return operation(this.prisma as unknown as Prisma.TransactionClient);
+    }
+    return this.prisma.$transaction(operation, { isolationLevel: 'Serializable' });
   }
 
   private toView(o: OrderWithRelations): OrderView {

@@ -8,7 +8,9 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import type { Prisma } from '@supplier/db';
 import { PrismaService } from '../../common/prisma.module';
+import { AfterSaleService } from '../after-sale/after-sale.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import { ExceptionCenterService } from '../exception-center/exception-center.service';
 import { PlatformAdapterFactory, isDemoShop } from '../shop/platform-adapter.factory';
@@ -19,6 +21,10 @@ import { Alibaba1688PurchaseService } from './alibaba1688-purchase.service';
 import { OrderSyncService } from './order-sync.service';
 import type { PartialRefundDispositionAction } from './dto/resolve-partial-refund.dto';
 import { PURCHASE_EXCEPTION_CODE } from './purchase-exception-code';
+
+const NOOP_AFTER_SALE_MATERIALIZER = {
+  materializeOrder: async () => undefined,
+} as unknown as AfterSaleService;
 
 /**
  * 自动代发：paid → 向 1688 下单 → 发货 → 回传平台物流 → shipped。
@@ -36,6 +42,7 @@ export class FulfillmentService {
     private readonly alibaba1688Purchases: Alibaba1688PurchaseService,
     private readonly orderSync: OrderSyncService,
     @Optional() private readonly exceptionCenter?: ExceptionCenterService,
+    private readonly afterSales: AfterSaleService = NOOP_AFTER_SALE_MATERIALIZER,
   ) {}
 
   async fulfill(user: CurrentUser, orderId: string): Promise<OrderView> {
@@ -188,26 +195,28 @@ export class FulfillmentService {
           : Number(order.publishedProduct.costPrice),
         order.skuInfo,
       );
-      const purchaseOrder = await this.prisma.purchaseOrder.upsert({
-        where: { uk_order_supplier_purchase: { orderId: id, supplierKey: 'demo' } },
-        create: {
-          orderId: id,
-          supplierKey: 'demo',
-          outOrderId: `demo-${id}`,
-          orderId1688,
-          purchaseCost,
-          status: 'placed',
-        },
-        update: { orderId1688, purchaseCost, status: 'placed', failureReason: null },
-      });
-      await this.prisma.order.update({ where: { id }, data: { status: 'purchasing' } });
-
-      // 2. 模拟 1688 发货 → 物流单号
       trackingNo = `SF${Date.now()}`;
       carrier = '顺丰速运';
-      await this.prisma.purchaseOrder.update({
-        where: { id: purchaseOrder.id },
-        data: { status: 'shipped', trackingNo, carrier },
+      await this.withPurchaseFactTransaction(async (tx) => {
+        const purchaseOrder = await tx.purchaseOrder.upsert({
+          where: { uk_order_supplier_purchase: { orderId: id, supplierKey: 'demo' } },
+          create: {
+            orderId: id,
+            supplierKey: 'demo',
+            outOrderId: `demo-${id}`,
+            orderId1688,
+            purchaseCost,
+            status: 'placed',
+          },
+          update: { orderId1688, purchaseCost, status: 'placed', failureReason: null },
+        });
+        await tx.order.update({ where: { id }, data: { status: 'purchasing' } });
+        // 2. 模拟 1688 发货 → 物流单号
+        await tx.purchaseOrder.update({
+          where: { id: purchaseOrder.id },
+          data: { status: 'shipped', trackingNo, carrier },
+        });
+        await this.afterSales.materializeOrder(tx, id);
       });
     }
 
@@ -271,7 +280,7 @@ export class FulfillmentService {
     }
 
     const decidedAt = new Date();
-    await this.prisma.$transaction(async (tx) => {
+    await this.withSerializableTransaction(async (tx) => {
       if (action === 'continue_remaining') {
         const unsafePurchases = await tx.purchaseOrder.count({
           where: {
@@ -321,6 +330,7 @@ export class FulfillmentService {
       if (updated.count === 0) {
         throw new ConflictException('子订单售后状态已变化，请刷新后重新确认');
       }
+      await this.afterSales.materializeOrder(tx, orderId, decidedAt);
     });
 
     return this.orders.getOne(user, orderIdValue);
@@ -333,6 +343,21 @@ export class FulfillmentService {
     });
     if (!order) throw new NotFoundException('订单不存在');
     return order;
+  }
+
+  private withPurchaseFactTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    if (this.afterSales === NOOP_AFTER_SALE_MATERIALIZER) {
+      return operation(this.prisma as unknown as Prisma.TransactionClient);
+    }
+    return this.prisma.$transaction(operation, { isolationLevel: 'Serializable' });
+  }
+
+  private withSerializableTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return this.prisma.$transaction(operation, { isolationLevel: 'Serializable' });
   }
 
   private async recordLogisticsCase(input: {

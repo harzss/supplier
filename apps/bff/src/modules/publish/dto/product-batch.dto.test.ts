@@ -57,6 +57,16 @@ describe('CreateProductBatchPreviewDto', () => {
     await expect(validate(dto)).resolves.toHaveLength(0);
   });
 
+  it('accepts an inventory-sync preview without a price rule', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'sync_inventory',
+      publishedProductIds: ['1', '2'],
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
   it.each([
     ['a missing percentage direction', { mode: 'percentage', basisPoints: 100 }],
     ['a fractional basis point', { mode: 'percentage', direction: 'increase', basisPoints: 10.5 }],

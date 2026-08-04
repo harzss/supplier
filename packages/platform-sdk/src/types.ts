@@ -63,6 +63,21 @@ export interface PlatformProductPriceState extends PlatformProductState {
   }>;
 }
 
+export interface PlatformProductInventoryState extends PlatformProductState {
+  items: Array<{
+    sourceSkuId: string;
+    stock: number;
+  }>;
+}
+
+/** The request may have reached the platform, but its final mutation result is unknown. */
+export class PlatformMutationResultUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlatformMutationResultUnknownError';
+  }
+}
+
 export interface SyncInventoryItemDto {
   /** 发布商品时写入平台的外部 SKU 编码，对应 1688 specId。 */
   sourceSkuId: string;

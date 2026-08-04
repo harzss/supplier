@@ -8,6 +8,7 @@ import type {
   CategoryRecommendationResult,
   OrderQuery,
   PlatformOrder,
+  PlatformProductInventoryState,
   PlatformProductPriceState,
   PlatformProductState,
   PlatformExecutionGuard,
@@ -35,6 +36,7 @@ export interface PlatformAdapter {
   updateProduct(token: string, dto: UpdateProductDto): Promise<void>;
   updateProductPrice?(token: string, dto: UpdateProductPriceDto): Promise<void>;
   getProductPrices?(token: string, productId: string): Promise<PlatformProductPriceState>;
+  getProductInventory?(token: string, productId: string): Promise<PlatformProductInventoryState>;
   getProductState?(token: string, productId: string): Promise<PlatformProductState>;
   syncInventory(token: string, dto: SyncInventoryDto): Promise<void>;
   offlineProduct(token: string, productId: string): Promise<void>;

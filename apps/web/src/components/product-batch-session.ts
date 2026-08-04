@@ -4,6 +4,21 @@ const STORAGE_VERSION = 1;
 const STORAGE_PREFIX = 'supplier.product-batch.workbench.v1';
 const MAX_SELECTION = 100;
 const VALID_STATUSES = new Set(['online', 'draft', 'rejected', 'offline']);
+const INVENTORY_CANDIDATE_FIELDS = [
+  'sourceTotalStock',
+  'sourceSkuCount',
+  'sourceInventoryVersion',
+  'syncedInventoryVersion',
+  'inventoryLastSyncedAt',
+  'inventorySyncError',
+  'inventorySyncEligible',
+  'inventorySyncReason',
+] as const;
+
+type LegacyProductBatchCandidate = Omit<
+  ProductBatchCandidate,
+  (typeof INVENTORY_CANDIDATE_FIELDS)[number]
+>;
 
 export interface ProductBatchSessionScope {
   accountId: string;
@@ -150,6 +165,7 @@ function parseStoredSession(
 
 function parseDraft(value: unknown): ProductBatchComposerDraft | null {
   if (!isRecord(value)) return null;
+  const action = value.action;
   if (
     !isPositiveInteger(value.page) ||
     !isPositiveInteger(value.targetPage) ||
@@ -157,21 +173,23 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     !VALID_STATUSES.has(value.status) ||
     typeof value.searchInput !== 'string' ||
     typeof value.query !== 'string' ||
-    !isProductBatchAction(value.action) ||
+    !isProductBatchAction(action) ||
     !isPriceMode(value.priceMode) ||
     !isPriceDirection(value.priceDirection) ||
     typeof value.percentageInput !== 'string' ||
     typeof value.bulkTargetInput !== 'string' ||
     !Array.isArray(value.selected) ||
     value.selected.length > MAX_SELECTION ||
-    !value.selected.every(isProductBatchCandidate) ||
     !isStringRecord(value.targetInputs)
   ) {
     return null;
   }
 
-  const selectedIds = new Set(value.selected.map((item) => item.publishedProductId));
-  if (selectedIds.size !== value.selected.length) return null;
+  const selected = value.selected.map((item) => parseProductBatchCandidate(item, action));
+  if (selected.some((item) => item === null)) return null;
+  const candidates = selected as ProductBatchCandidate[];
+  const selectedIds = new Set(candidates.map((item) => item.publishedProductId));
+  if (selectedIds.size !== candidates.length) return null;
   const targetInputs = Object.fromEntries(
     Object.entries(value.targetInputs).filter(([id]) => selectedIds.has(id)),
   );
@@ -180,14 +198,14 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     status: value.status,
     searchInput: value.searchInput,
     query: value.query,
-    action: value.action,
+    action,
     priceMode: value.priceMode,
     priceDirection: value.priceDirection,
     percentageInput: value.percentageInput,
     targetInputs,
     bulkTargetInput: value.bulkTargetInput,
     targetPage: value.targetPage,
-    selected: value.selected,
+    selected: candidates,
   };
 }
 
@@ -208,7 +226,34 @@ function parsePreview(value: unknown): ProductBatchPreviewSession | null | undef
   };
 }
 
-function isProductBatchCandidate(value: unknown): value is ProductBatchCandidate {
+function parseProductBatchCandidate(
+  value: unknown,
+  action: ProductBatchAction,
+): ProductBatchCandidate | null {
+  if (!isLegacyProductBatchCandidate(value)) return null;
+  if (isProductBatchCandidate(value)) return value;
+  if (
+    action === 'sync_inventory' ||
+    INVENTORY_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field))
+  ) {
+    return null;
+  }
+  return {
+    ...value,
+    sourceTotalStock: 0,
+    sourceSkuCount: 0,
+    sourceInventoryVersion: 0,
+    syncedInventoryVersion: 0,
+    inventoryLastSyncedAt: null,
+    inventorySyncError: null,
+    inventorySyncEligible: false,
+    inventorySyncReason: '旧版会话缺少库存快照，请刷新商品后再同步库存',
+  };
+}
+
+function isLegacyProductBatchCandidate(
+  value: unknown,
+): value is LegacyProductBatchCandidate & Record<string, unknown> {
   if (!isRecord(value)) return false;
   return (
     isPositiveId(value.publishedProductId) &&
@@ -234,6 +279,21 @@ function isProductBatchCandidate(value: unknown): value is ProductBatchCandidate
   );
 }
 
+function isProductBatchCandidate(
+  value: LegacyProductBatchCandidate & Record<string, unknown>,
+): value is ProductBatchCandidate & Record<string, unknown> {
+  return (
+    isNonNegativeInteger(value.sourceTotalStock) &&
+    isNonNegativeInteger(value.sourceSkuCount) &&
+    isNonNegativeInteger(value.sourceInventoryVersion) &&
+    isNonNegativeInteger(value.syncedInventoryVersion) &&
+    (value.inventoryLastSyncedAt === null || typeof value.inventoryLastSyncedAt === 'string') &&
+    (value.inventorySyncError === null || typeof value.inventorySyncError === 'string') &&
+    typeof value.inventorySyncEligible === 'boolean' &&
+    (value.inventorySyncReason === null || typeof value.inventorySyncReason === 'string')
+  );
+}
+
 function isPriceRange(value: unknown): value is [number, number] | null {
   return (
     value === null ||
@@ -245,7 +305,7 @@ function isPriceRange(value: unknown): value is [number, number] | null {
 }
 
 function isProductBatchAction(value: unknown): value is ProductBatchAction {
-  return value === 'offline' || value === 'edit_price';
+  return value === 'offline' || value === 'edit_price' || value === 'sync_inventory';
 }
 
 function isPriceMode(value: unknown): value is 'percentage' | 'targets' {
@@ -266,6 +326,10 @@ function isPositiveInteger(value: unknown): value is number {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0;
 }
 
 function isPositiveId(value: unknown): value is string {

@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import type { AdapterConfig } from '../types';
+import { PlatformMutationResultUnknownError, type AdapterConfig } from '../types';
 import { DouyinAdapter } from './douyin';
 
 const CONFIG: AdapterConfig = {
@@ -606,6 +606,72 @@ describe('DouyinAdapter', () => {
     await expect(adapter.getProductPrices('access-token', '998877')).rejects.toThrow();
   });
 
+  it('reads, validates and stably sorts all product SKU inventory', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: {
+              product_id: '998877',
+              status: 0,
+              check_status: 3,
+              spec_prices: [
+                { outer_sku_id: 'sku-z', stock_num: 0 },
+                { outer_sku_id: 'sku-a', stock_num: 12 },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await expect(adapter.getProductInventory('access-token', '998877')).resolves.toEqual({
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+      items: [
+        { sourceSkuId: 'sku-a', stock: 12 },
+        { sourceSkuId: 'sku-z', stock: 0 },
+      ],
+    });
+    const [input, init] = fetcher.mock.calls[0]!;
+    expect(new URL(String(input)).pathname).toBe('/product/detail');
+    expect(new URL(String(input)).searchParams.get('method')).toBe('product.detail');
+    expect(JSON.parse(String(init?.body))).toEqual({ product_id: '998877' });
+  });
+
+  it.each([
+    ['a missing inventory list', undefined],
+    ['an empty inventory list', []],
+    ['a missing external SKU ID', [{ stock_num: 12 }]],
+    ['a missing stock value', [{ outer_sku_id: 'sku-a' }]],
+    ['a negative stock value', [{ outer_sku_id: 'sku-a', stock_num: -1 }]],
+    ['a fractional stock value', [{ outer_sku_id: 'sku-a', stock_num: 1.5 }]],
+    [
+      'a duplicate external SKU ID',
+      [
+        { outer_sku_id: 'sku-a', stock_num: 12 },
+        { outer_sku_id: 'sku-a', stock_num: 8 },
+      ],
+    ],
+  ])('rejects product.detail with %s', async (_label, specPrices) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: { product_id: '998877', status: 0, check_status: 3, spec_prices: specPrices },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(adapter.getProductInventory('access-token', '998877')).rejects.toThrow();
+  });
+
   it('maps product.detail audit status before the shop online status', async () => {
     const fetcher = vi.fn(
       async () =>
@@ -700,6 +766,108 @@ describe('DouyinAdapter', () => {
         items: [{ sourceSkuId: '1688-spec-white-m', stock: 12 }],
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ['missing data', undefined],
+    ['missing results', {}],
+    ['an incomplete result list', { results: [{ uniq_id: '1', status_code: '0' }] }],
+    [
+      'an unexpected result ID',
+      {
+        results: [
+          { uniq_id: '1', status_code: '0' },
+          { uniq_id: '3', status_code: '0' },
+        ],
+      },
+    ],
+    ['a missing status code', { results: [{ uniq_id: '1' }, { uniq_id: '2', status_code: '0' }] }],
+    [
+      'a non-integer status code',
+      {
+        results: [
+          { uniq_id: '1', status_code: 'success' },
+          { uniq_id: '2', status_code: '0' },
+        ],
+      },
+    ],
+  ])('rejects a successful inventory response with %s', async (_label, data) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(JSON.stringify({ code: 10000, ...(data === undefined ? {} : { data }) }), {
+          status: 200,
+        }),
+    );
+
+    const result = adapter.syncInventory('access-token', {
+      platformProductId: '998877',
+      idempotencyKey: 'inventory-7-abcdef',
+      items: [
+        { sourceSkuId: '1688-spec-white-m', stock: 12 },
+        { sourceSkuId: '1688-spec-black-l', stock: 8 },
+      ],
+    });
+    await expect(result).rejects.toBeInstanceOf(PlatformMutationResultUnknownError);
+    await expect(result).rejects.toThrow('Douyin inventory sync returned an invalid response');
+  });
+
+  it('accepts numeric inventory status codes', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: { results: [{ uniq_id: '1', status_code: 0 }] },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(
+      adapter.syncInventory('access-token', {
+        platformProductId: '998877',
+        idempotencyKey: 'inventory-7-abcdef',
+        items: [{ sourceSkuId: '1688-spec-white-m', stock: 12 }],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('marks a transport failure as an unknown inventory mutation result', async () => {
+    const adapter = new DouyinAdapter(CONFIG, async () => {
+      throw new Error('socket timeout');
+    });
+
+    await expect(
+      adapter.syncInventory('access-token', {
+        platformProductId: '998877',
+        idempotencyKey: 'inventory-7-abcdef',
+        items: [{ sourceSkuId: '1688-spec-white-m', stock: 12 }],
+      }),
+    ).rejects.toBeInstanceOf(PlatformMutationResultUnknownError);
+  });
+
+  it('keeps an explicit per-item inventory failure retryable as a known partial result', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: { results: [{ uniq_id: '1', status_code: '30001' }] },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    const result = adapter.syncInventory('access-token', {
+      platformProductId: '998877',
+      idempotencyKey: 'inventory-7-abcdef',
+      items: [{ sourceSkuId: '1688-spec-white-m', stock: 12 }],
+    });
+    await expect(result).rejects.not.toBeInstanceOf(PlatformMutationResultUnknownError);
+    await expect(result).rejects.toThrow('Douyin inventory sync failed for item 1');
   });
 
   it('offlines a product and treats an already-offline response as success', async () => {

@@ -6,6 +6,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Prisma, PublishedProduct } from '@supplier/db';
+import type {
+  PlatformAdapter,
+  PlatformProductInventoryState,
+  PlatformProductState,
+} from '@supplier/platform-sdk';
+import { createHash } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
 import {
   PlatformAdapterFactory,
@@ -24,6 +30,13 @@ type InventoryRecord = Prisma.PublishedProductGetPayload<{
     task: { select: { skuSnapshot: true; userId: true } };
   };
 }>;
+
+type SkuInventoryItem = { sourceSkuId: string; stock: number };
+
+type SkuInventorySnapshot = {
+  version: 1;
+  items: SkuInventoryItem[];
+};
 
 @Injectable()
 export class InventorySyncService {
@@ -166,6 +179,8 @@ export class InventorySyncService {
 
       let reason = 'stock_updated';
       let offline = false;
+      let offlineState: PlatformProductState | null = null;
+      let syncedInventory: SkuInventorySnapshot | null = null;
       if (record.sourceProduct.availability === 'offline') {
         reason = 'source_offline';
         offline = true;
@@ -181,15 +196,86 @@ export class InventorySyncService {
           reason = 'source_sku_changed';
           offline = true;
         } else {
-          await adapter.syncInventory(token, {
-            platformProductId: record.platformProductId,
-            idempotencyKey: inventoryIdempotencyKey(record.id, targetVersion, targetFingerprint),
-            items: inventory.items,
-          });
+          if (!adapter.getProductInventory) {
+            throw new Error('当前平台无法回读 SKU 库存，拒绝执行库存同步');
+          }
+          const desired = inventory.items;
+          let actual = await readPlatformInventory(
+            adapter,
+            token,
+            record.platformProductId,
+            desired,
+          );
+          const pendingItems = pendingInventoryItems(actual, desired);
+          if (pendingItems.length > 0) {
+            let syncFailed = false;
+            let syncError: unknown;
+            try {
+              await adapter.syncInventory(token, {
+                platformProductId: record.platformProductId,
+                idempotencyKey: inventoryIdempotencyKey(
+                  record.id,
+                  targetVersion,
+                  targetFingerprint,
+                  pendingItems,
+                ),
+                items: pendingItems,
+              });
+            } catch (error) {
+              if (isPlatformMutationResultUnknown(error)) {
+                const quarantined = await this.quarantineUnknownInventoryWrite(
+                  record,
+                  adapter,
+                  token,
+                  targetFingerprint,
+                  targetVersion,
+                  attempts,
+                  lockedBy,
+                  platformLock,
+                );
+                return quarantined ? 'processed' : 'stale';
+              }
+              syncFailed = true;
+              syncError = error;
+            }
+
+            try {
+              actual = await readPlatformInventory(
+                adapter,
+                token,
+                record.platformProductId,
+                desired,
+              );
+            } catch (readbackError) {
+              if (syncFailed) throw syncError;
+              throw readbackError;
+            }
+            if (pendingInventoryItems(actual, desired).length > 0) {
+              if (syncFailed) throw syncError;
+              throw new Error('平台尚未确认全部 SKU 新库存，将稍后重试');
+            }
+          }
+          syncedInventory = inventorySnapshot(desired);
         }
       }
 
-      if (offline) await adapter.offlineProduct(token, record.platformProductId);
+      if (offline) {
+        if (!adapter.getProductState) {
+          throw new Error('当前平台无法回读商品状态，拒绝确认自动下架');
+        }
+        let offlineError: unknown;
+        try {
+          await adapter.offlineProduct(token, record.platformProductId);
+        } catch (error) {
+          offlineError = error;
+        }
+        await this.platformProductLocks.renew(record.id, platformLock);
+        offlineState = await adapter.getProductState(token, record.platformProductId);
+        if (!isOfflineState(offlineState.state)) {
+          if (offlineError) throw offlineError;
+          throw new Error('平台尚未确认商品下架，将稍后重试');
+        }
+      }
       await this.platformProductLocks.renew(record.id, platformLock);
       const completed = await this.complete(
         record.id,
@@ -199,6 +285,8 @@ export class InventorySyncService {
         lockedBy,
         reason,
         offline,
+        offlineState,
+        syncedInventory,
       );
       return completed ? 'processed' : 'stale';
     } finally {
@@ -287,6 +375,8 @@ export class InventorySyncService {
     lockedBy: string,
     reason: string,
     offline: boolean,
+    offlineState: PlatformProductState | null,
+    syncedInventory: SkuInventorySnapshot | null,
   ): Promise<boolean> {
     const updated = await this.prisma.publishedProduct.updateMany({
       where: {
@@ -296,9 +386,16 @@ export class InventorySyncService {
         inventoryLockedBy: lockedBy,
         inventoryTargetFingerprint: targetFingerprint,
         inventoryTargetVersion: targetVersion,
+        sourceProduct: {
+          inventoryFingerprint: targetFingerprint,
+          inventoryVersion: targetVersion,
+        },
       },
       data: {
         ...(offline ? { status: 'offline' as const } : {}),
+        ...(syncedInventory
+          ? { skuInventorySnapshot: syncedInventory as unknown as Prisma.InputJsonValue }
+          : {}),
         inventorySyncStatus: 'synced',
         inventoryFingerprint: targetFingerprint,
         inventoryTargetFingerprint: targetFingerprint,
@@ -310,10 +407,89 @@ export class InventorySyncService {
         inventoryLastSyncedAt: new Date(),
         inventorySyncReason: reason,
         inventorySyncError: null,
+        ...(offlineState
+          ? {
+              platformStatusRaw: offlineState.status,
+              platformCheckStatusRaw: offlineState.checkStatus,
+              platformStatusSyncedAt: new Date(),
+              platformStatusError: null,
+            }
+          : {}),
         mutationRevision: { increment: 1 },
       },
     });
     return updated.count === 1;
+  }
+
+  private async quarantineUnknownInventoryWrite(
+    record: InventoryRecord,
+    adapter: PlatformAdapter,
+    token: string,
+    targetFingerprint: string,
+    targetVersion: number,
+    attempts: number,
+    lockedBy: string,
+    platformLock: string,
+  ): Promise<boolean> {
+    await this.platformProductLocks.renew(record.id, platformLock);
+    let offlineError: unknown;
+    try {
+      await adapter.offlineProduct(token, record.platformProductId!);
+    } catch (error) {
+      offlineError = error;
+    }
+    await this.platformProductLocks.renew(record.id, platformLock);
+    const platformState = adapter.getProductState
+      ? await adapter.getProductState(token, record.platformProductId!)
+      : await adapter.getProductInventory!(token, record.platformProductId!);
+    if (!isOfflineState(platformState.state)) {
+      if (offlineError) throw offlineError;
+      throw new Error('平台库存写入结果未知且尚未确认商品下架，将稍后重试');
+    }
+
+    const now = new Date();
+    const quarantineData = {
+      status: 'offline' as const,
+      inventorySyncStatus: 'pending' as const,
+      inventorySyncAttempts: 0,
+      inventoryNextRunAt: now,
+      inventoryLockedAt: null,
+      inventoryLockedBy: null,
+      inventorySyncReason: 'inventory_result_unknown',
+      inventorySyncError: '平台库存写入结果未知，商品已安全下架',
+      platformStatusRaw: platformState.status,
+      platformCheckStatusRaw: platformState.checkStatus,
+      platformStatusSyncedAt: now,
+      platformStatusError: null,
+      mutationRevision: { increment: 1 },
+    };
+    const quarantined = await this.prisma.publishedProduct.updateMany({
+      where: {
+        id: record.id,
+        status: 'online',
+        inventorySyncStatus: 'syncing',
+        inventorySyncAttempts: attempts,
+        inventoryLockedBy: lockedBy,
+        inventoryTargetFingerprint: targetFingerprint,
+        inventoryTargetVersion: targetVersion,
+      },
+      data: quarantineData,
+    });
+    if (quarantined.count === 1) return true;
+    const reconciled = await this.prisma.publishedProduct.updateMany({
+      where: {
+        id: record.id,
+        platformProductId: record.platformProductId,
+        status: 'online',
+      },
+      data: quarantineData,
+    });
+    if (reconciled.count === 1) return true;
+    const latest = await this.prisma.publishedProduct.findUnique({
+      where: { id: record.id },
+      select: { platformProductId: true, status: true },
+    });
+    return latest?.platformProductId === record.platformProductId && latest.status === 'offline';
   }
 
   private async recoverStale(now: Date): Promise<void> {
@@ -342,39 +518,133 @@ export class InventorySyncService {
 
 function inventoryItems(
   record: InventoryRecord,
-):
-  | { kind: 'items'; items: Array<{ sourceSkuId: string; stock: number }> }
-  | { kind: 'sku_changed' } {
+): { kind: 'items'; items: SkuInventoryItem[] } | { kind: 'sku_changed' } {
   const snapshot = jsonRecord(record.task.skuSnapshot);
   const platformSnapshot = jsonRecord(snapshot?.[record.shop.platform]);
   if (!platformSnapshot || !Array.isArray(platformSnapshot.skus)) return { kind: 'sku_changed' };
 
-  const currentSkus = new Map(
-    arrayValue(record.sourceProduct.skuList).flatMap((value) => {
-      const sku = jsonRecord(value);
-      const sourceSkuId = textValue(sku?.skuId ?? sku?.id);
-      const stock = integerStock(sku?.stock);
-      return sourceSkuId ? ([[sourceSkuId, stock]] as Array<[string, number]>) : [];
-    }),
-  );
-  const items = platformSnapshot.skus.flatMap((value) => {
-    const sku = jsonRecord(value);
-    const sourceSkuId = textValue(sku?.sourceSkuId);
-    const stock = sourceSkuId ? currentSkus.get(sourceSkuId) : undefined;
-    return sourceSkuId && stock !== undefined ? [{ sourceSkuId, stock }] : [];
-  });
-  if (items.length === 0 || items.length !== platformSnapshot.skus.length) {
+  const currentItems = sourceInventoryItems(record.sourceProduct.skuList);
+  const publishedSkuIds = publishedSkuIdsValue(platformSnapshot.skus);
+  if (!currentItems || !publishedSkuIds || currentItems.length !== publishedSkuIds.length) {
     return { kind: 'sku_changed' };
   }
+  const currentSkus = new Map(currentItems.map((item) => [item.sourceSkuId, item.stock]));
+  const items = publishedSkuIds.flatMap((sourceSkuId) => {
+    const stock = currentSkus.get(sourceSkuId);
+    return stock === undefined ? [] : [{ sourceSkuId, stock }];
+  });
+  if (items.length !== publishedSkuIds.length) return { kind: 'sku_changed' };
   return { kind: 'items', items };
 }
 
-function inventoryIdempotencyKey(id: bigint, version: number, fingerprint: string): string {
-  return `inventory-${id}-v${version}-${fingerprint.slice(0, 24)}`;
+async function readPlatformInventory(
+  adapter: PlatformAdapter,
+  token: string,
+  platformProductId: string,
+  desired: SkuInventoryItem[],
+): Promise<SkuInventoryItem[]> {
+  if (!adapter.getProductInventory) {
+    throw new Error('当前平台无法回读 SKU 库存，拒绝执行库存同步');
+  }
+  const state = await adapter.getProductInventory(token, platformProductId);
+  if (state.state !== 'online') {
+    throw new Error(`平台商品当前状态为 ${state.state}，无法确认 SKU 库存`);
+  }
+  const actual = platformInventoryItems(state);
+  if (!actual || !sameInventorySkuIds(actual, desired)) {
+    throw new Error('平台返回的 SKU 库存不完整，无法确认同步结果');
+  }
+  return actual;
+}
+
+function sourceInventoryItems(value: unknown): SkuInventoryItem[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const ids = new Set<string>();
+  const items: SkuInventoryItem[] = [];
+  for (const itemValue of value) {
+    const sku = jsonRecord(itemValue);
+    const sourceSkuId = skuIdValue(sku?.skuId ?? sku?.id);
+    const stock = stockValue(sku?.stock);
+    if (!sourceSkuId || stock === null || ids.has(sourceSkuId)) return null;
+    ids.add(sourceSkuId);
+    items.push({ sourceSkuId, stock });
+  }
+  return items;
+}
+
+function publishedSkuIdsValue(value: unknown[]): string[] | null {
+  if (value.length === 0) return null;
+  const ids = new Set<string>();
+  const sourceSkuIds: string[] = [];
+  for (const itemValue of value) {
+    const sku = jsonRecord(itemValue);
+    const sourceSkuId = skuIdValue(sku?.sourceSkuId);
+    if (!sourceSkuId || ids.has(sourceSkuId)) return null;
+    ids.add(sourceSkuId);
+    sourceSkuIds.push(sourceSkuId);
+  }
+  return sourceSkuIds;
+}
+
+function platformInventoryItems(state: PlatformProductInventoryState): SkuInventoryItem[] | null {
+  if (!Array.isArray(state.items) || state.items.length === 0) return null;
+  const ids = new Set<string>();
+  const items: SkuInventoryItem[] = [];
+  for (const itemValue of state.items) {
+    const item = jsonRecord(itemValue);
+    const sourceSkuId = skuIdValue(item?.sourceSkuId);
+    const stock = stockValue(item?.stock);
+    if (!sourceSkuId || stock === null || ids.has(sourceSkuId)) return null;
+    ids.add(sourceSkuId);
+    items.push({ sourceSkuId, stock });
+  }
+  return items;
+}
+
+function sameInventorySkuIds(left: SkuInventoryItem[], right: SkuInventoryItem[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightIds = new Set(right.map((item) => item.sourceSkuId));
+  return left.every((item) => rightIds.has(item.sourceSkuId));
+}
+
+function pendingInventoryItems(
+  actual: SkuInventoryItem[],
+  desired: SkuInventoryItem[],
+): SkuInventoryItem[] {
+  const actualBySku = new Map(actual.map((item) => [item.sourceSkuId, item.stock]));
+  return desired.filter((item) => actualBySku.get(item.sourceSkuId) !== item.stock);
+}
+
+function inventorySnapshot(items: SkuInventoryItem[]): SkuInventorySnapshot {
+  return {
+    version: 1,
+    items: [...items].sort((left, right) => left.sourceSkuId.localeCompare(right.sourceSkuId)),
+  };
+}
+
+function inventoryIdempotencyKey(
+  id: bigint,
+  version: number,
+  fingerprint: string,
+  items: SkuInventoryItem[],
+): string {
+  const remainingFingerprint = createHash('sha256')
+    .update(JSON.stringify(items))
+    .digest('hex')
+    .slice(0, 16);
+  return `inventory-${id}-v${version}-${fingerprint.slice(0, 24)}-${remainingFingerprint}`;
 }
 
 function retryDelayMs(attempts: number): number {
   return Math.min(5 * 60_000, 5_000 * 2 ** Math.max(0, attempts - 1));
+}
+
+function isPlatformMutationResultUnknown(error: unknown): boolean {
+  return error instanceof Error && error.name === 'PlatformMutationResultUnknownError';
+}
+
+function isOfflineState(state: PlatformProductState['state']): boolean {
+  return state === 'offline' || state === 'deleted';
 }
 
 function parsePositiveId(value: string): bigint {
@@ -393,15 +663,12 @@ function jsonRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function arrayValue(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
+function skuIdValue(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const sourceSkuId = value.trim();
+  return sourceSkuId && sourceSkuId.length <= 128 ? sourceSkuId : null;
 }
 
-function textValue(value: unknown): string {
-  return typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
-}
-
-function integerStock(value: unknown): number {
-  const stock = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(stock) && stock > 0 ? Math.trunc(stock) : 0;
+function stockValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }

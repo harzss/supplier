@@ -424,6 +424,7 @@ model PublishedProduct {
   salePrice                  Decimal                @map("sale_price") @db.Decimal(10, 2)
   costPrice                  Decimal?               @map("cost_price") @db.Decimal(10, 2)
   skuPriceSnapshot           Json?                  @map("sku_price_snapshot") @db.JsonB
+  skuInventorySnapshot       Json?                  @map("sku_inventory_snapshot") @db.JsonB
   priceSyncedAt              DateTime?              @map("price_synced_at")
   status                     PublishedProductStatus @default(online)
   categoryId                 String?                @map("category_id") @db.VarChar(64)

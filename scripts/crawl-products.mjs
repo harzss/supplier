@@ -15,6 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { persistCrawledProduct, persistOfflineProduct } from './crawl-products-inventory.mjs';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -129,33 +130,7 @@ async function main() {
         );
         return;
       }
-      const now = new Date();
-      const inventory = inventorySnapshot(p);
-      const existing = await prisma.sourceProduct.findUnique({
-        where: { productId1688: p.productId1688 },
-        select: { availability: true, inventoryFingerprint: true, inventoryVersion: true },
-      });
-      const inventoryChanged = existing?.inventoryFingerprint !== inventory.fingerprint;
-      const inventoryVersion = inventoryChanged
-        ? (existing?.inventoryVersion ?? 0) + 1
-        : (existing?.inventoryVersion ?? 1);
-      const product = await prisma.sourceProduct.upsert({
-        where: { productId1688: p.productId1688 },
-        create: {
-          ...mapToDb(p, inventory, inventoryVersion, now),
-          availabilityChangedAt: now,
-        },
-        update: {
-          ...mapToDb(p, inventory, inventoryVersion, now),
-          ...(existing?.availability !== inventory.availability
-            ? { availabilityChangedAt: now }
-            : {}),
-        },
-        select: { id: true },
-      });
-      if (inventoryChanged) {
-        await queueInventorySync(product.id, inventory.fingerprint, inventoryVersion, now);
-      }
+      await persistCrawledProduct(prisma, p, inventorySnapshot(p), new Date());
       upsertedIds.push(p.productId1688);
     },
     onNotFound: async (productId1688) => {
@@ -163,38 +138,9 @@ async function main() {
         console.log(`  ↘ ${productId1688} 已下架或不存在`);
         return;
       }
-      const existing = await prisma.sourceProduct.findUnique({
-        where: { productId1688 },
-        select: {
-          id: true,
-          availability: true,
-          inventoryFingerprint: true,
-          inventoryVersion: true,
-        },
-      });
-      if (!existing) return;
       const now = new Date();
       const inventory = offlineInventorySnapshot(productId1688);
-      const inventoryChanged = existing.inventoryFingerprint !== inventory.fingerprint;
-      const inventoryVersion = inventoryChanged
-        ? existing.inventoryVersion + 1
-        : existing.inventoryVersion;
-      await prisma.sourceProduct.update({
-        where: { id: existing.id },
-        data: {
-          availability: inventory.availability,
-          totalStock: inventory.totalStock,
-          inventoryFingerprint: inventory.fingerprint,
-          inventoryVersion,
-          syncedAt: now,
-          ...(existing.availability !== inventory.availability
-            ? { availabilityChangedAt: now }
-            : {}),
-        },
-      });
-      if (inventoryChanged) {
-        await queueInventorySync(existing.id, inventory.fingerprint, inventoryVersion, now);
-      }
+      await persistOfflineProduct(prisma, productId1688, inventory, now);
     },
     onProgress: (done, total) => {
       if (done % 5 === 0 || done === total) {
@@ -261,49 +207,6 @@ async function main() {
     }
     console.log(`✓ 打分完成（${products.length} 条）`);
   }
-}
-
-// ---- helpers ----
-function mapToDb(p, inventory, inventoryVersion, syncedAt) {
-  return {
-    productId1688: p.productId1688,
-    supplierId: p.supplierId,
-    title: p.title,
-    price: p.price,
-    priceMin: p.priceMin,
-    priceMax: p.priceMax,
-    mainImage: p.mainImage,
-    detailImages: p.detailImages ?? [],
-    categoryPath: p.categoryPath,
-    categoryL1: p.categoryL1,
-    categoryL2: p.categoryL2,
-    skuList: p.skuList ?? [],
-    attributes: { ...(p.attributes ?? {}), signals: p.signals ?? {} },
-    monthlySold: p.monthlySold ?? 0,
-    isCrossBorder: p.isCrossBorder ?? false,
-    isOnePieceDrop: p.isOnePieceDrop ?? false,
-    availability: inventory.availability,
-    totalStock: inventory.totalStock,
-    inventoryFingerprint: inventory.fingerprint,
-    inventoryVersion,
-    syncedAt,
-  };
-}
-
-async function queueInventorySync(sourceProductId, targetFingerprint, targetVersion, now) {
-  await prisma.publishedProduct.updateMany({
-    where: { sourceProductId, status: 'online' },
-    data: {
-      inventorySyncStatus: 'pending',
-      inventoryTargetFingerprint: targetFingerprint,
-      inventoryTargetVersion: targetVersion,
-      inventorySyncAttempts: 0,
-      inventoryNextRunAt: now,
-      inventoryLockedAt: null,
-      inventoryLockedBy: null,
-      inventorySyncError: null,
-    },
-  });
 }
 
 function featuresFromProduct(p) {

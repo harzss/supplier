@@ -19,7 +19,7 @@ import {
 } from 'class-validator';
 import { IsPositiveInt64String } from './create-publish-task.dto';
 
-export const PRODUCT_BATCH_ACTIONS = ['offline', 'edit_price'] as const;
+export const PRODUCT_BATCH_ACTIONS = ['offline', 'edit_price', 'sync_inventory'] as const;
 export type SupportedProductBatchAction = (typeof PRODUCT_BATCH_ACTIONS)[number];
 export const PRODUCT_BATCH_MAX_ITEMS = 100;
 

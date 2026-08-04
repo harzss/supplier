@@ -48,6 +48,40 @@ describe('ProductBatchService', () => {
     });
   });
 
+  it('exposes source inventory totals and safe sync eligibility in the candidate list', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5, price: 29.9 },
+                { sourceSkuId: 'sku-b', stock: 8, price: 39.9 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'online' }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          sourceTotalStock: 20,
+          sourceSkuCount: 2,
+          sourceInventoryVersion: 4,
+          syncedInventoryVersion: 3,
+          inventorySyncEligible: true,
+          inventorySyncReason: null,
+        },
+      ],
+    });
+  });
+
   it('replays the same preview request without creating another task', async () => {
     const fixture = createFixture();
     const replay = taskRecord({
@@ -141,6 +175,21 @@ describe('ProductBatchService', () => {
     ).rejects.toThrow('该请求标识已用于不同的批量操作');
   });
 
+  it('rejects a price rule on an inventory-sync preview', async () => {
+    const fixture = createFixture();
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'sync_inventory',
+        publishedProductIds: ['11'],
+        priceRule: { mode: 'percentage', direction: 'increase', basisPoints: 1000 },
+      }),
+    ).rejects.toThrow('库存同步不能携带改价规则');
+
+    expect(fixture.prisma.publishedProduct.findMany).not.toHaveBeenCalled();
+  });
+
   it('does not create a preview when a selected product is outside the current tenant', async () => {
     const fixture = createFixture();
     fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
@@ -208,6 +257,68 @@ describe('ProductBatchService', () => {
                   skuPrices: priceSnapshot([
                     ['sku-a', 3289],
                     ['sku-b', 4389],
+                  ]),
+                }),
+              }),
+            ],
+          },
+        }),
+      }),
+    );
+  });
+
+  it('materializes confirmed and current-source SKU inventory into the preview', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+    fixture.prisma.productBatchTask.create.mockImplementation(async ({ data }: any) =>
+      taskRecord({
+        action: 'sync_inventory',
+        requestFingerprint: data.requestFingerprint,
+        items: [],
+      }),
+    );
+
+    await fixture.service.createPreview(USER, {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'sync_inventory',
+      publishedProductIds: ['11'],
+    });
+
+    expect(fixture.prisma.productBatchTask.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'sync_inventory',
+          items: {
+            create: [
+              expect.objectContaining({
+                beforeSnapshot: expect.objectContaining({
+                  inventoryFingerprint: 'a'.repeat(64),
+                  inventoryVersion: 3,
+                  skuInventory: inventorySnapshot([
+                    ['sku-a', 5],
+                    ['sku-b', 8],
+                  ]),
+                }),
+                desiredSnapshot: expect.objectContaining({
+                  inventoryFingerprint: 'b'.repeat(64),
+                  inventoryVersion: 4,
+                  skuInventory: inventorySnapshot([
+                    ['sku-a', 7],
+                    ['sku-b', 13],
                   ]),
                 }),
               }),
@@ -761,6 +872,471 @@ describe('ProductBatchService', () => {
     expect(updateProductPrice).not.toHaveBeenCalled();
   });
 
+  it('syncs absolute SKU inventory and commits only after platform readback matches', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductInventory
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 5],
+          ['sku-b', 8],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ]),
+      );
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.syncInventory).toHaveBeenCalledWith('shop-token', {
+      platformProductId: '998877',
+      idempotencyKey: expect.stringMatching(
+        new RegExp(`^batch-inventory-51-v4-${'b'.repeat(24)}-[a-f0-9]{16}$`),
+      ),
+      items: [
+        { sourceSkuId: 'sku-a', stock: 7 },
+        { sourceSkuId: 'sku-b', stock: 13 },
+      ],
+    });
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 1, status: 'online' }),
+        data: expect.objectContaining({
+          skuInventorySnapshot: inventorySnapshot([
+            ['sku-a', 7],
+            ['sku-b', 13],
+          ]),
+          inventorySyncStatus: 'synced',
+          inventoryVersion: 4,
+          inventorySyncReason: 'manual_batch_sync',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(fixture.productLocks.release.mock.invocationCallOrder[0]).toBeGreaterThan(
+      fixture.prisma.publishedProduct.updateMany.mock.invocationCallOrder.at(-1)!,
+    );
+  });
+
+  it('uses a new token for only the remaining SKUs after an explicit partial failure', async () => {
+    const fixture = createFixture();
+    const firstAttempt = inventoryExecutionRecord();
+    const retryAttempt = inventoryExecutionRecord({ attempts: 2 });
+    fixture.prepareExecution(firstAttempt);
+    fixture.adapter.getProductInventory
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 5],
+          ['sku-b', 8],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 7],
+          ['sku-b', 8],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 7],
+          ['sku-b', 8],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ]),
+      );
+    fixture.adapter.syncInventory
+      .mockRejectedValueOnce(new Error('Douyin inventory sync failed for item 2'))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(fixture.service.executeClaimed(firstAttempt)).rejects.toThrow(
+      'Douyin inventory sync failed for item 2',
+    );
+    fixture.prepareExecution(retryAttempt);
+    await expect(fixture.service.executeClaimed(retryAttempt)).resolves.toBe('processed');
+
+    expect(fixture.adapter.syncInventory).toHaveBeenCalledTimes(2);
+    const firstRequest = fixture.adapter.syncInventory.mock.calls[0]![1];
+    const retryRequest = fixture.adapter.syncInventory.mock.calls[1]![1];
+    expect(firstRequest.items).toEqual([
+      { sourceSkuId: 'sku-a', stock: 7 },
+      { sourceSkuId: 'sku-b', stock: 13 },
+    ]);
+    expect(retryRequest.items).toEqual([{ sourceSkuId: 'sku-b', stock: 13 }]);
+    expect(retryRequest.idempotencyKey).not.toBe(firstRequest.idempotencyKey);
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+  });
+
+  it('keeps a product offline when an unknown v4 write lands after a confirmed v5 write', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    let platformState = 'online' as 'online' | 'offline';
+    let platformStocks = [
+      ['sku-a', 5],
+      ['sku-b', 8],
+    ] as Array<[string, number]>;
+    let applyLateV4 = () => undefined;
+    fixture.adapter.getProductInventory.mockImplementation(async () =>
+      platformInventory(platformStocks),
+    );
+    fixture.adapter.syncInventory.mockImplementationOnce(async (_token, request) => {
+      applyLateV4 = () => {
+        platformStocks = request.items.map((entry) => [entry.sourceSkuId, entry.stock]);
+      };
+      const error = new Error('Douyin inventory sync request failed');
+      error.name = 'PlatformMutationResultUnknownError';
+      throw error;
+    });
+    fixture.adapter.offlineProduct.mockImplementation(async () => {
+      platformState = 'offline';
+    });
+    fixture.adapter.getProductState.mockImplementation(async () => ({
+      state: platformState,
+      status: platformState === 'offline' ? 1 : 0,
+      checkStatus: 3,
+    }));
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow('商品已安全下架');
+
+    platformStocks = [
+      ['sku-a', 2],
+      ['sku-b', 3],
+    ];
+    applyLateV4();
+    expect(platformStocks).toEqual([
+      ['sku-a', 7],
+      ['sku-b', 13],
+    ]);
+    expect(platformState).toBe('offline');
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'offline',
+          inventorySyncStatus: 'pending',
+          inventorySyncReason: 'manual_batch_quarantine',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    const quarantineData = fixture.prisma.publishedProduct.updateMany.mock.calls[0]![0].data;
+    expect(quarantineData).not.toHaveProperty('inventoryTargetFingerprint');
+    expect(quarantineData).not.toHaveProperty('inventoryTargetVersion');
+  });
+
+  it('reconciles local offline state after quarantine when the expected revision changed', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 5],
+        ['sku-b', 8],
+      ]),
+    );
+    const unknownResult = new Error('Douyin inventory sync request failed');
+    unknownResult.name = 'PlatformMutationResultUnknownError';
+    fixture.adapter.syncInventory.mockRejectedValueOnce(unknownResult);
+    fixture.adapter.getProductState.mockResolvedValue({
+      state: 'offline',
+      status: 1,
+      checkStatus: 3,
+    });
+    fixture.prisma.publishedProduct.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow('商品已安全下架');
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: {
+          id: 11n,
+          platformProductId: '998877',
+          status: 'online',
+        },
+        data: expect.objectContaining({
+          status: 'offline',
+          inventorySyncStatus: 'pending',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+  });
+
+  it('persists a confirmed offline quarantine with the expected revision after the lock is lost', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 5],
+        ['sku-b', 8],
+      ]),
+    );
+    const unknownResult = new Error('Douyin inventory sync request failed');
+    unknownResult.name = 'PlatformMutationResultUnknownError';
+    fixture.adapter.syncInventory.mockRejectedValueOnce(unknownResult);
+    fixture.adapter.getProductState.mockResolvedValue({
+      state: 'offline',
+      status: 1,
+      checkStatus: 3,
+    });
+    fixture.productLocks.renew
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValue(new Error('product lock lease lost'));
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow('商品已安全下架');
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.adapter.getProductState).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledOnce();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 1, status: 'online' }),
+        data: expect.objectContaining({ status: 'offline', inventorySyncStatus: 'pending' }),
+      }),
+    );
+  });
+
+  it('still quarantines the platform but does not overwrite a newer local revision after the lock is lost', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 5],
+        ['sku-b', 8],
+      ]),
+    );
+    const unknownResult = new Error('Douyin inventory sync request failed');
+    unknownResult.name = 'PlatformMutationResultUnknownError';
+    fixture.adapter.syncInventory.mockRejectedValueOnce(unknownResult);
+    fixture.adapter.getProductState.mockResolvedValue({
+      state: 'offline',
+      status: 1,
+      checkStatus: 3,
+    });
+    fixture.productLocks.renew
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValue(new Error('product lock lease lost'));
+    fixture.prisma.publishedProduct.updateMany.mockResolvedValueOnce({ count: 0 });
+    fixture.prisma.publishedProduct.findUnique.mockResolvedValueOnce({
+      platformProductId: '998877',
+      status: 'online',
+    });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '商品状态已并发变化，请立即人工核验',
+    );
+
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.adapter.getProductState).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledOnce();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ mutationRevision: 1, status: 'online' }),
+      }),
+    );
+  });
+
+  it('fails closed before writing when platform inventory drifted after preview', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 6],
+        ['sku-b', 8],
+      ]),
+    );
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '平台 SKU 库存已在预览后变化',
+    );
+
+    expect(fixture.adapter.syncInventory).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          skuInventorySnapshot: inventorySnapshot([
+            ['sku-a', 6],
+            ['sku-b', 8],
+          ]),
+          inventorySyncStatus: 'dead',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+  });
+
+  it('stops before platform inventory access when the source version changed after preview', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord({
+      publishedProduct: publishedProduct({
+        task: { userId: 1n, skuSnapshot: null },
+        sourceProduct: {
+          productId1688: '16880001',
+          availability: 'available',
+          mainImage: null,
+          totalStock: 21,
+          inventoryFingerprint: 'c'.repeat(64),
+          inventoryVersion: 5,
+          skuList: [
+            { skuId: 'sku-a', stock: 8 },
+            { skuId: 'sku-b', stock: 13 },
+          ],
+        },
+      }),
+    });
+    fixture.prepareExecution(item);
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '1688 货源库存已在预览后变化',
+    );
+
+    expect(fixture.adapter.getProductInventory).not.toHaveBeenCalled();
+    expect(fixture.adapter.syncInventory).not.toHaveBeenCalled();
+  });
+
+  it('does not call the platform when the source changes after the initial platform read', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 5],
+        ['sku-b', 8],
+      ]),
+    );
+    fixture.prisma.sourceProduct.findUnique.mockResolvedValueOnce({
+      inventoryFingerprint: 'c'.repeat(64),
+      inventoryVersion: 5,
+    });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '1688 货源库存已在执行期间变化',
+    );
+
+    expect(fixture.adapter.syncInventory).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the source after the platform write and confirms a safety offline on drift', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductInventory.mockResolvedValueOnce(
+      platformInventory([
+        ['sku-a', 5],
+        ['sku-b', 8],
+      ]),
+    );
+    fixture.prisma.sourceProduct.findUnique
+      .mockResolvedValueOnce({
+        inventoryFingerprint: 'b'.repeat(64),
+        inventoryVersion: 4,
+      })
+      .mockResolvedValueOnce({
+        inventoryFingerprint: 'c'.repeat(64),
+        inventoryVersion: 5,
+      });
+    fixture.adapter.getProductState.mockResolvedValue({
+      state: 'offline',
+      status: 1,
+      checkStatus: 3,
+    });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '1688 货源库存已在执行期间变化',
+    );
+
+    expect(fixture.adapter.syncInventory).toHaveBeenCalledOnce();
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.adapter.getProductState).toHaveBeenCalledWith('shop-token', '998877');
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'offline',
+          inventorySyncStatus: 'pending',
+        }),
+      }),
+    );
+  });
+
+  it('does not clear a newer inventory target when the source changes during platform I/O', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductInventory
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 5],
+          ['sku-b', 8],
+        ]),
+      )
+      .mockResolvedValueOnce(
+        platformInventory([
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ]),
+      );
+    fixture.prisma.publishedProduct.updateMany.mockResolvedValueOnce({ count: 0 });
+    fixture.prisma.publishedProduct.updateMany.mockResolvedValueOnce({ count: 1 });
+    fixture.prisma.publishedProduct.findUnique.mockResolvedValueOnce({
+      skuInventorySnapshot: inventorySnapshot([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+      inventoryFingerprint: 'b'.repeat(64),
+      inventoryVersion: 4,
+      sourceProduct: {
+        inventoryFingerprint: 'c'.repeat(64),
+        inventoryVersion: 5,
+      },
+    });
+    fixture.adapter.getProductState.mockResolvedValue({
+      state: 'offline',
+      status: 1,
+      checkStatus: 3,
+    });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '1688 货源库存已在同步期间变化',
+    );
+
+    expect(fixture.prisma.productBatchItem.updateMany).not.toHaveBeenCalled();
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    const quarantineData = fixture.prisma.publishedProduct.updateMany.mock.calls[1]![0].data;
+    expect(quarantineData).toMatchObject({ status: 'offline', inventorySyncStatus: 'pending' });
+    expect(quarantineData).not.toHaveProperty('inventoryTargetFingerprint');
+    expect(quarantineData).not.toHaveProperty('inventoryTargetVersion');
+  });
+
+  it('does not mutate inventory when the real adapter cannot read it back', async () => {
+    const fixture = createFixture();
+    const item = inventoryExecutionRecord();
+    const syncInventory = vi.fn();
+    fixture.prepareExecution(item);
+    fixture.adapters.create.mockReturnValue({ syncInventory });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '当前平台无法回读 SKU 库存，拒绝执行库存同步',
+    );
+
+    expect(syncInventory).not.toHaveBeenCalled();
+  });
+
   it('stops before calling the platform when the product revision changed after preview', async () => {
     const fixture = createFixture();
     const claimed = executionRecord();
@@ -783,6 +1359,8 @@ function createFixture() {
     getProductState: vi.fn(),
     updateProductPrice: vi.fn(),
     getProductPrices: vi.fn(),
+    syncInventory: vi.fn(),
+    getProductInventory: vi.fn(),
   };
   const prisma = {
     $transaction: vi.fn().mockImplementation(async (operations: unknown) => {
@@ -812,6 +1390,12 @@ function createFixture() {
       findMany: vi.fn(),
       findUnique: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    sourceProduct: {
+      findUnique: vi.fn().mockResolvedValue({
+        inventoryFingerprint: 'b'.repeat(64),
+        inventoryVersion: 4,
+      }),
     },
   };
   const entitlement = { assertFeature: vi.fn() };
@@ -969,10 +1553,59 @@ function priceExecutionRecord(overrides: Record<string, unknown> = {}) {
   } as unknown as ProductBatchExecutionRecord;
 }
 
+function inventoryExecutionRecord(overrides: Record<string, unknown> = {}) {
+  const record = executionRecord();
+  return {
+    ...record,
+    beforeSnapshot: {
+      status: 'online',
+      platformProductId: '998877',
+      shopId: '21',
+      inventoryFingerprint: 'a'.repeat(64),
+      inventoryVersion: 3,
+      skuInventory: inventorySnapshot([
+        ['sku-a', 5],
+        ['sku-b', 8],
+      ]),
+    },
+    desiredSnapshot: {
+      status: 'online',
+      inventoryFingerprint: 'b'.repeat(64),
+      inventoryVersion: 4,
+      skuInventory: inventorySnapshot([
+        ['sku-a', 7],
+        ['sku-b', 13],
+      ]),
+    },
+    task: { ...record.task, action: 'sync_inventory' },
+    publishedProduct: publishedProduct({
+      task: {
+        userId: 1n,
+        skuSnapshot: {
+          douyin: {
+            skus: [
+              { sourceSkuId: 'sku-a', stock: 5 },
+              { sourceSkuId: 'sku-b', stock: 8 },
+            ],
+          },
+        },
+      },
+    }),
+    ...overrides,
+  } as unknown as ProductBatchExecutionRecord;
+}
+
 function priceSnapshot(items: Array<[string, number]>) {
   return {
     version: 1,
     items: items.map(([sourceSkuId, priceCents]) => ({ sourceSkuId, priceCents })),
+  };
+}
+
+function inventorySnapshot(items: Array<[string, number]>) {
+  return {
+    version: 1,
+    items: items.map(([sourceSkuId, stock]) => ({ sourceSkuId, stock })),
   };
 }
 
@@ -982,6 +1615,15 @@ function platformPrices(items: Array<[string, number]>) {
     status: 0,
     checkStatus: 3,
     items: priceSnapshot(items).items,
+  };
+}
+
+function platformInventory(items: Array<[string, number]>) {
+  return {
+    state: 'online' as const,
+    status: 0,
+    checkStatus: 3,
+    items: inventorySnapshot(items).items,
   };
 }
 
@@ -998,6 +1640,16 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
     status: 'online',
     mutationRevision: 1,
     inventorySyncStatus: 'synced',
+    skuInventorySnapshot: inventorySnapshot([
+      ['sku-a', 5],
+      ['sku-b', 8],
+    ]),
+    inventoryFingerprint: 'a'.repeat(64),
+    inventoryTargetFingerprint: 'a'.repeat(64),
+    inventoryVersion: 3,
+    inventoryTargetVersion: 3,
+    inventoryLastSyncedAt: NOW,
+    inventorySyncError: null,
     publishedAt: NOW,
     shop: {
       id: 21n,
@@ -1009,9 +1661,17 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
       accessTokenEnc: 'encrypted',
     },
     sourceProduct: {
+      id: 31n,
       productId1688: '16880001',
       availability: 'available',
       mainImage: null,
+      totalStock: 20,
+      inventoryFingerprint: 'b'.repeat(64),
+      inventoryVersion: 4,
+      skuList: [
+        { skuId: 'sku-a', stock: 7 },
+        { skuId: 'sku-b', stock: 13 },
+      ],
     },
     ...overrides,
   };

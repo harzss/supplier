@@ -714,8 +714,20 @@ describe('PublishService', () => {
     );
     expect(fixture.prisma.publishedProduct.upsert).toHaveBeenCalledWith({
       where: { uk_publish_task_shop: { taskId: 3n, shopId: 9n } },
-      create: expect.objectContaining({ status: 'draft' }),
-      update: expect.objectContaining({ status: 'draft' }),
+      create: expect.objectContaining({
+        status: 'draft',
+        skuInventorySnapshot: {
+          version: 1,
+          items: [{ sourceSkuId: 'default', stock: 999 }],
+        },
+      }),
+      update: expect.objectContaining({
+        status: 'draft',
+        skuInventorySnapshot: {
+          version: 1,
+          items: [{ sourceSkuId: 'default', stock: 999 }],
+        },
+      }),
     });
     expect(result.status).toBe('success');
     expect(result.detailOptimized).toBe(true);
@@ -743,6 +755,105 @@ describe('PublishService', () => {
       }),
     });
     expect(result.optimizedTitle).toBe('用户选择的纯棉T恤');
+  });
+
+  it('persists an online publish readback so pending inventory is worker-eligible', async () => {
+    const fixture = createFixture();
+    fixture.getProductInventory.mockResolvedValue({
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+      items: [{ sourceSkuId: 'default', stock: 777 }],
+    });
+
+    const result = await fixture.service.create(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+    });
+
+    expect(result.status).toBe('success');
+    expect(fixture.prisma.publishedProduct.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          skuInventorySnapshot: {
+            version: 1,
+            items: [{ sourceSkuId: 'default', stock: 777 }],
+          },
+          inventorySyncStatus: 'pending',
+          inventoryFingerprint: null,
+          inventoryTargetFingerprint: 'f'.repeat(64),
+          inventoryTargetVersion: 4,
+          inventorySyncReason: 'publish_readback_mismatch',
+          status: 'online',
+          platformStatusRaw: 0,
+          platformCheckStatusRaw: 3,
+        }),
+      }),
+    );
+  });
+
+  it('rechecks the source after publish persistence and queues a newer online target', async () => {
+    const fixture = createFixture();
+    const initialSource = await fixture.prisma.sourceProduct.findUnique({ where: { id: 2n } });
+    fixture.prisma.sourceProduct.findUnique.mockImplementation(async () =>
+      fixture.prisma.publishedProduct.upsert.mock.calls.length
+        ? {
+            ...initialSource,
+            inventoryFingerprint: '9'.repeat(64),
+            inventoryVersion: 5,
+          }
+        : initialSource,
+    );
+    fixture.getProductInventory.mockResolvedValue({
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+      items: [{ sourceSkuId: 'default', stock: 999 }],
+    });
+
+    await expect(
+      fixture.service.create(USER, {
+        sourceProductId: '1688-1',
+        targetShopIds: ['9'],
+      }),
+    ).resolves.toMatchObject({ status: 'success' });
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith({
+      where: {
+        taskId: 3n,
+        shopId: 9n,
+        platformProductId: 'mock-product-1',
+        status: 'online',
+        sourceProduct: {
+          inventoryFingerprint: '9'.repeat(64),
+          inventoryVersion: 5,
+        },
+      },
+      data: expect.objectContaining({
+        inventorySyncStatus: 'pending',
+        inventoryTargetFingerprint: '9'.repeat(64),
+        inventoryTargetVersion: 5,
+        inventoryNextRunAt: expect.any(Date),
+        inventorySyncReason: 'source_changed_after_publish',
+      }),
+    });
+  });
+
+  it('does not persist a real publish result when SKU inventory cannot be read back', async () => {
+    const fixture = createFixture();
+    fixture.adapters.create.mockReturnValue({
+      publishProduct: fixture.publishProduct,
+      findProductByExternalId: fixture.findProductByExternalId,
+    });
+
+    const result = await fixture.service.create(USER, {
+      sourceProductId: '1688-1',
+      targetShopIds: ['9'],
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.results[0]?.error).toContain('无法回读 SKU 库存');
+    expect(fixture.prisma.publishedProduct.upsert).not.toHaveBeenCalled();
   });
 
   it('rejects a user-selected title that violates the target platform rules', async () => {
@@ -990,6 +1101,8 @@ describe('PublishService', () => {
     fixture.prisma.sourceProduct.findUnique.mockResolvedValueOnce(sourceProduct).mockResolvedValue({
       price: 10,
       skuList: skuList.map((sku, index) => ({ ...sku, stock: index === 0 ? 7 : 3 })),
+      inventoryFingerprint: 'f'.repeat(64),
+      inventoryVersion: 4,
     });
 
     const result = await fixture.service.create(USER, {
@@ -1020,6 +1133,28 @@ describe('PublishService', () => {
             attributes: { 颜色: '黑色', 尺码: 'L' },
           },
         ],
+      }),
+    );
+    expect(fixture.prisma.publishedProduct.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          skuInventorySnapshot: {
+            version: 1,
+            items: [
+              { sourceSkuId: 'sku-1', stock: 7 },
+              { sourceSkuId: 'sku-2', stock: 3 },
+            ],
+          },
+        }),
+        update: expect.objectContaining({
+          skuInventorySnapshot: {
+            version: 1,
+            items: [
+              { sourceSkuId: 'sku-1', stock: 7 },
+              { sourceSkuId: 'sku-2', stock: 3 },
+            ],
+          },
+        }),
       }),
     );
     expect(result.skuCount).toBe(2);
@@ -1440,6 +1575,10 @@ describe('PublishService', () => {
         id: 7n,
         platformProductId: '998877',
         mutationRevision: 1,
+        sourceProduct: {
+          inventoryFingerprint: 'f'.repeat(64),
+          inventoryVersion: 4,
+        },
       },
       data: expect.objectContaining({
         title: '修正后的纯棉T恤',
@@ -1449,10 +1588,21 @@ describe('PublishService', () => {
           version: 1,
           items: [{ sourceSkuId: 'default', priceCents: 1500 }],
         },
+        skuInventorySnapshot: {
+          version: 1,
+          items: [{ sourceSkuId: 'default', stock: 999 }],
+        },
+        inventorySyncStatus: 'synced',
+        inventoryFingerprint: 'f'.repeat(64),
+        inventoryTargetFingerprint: 'f'.repeat(64),
+        inventoryVersion: 4,
+        inventoryTargetVersion: 4,
+        inventorySyncReason: 'product_edit',
+        inventorySyncError: null,
         lastEditError: null,
-        platformStatusRaw: null,
-        platformCheckStatusRaw: null,
-        platformStatusSyncedAt: null,
+        platformStatusRaw: 1,
+        platformCheckStatusRaw: 1,
+        platformStatusSyncedAt: expect.any(Date),
         platformStatusError: null,
       }),
     });
@@ -1461,6 +1611,36 @@ describe('PublishService', () => {
       title: '修正后的纯棉T恤',
       status: 'draft',
     });
+  });
+
+  it('persists the confirmed platform status instead of reviving a locally online product', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue({
+      ...publishedProductRecord(),
+      status: 'online',
+    });
+    fixture.getProductInventory.mockResolvedValue({
+      state: 'offline',
+      status: 1,
+      checkStatus: 3,
+      items: [{ sourceSkuId: 'default', stock: 999 }],
+    });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '下架后修正标题' }),
+    ).resolves.toMatchObject({ status: 'offline' });
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'offline',
+          platformStatusRaw: 1,
+          platformCheckStatusRaw: 3,
+          platformStatusSyncedAt: expect.any(Date),
+        }),
+      }),
+    );
   });
 
   it('preserves a newer batch SKU price when a later title edit rebuilds the full product', async () => {
@@ -1492,6 +1672,147 @@ describe('PublishService', () => {
         skus: [expect.objectContaining({ sourceSkuId: 'default', price: 18 })],
       }),
     );
+  });
+
+  it('synchronizes unexpected platform inventory and stops before a full product edit', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.getProductInventory.mockResolvedValue({
+      state: 'draft',
+      status: 1,
+      checkStatus: 1,
+      items: [{ sourceSkuId: 'default', stock: 555 }],
+    });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' }),
+    ).rejects.toThrow('平台 SKU 库存已变化并同步');
+
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 7n,
+        platformProductId: '998877',
+        mutationRevision: 1,
+        sourceProduct: {
+          inventoryFingerprint: 'f'.repeat(64),
+          inventoryVersion: 4,
+        },
+      },
+      data: expect.objectContaining({
+        skuInventorySnapshot: {
+          version: 1,
+          items: [{ sourceSkuId: 'default', stock: 555 }],
+        },
+        inventorySyncStatus: 'pending',
+        inventorySyncReason: 'platform_inventory_changed',
+        mutationRevision: { increment: 1 },
+      }),
+    });
+  });
+
+  it('rejects a full product edit while the platform product is online', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.getProductInventory.mockResolvedValue({
+      state: 'online',
+      status: 0,
+      checkStatus: 3,
+      items: [{ sourceSkuId: 'default', stock: 999 }],
+    });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' }),
+    ).rejects.toThrow('请先下架商品');
+
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('stops before editV2 when inventory changes after the first non-saleable readback', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.getProductInventory
+      .mockResolvedValueOnce({
+        state: 'draft',
+        status: 1,
+        checkStatus: 1,
+        items: [{ sourceSkuId: 'default', stock: 999 }],
+      })
+      .mockResolvedValueOnce({
+        state: 'draft',
+        status: 1,
+        checkStatus: 1,
+        items: [{ sourceSkuId: 'default', stock: 998 }],
+      });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' }),
+    ).rejects.toThrow('提交前发生变化');
+
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          skuInventorySnapshot: {
+            version: 1,
+            items: [{ sourceSkuId: 'default', stock: 998 }],
+          },
+          inventorySyncReason: 'platform_inventory_changed_before_edit',
+        }),
+      }),
+    );
+  });
+
+  it('does not mark inventory synced when full product edit readback differs', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
+    fixture.getProductInventory
+      .mockResolvedValueOnce({
+        state: 'draft',
+        status: 1,
+        checkStatus: 1,
+        items: [{ sourceSkuId: 'default', stock: 999 }],
+      })
+      .mockResolvedValueOnce({
+        state: 'draft',
+        status: 1,
+        checkStatus: 1,
+        items: [{ sourceSkuId: 'default', stock: 999 }],
+      })
+      .mockResolvedValueOnce({
+        state: 'draft',
+        status: 1,
+        checkStatus: 1,
+        items: [{ sourceSkuId: 'default', stock: 555 }],
+      });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '只修改标题' }),
+    ).rejects.toThrow('平台未确认商品编辑后的 SKU 库存');
+
+    expect(fixture.updateProduct).toHaveBeenCalledOnce();
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          skuInventorySnapshot: {
+            version: 1,
+            items: [{ sourceSkuId: 'default', stock: 555 }],
+          },
+          inventorySyncStatus: 'pending',
+          inventorySyncReason: 'product_edit_readback_mismatch',
+          mutationRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(
+      fixture.prisma.publishedProduct.updateMany.mock.calls.some(
+        ([input]) => input.data?.inventorySyncStatus === 'synced',
+      ),
+    ).toBe(false);
   });
 
   it('synchronizes unexpected platform prices and stops before a full product edit', async () => {
@@ -1619,6 +1940,37 @@ describe('PublishService', () => {
     });
   });
 
+  it('queues a retained inventory target when a non-online product becomes online', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue({
+      ...publishedProductRecord(),
+      status: 'draft',
+      inventoryFingerprint: 'f'.repeat(64),
+      inventoryVersion: 4,
+      inventoryTargetFingerprint: '9'.repeat(64),
+      inventoryTargetVersion: 5,
+      inventorySyncStatus: 'synced',
+    });
+    fixture.getProductState.mockResolvedValue({ state: 'online', status: 0, checkStatus: 3 });
+
+    await expect(fixture.service.syncPublishedProductStatus(USER, '7')).resolves.toMatchObject({
+      status: 'online',
+    });
+
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'online',
+          inventorySyncStatus: 'pending',
+          inventorySyncAttempts: 0,
+          inventoryNextRunAt: expect.any(Date),
+          inventoryLockedAt: null,
+          inventoryLockedBy: null,
+        }),
+      }),
+    );
+  });
+
   it('persists the platform error when product status synchronization fails', async () => {
     const fixture = createFixture();
     fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
@@ -1728,6 +2080,10 @@ function publishedProductRecord() {
     skuPriceSnapshot: {
       version: 1,
       items: [{ sourceSkuId: 'default', priceCents: 1500 }],
+    },
+    skuInventorySnapshot: {
+      version: 1,
+      items: [{ sourceSkuId: 'default', stock: 999 }],
     },
     priceSyncedAt: new Date(),
     status: 'rejected',
@@ -1867,6 +2223,17 @@ function createFixture(
     checkStatus: 3,
     items: [{ sourceSkuId: 'default', priceCents: 1500 }],
   });
+  const getProductInventory = vi.fn().mockImplementation(async () => {
+    const publishInput = publishProduct.mock.calls.at(-1)?.[1] as
+      | { skus?: Array<{ sourceSkuId?: string; stock: number }> }
+      | undefined;
+    const items = publishInput?.skus
+      ?.map((sku) => (sku.sourceSkuId ? { sourceSkuId: sku.sourceSkuId, stock: sku.stock } : null))
+      .filter((item): item is { sourceSkuId: string; stock: number } => item !== null) ?? [
+      { sourceSkuId: 'default', stock: 999 },
+    ];
+    return { state: 'draft' as const, status: 1, checkStatus: 1, items };
+  });
   const getProductState = vi.fn().mockResolvedValue({ state: 'online', status: 0, checkStatus: 3 });
   const adapters = {
     create: vi.fn().mockReturnValue({
@@ -1874,6 +2241,7 @@ function createFixture(
       findProductByExternalId,
       updateProduct,
       getProductPrices,
+      getProductInventory,
       getProductState,
     }),
   };
@@ -1963,6 +2331,7 @@ function createFixture(
     findProductByExternalId,
     updateProduct,
     getProductPrices,
+    getProductInventory,
     getProductState,
     detailRenderer,
     assetStorage,

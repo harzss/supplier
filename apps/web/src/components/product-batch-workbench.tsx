@@ -29,6 +29,7 @@ import {
   api,
   type ProductBatchAction,
   type ProductBatchCandidate,
+  type ProductBatchInventorySnapshot,
   type ProductBatchItem,
   type ProductBatchPreviewRequest,
   type ProductBatchPriceRule,
@@ -66,7 +67,8 @@ type PriceDirection = Extract<ProductBatchPriceRule, { mode: 'percentage' }>['di
 type TargetPriceValidation = { value: string | null; error: string };
 type ProductBatchPreviewInput =
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'offline' }>, 'clientRequestId'>
-  | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_price' }>, 'clientRequestId'>;
+  | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_price' }>, 'clientRequestId'>
+  | Omit<Extract<ProductBatchPreviewRequest, { action: 'sync_inventory' }>, 'clientRequestId'>;
 
 const EMPTY_COMPOSER_DRAFT: ProductBatchComposerDraft = {
   page: 1,
@@ -504,11 +506,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
               <h2 id="batch-action-heading" className="batch-section-title">
                 选择经营动作
               </h2>
-              <p className="batch-section-description">
-                {action === 'edit_price'
-                  ? '先定义改价规则，再逐件核对 SKU 价格区间；平台回读后才记为成功。'
-                  : '先生成逐项预览，再安全下架；成功项不会因失败重试而重复执行。'}
-              </p>
+              <p className="batch-section-description">{batchActionDescription(action)}</p>
             </div>
             <span className="batch-safety-chip">平台回读确认</span>
           </div>
@@ -543,7 +541,22 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
               </span>
               <em>已开放</em>
             </button>
-            {['改标题', '同步库存', '换源与清理'].map((label) => (
+            <button
+              type="button"
+              className={`batch-action-card ${action === 'sync_inventory' ? 'is-active' : ''}`}
+              aria-pressed={action === 'sync_inventory'}
+              onClick={() => chooseAction('sync_inventory')}
+            >
+              <span className="batch-action-icon" aria-hidden="true">
+                ↻
+              </span>
+              <span>
+                <strong>同步库存</strong>
+                <small>1688 权威快照 → 平台回读</small>
+              </span>
+              <em>已开放</em>
+            </button>
+            {['改标题', '换源与清理'].map((label) => (
               <button key={label} type="button" className="batch-action-card" disabled>
                 <span className="batch-action-icon" aria-hidden="true">
                   ·
@@ -666,6 +679,17 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
               )}
             </fieldset>
           ) : null}
+          {action === 'sync_inventory' ? (
+            <div className="batch-inventory-notice" role="note">
+              <span className="batch-action-icon" aria-hidden="true">
+                ✓
+              </span>
+              <span>
+                <strong>以 1688 当前 SKU 库存快照为唯一目标</strong>
+                <small>系统写入平台后会逐 SKU 回读核验；这里不会手填、估算或人为分配库存。</small>
+              </span>
+            </div>
+          ) : null}
         </div>
       </section>
 
@@ -728,7 +752,7 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
                           allPageSelected ||
                           (selected.size >= MAX_SELECTION && selectedPageCount > 0)
                             ? '取消本页已选商品'
-                            : `选择本页可${action === 'edit_price' ? '改价' : '下架'}商品`
+                            : `选择本页可${batchActionVerb(action)}商品`
                         }
                         checked={allPageSelected}
                         disabled={pageSelectionBlocked}
@@ -738,9 +762,9 @@ function BatchComposer({ sessionScope }: { sessionScope: ProductBatchSessionScop
                   </th>
                   <th>商品</th>
                   <th>店铺 / 平台</th>
-                  <th>起售价 / SKU</th>
+                  <th>{action === 'sync_inventory' ? '1688 权威库存' : '起售价 / SKU'}</th>
                   <th>货源</th>
-                  <th>库存同步</th>
+                  <th>{action === 'sync_inventory' ? '最近同步' : '库存同步'}</th>
                   <th>当前状态</th>
                 </tr>
               </thead>
@@ -929,13 +953,23 @@ function CandidateRow({
         <small className="batch-cell-secondary">{platformLabel(item.platform)}</small>
       </td>
       <td className="batch-mono">
-        <strong className="batch-price-range">
-          {formatPriceRange(item.priceRange ?? [item.salePrice, item.salePrice])}
-        </strong>
-        <small className="batch-cell-secondary">
-          {item.skuCount > 0 ? `${item.skuCount} 个 SKU` : 'SKU 价格待核验'}
-        </small>
-        {!selectable && unavailableReason ? (
+        {action === 'sync_inventory' ? (
+          <InventorySummary
+            totalStock={item.sourceTotalStock}
+            skuCount={item.sourceSkuCount}
+            inventoryVersion={item.sourceInventoryVersion}
+          />
+        ) : (
+          <>
+            <strong className="batch-price-range">
+              {formatPriceRange(item.priceRange ?? [item.salePrice, item.salePrice])}
+            </strong>
+            <small className="batch-cell-secondary">
+              {item.skuCount > 0 ? `${item.skuCount} 个 SKU` : 'SKU 价格待核验'}
+            </small>
+          </>
+        )}
+        {action !== 'sync_inventory' && !selectable && unavailableReason ? (
           <small className="batch-row-note">{unavailableReason}</small>
         ) : null}
       </td>
@@ -944,6 +978,21 @@ function CandidateRow({
       </td>
       <td>
         <StatusPill value={item.inventorySyncStatus} />
+        {action === 'sync_inventory' ? (
+          <>
+            <small className="batch-cell-secondary">
+              已同步 v{item.syncedInventoryVersion}
+              {item.inventoryLastSyncedAt
+                ? ` · ${new Date(item.inventoryLastSyncedAt).toLocaleString('zh-CN')}`
+                : ' · 尚无成功时间'}
+            </small>
+            {!selectable && unavailableReason ? (
+              <small className="batch-row-note">{unavailableReason}</small>
+            ) : item.inventorySyncError ? (
+              <small className="batch-row-note">上次错误：{item.inventorySyncError}</small>
+            ) : null}
+          </>
+        ) : null}
       </td>
       <td>
         <StatusPill value={item.status} />
@@ -1169,6 +1218,8 @@ function BatchTask({
   if (!task.data) return <BatchError error={task.error} />;
   const value = task.data;
   const priceAction = value.action === 'edit_price';
+  const inventoryAction = value.action === 'sync_inventory';
+  const verifiedAction = priceAction || inventoryAction;
   const active = ACTIVE_TASK_STATUSES.has(value.status);
   const preview = value.status === 'preview';
   const canRetry = ['failed', 'partial'].includes(value.status) && value.summary.failed > 0;
@@ -1204,9 +1255,11 @@ function BatchTask({
             {preview
               ? priceAction
                 ? '确认前请检查每件商品的起售价、SKU 价格区间和调整方向。'
-                : '确认前请检查每件商品的当前状态与执行后状态。'
+                : inventoryAction
+                  ? '确认前请检查同步前库存、1688 权威目标快照及库存版本；执行后将逐 SKU 回读平台核验。'
+                  : '确认前请检查每件商品的当前状态与执行后状态。'
               : active
-                ? `任务按商品独立${priceAction ? '改价并回读平台价格' : '执行'}；停止只影响尚未开始的条目。`
+                ? `任务按商品独立${priceAction ? '改价并回读平台价格' : inventoryAction ? '同步并回读平台库存' : '执行'}；停止只影响尚未开始的条目。`
                 : '任务结果已持久化，可安全刷新或稍后返回查看。'}
           </p>
         </div>
@@ -1276,14 +1329,16 @@ function BatchTask({
           })}
         </div>
         <div className="batch-table-shell">
-          <table className={`batch-table batch-result-table ${priceAction ? 'is-price' : ''}`}>
+          <table
+            className={`batch-table batch-result-table ${verifiedAction ? 'is-verified' : ''}`}
+          >
             <thead>
               <tr>
                 <th>商品</th>
                 <th>店铺 / 平台</th>
-                <th>{priceAction ? '改价前' : '当前'}</th>
-                <th>{priceAction ? '目标价格' : '执行后'}</th>
-                {priceAction ? <th>平台回读</th> : null}
+                <th>{priceAction ? '改价前' : inventoryAction ? '同步前' : '当前'}</th>
+                <th>{priceAction ? '目标价格' : inventoryAction ? '1688 目标' : '执行后'}</th>
+                {verifiedAction ? <th>平台回读</th> : null}
                 <th>执行状态</th>
                 <th>尝试</th>
               </tr>
@@ -1326,7 +1381,7 @@ function BatchTask({
               </button>
               <button
                 type="button"
-                className={priceAction ? 'batch-primary-button' : 'batch-danger-button'}
+                className={verifiedAction ? 'batch-primary-button' : 'batch-danger-button'}
                 disabled={execute.isPending || cancel.isPending}
                 onClick={() => execute.mutate(value.previewRevision)}
               >
@@ -1374,12 +1429,19 @@ function BatchTask({
 
 function TaskItemRow({ item, action }: { item: ProductBatchItem; action: ProductBatchAction }) {
   const priceAction = action === 'edit_price';
+  const inventoryAction = action === 'sync_inventory';
   const actualMismatch =
     priceAction &&
     item.status === 'succeeded' &&
     item.actualPriceRange !== null &&
     item.desiredPriceRange !== null &&
     !samePriceRange(item.actualPriceRange, item.desiredPriceRange);
+  const actualInventoryMismatch =
+    inventoryAction &&
+    item.status === 'succeeded' &&
+    item.actualInventory !== null &&
+    item.desiredInventory !== null &&
+    !sameInventorySnapshot(item.actualInventory, item.desiredInventory);
   return (
     <tr>
       <td>
@@ -1424,6 +1486,33 @@ function TaskItemRow({ item, action }: { item: ProductBatchItem; action: Product
             )}
           </td>
         </>
+      ) : inventoryAction ? (
+        <>
+          <td className="batch-mono">
+            <InventorySnapshotSummary
+              value={item.beforeInventory}
+              inventoryVersion={item.beforeInventoryVersion}
+              emptyLabel="同步前快照缺失"
+            />
+          </td>
+          <td className="batch-mono">
+            <InventorySnapshotSummary
+              value={item.desiredInventory}
+              inventoryVersion={item.desiredInventoryVersion}
+              emptyLabel="1688 快照待核验"
+            />
+          </td>
+          <td className="batch-mono">
+            <InventorySnapshotSummary
+              value={item.actualInventory}
+              inventoryVersion={item.actualInventory === null ? null : item.desiredInventoryVersion}
+              emptyLabel={item.status === 'succeeded' ? '回读待核验' : '执行后回读'}
+            />
+            {actualInventoryMismatch ? (
+              <small className="batch-row-error">与 1688 目标快照不一致</small>
+            ) : null}
+          </td>
+        </>
       ) : (
         <>
           <td>
@@ -1451,6 +1540,42 @@ function PriceRange({ value, skuCount }: { value: [number, number] | null; skuCo
       <strong>{formatPriceRange(value)}</strong>
       <small>{skuCount > 0 ? `${skuCount} 个 SKU` : 'SKU 待核验'}</small>
     </span>
+  );
+}
+
+function InventorySummary({
+  totalStock,
+  skuCount,
+  inventoryVersion,
+}: {
+  totalStock: number;
+  skuCount: number;
+  inventoryVersion: number | null;
+}) {
+  return (
+    <span className="batch-inventory-stack">
+      <strong>{totalStock.toLocaleString('zh-CN')} 件</strong>
+      <small>
+        {skuCount} 个 SKU · {formatInventoryVersion(inventoryVersion)}
+      </small>
+    </span>
+  );
+}
+
+function InventorySnapshotSummary({
+  value,
+  inventoryVersion,
+  emptyLabel,
+}: {
+  value: ProductBatchInventorySnapshot | null;
+  inventoryVersion: number | null;
+  emptyLabel: string;
+}) {
+  const summary = summarizeInventorySnapshot(value);
+  return summary ? (
+    <InventorySummary {...summary} inventoryVersion={inventoryVersion} />
+  ) : (
+    <span className="batch-cell-secondary">{emptyLabel}</span>
   );
 }
 
@@ -1568,19 +1693,45 @@ function matchesResultFilter(status: string, filter: string): boolean {
 }
 
 function batchActionLabel(action: ProductBatchAction): string {
-  return action === 'edit_price' ? '批量改价' : '批量下架';
+  if (action === 'edit_price') return '批量改价';
+  if (action === 'sync_inventory') return '同步并核验库存';
+  return '批量下架';
 }
 
-function isCandidateSelectable(item: ProductBatchCandidate, action: ProductBatchAction): boolean {
-  return action === 'edit_price' ? item.priceEditable : item.status === 'online';
+function batchActionVerb(action: ProductBatchAction): string {
+  if (action === 'edit_price') return '改价';
+  if (action === 'sync_inventory') return '同步库存';
+  return '下架';
 }
 
-function candidateUnavailableReason(
+function batchActionDescription(action: ProductBatchAction): string {
+  if (action === 'edit_price') {
+    return '先定义改价规则，再逐件核对 SKU 价格区间；平台回读后才记为成功。';
+  }
+  if (action === 'sync_inventory') {
+    return '按 1688 权威 SKU 库存快照同步，写入后回读平台逐项核验；不是手填库存。';
+  }
+  return '先生成逐项预览，再安全下架；成功项不会因失败重试而重复执行。';
+}
+
+export function isCandidateSelectable(
+  item: ProductBatchCandidate,
+  action: ProductBatchAction,
+): boolean {
+  if (action === 'edit_price') return item.priceEditable;
+  if (action === 'sync_inventory') return item.inventorySyncEligible;
+  return item.status === 'online';
+}
+
+export function candidateUnavailableReason(
   item: ProductBatchCandidate,
   action: ProductBatchAction,
 ): string | null {
   if (isCandidateSelectable(item, action)) return null;
   if (action === 'edit_price') return item.priceEditReason ?? '当前商品缺少可核对的 SKU 价格';
+  if (action === 'sync_inventory') {
+    return item.inventorySyncReason ?? '当前商品没有可安全同步的 1688 库存快照';
+  }
   return item.status === 'offline' ? '商品已经下架' : '只有在线商品可以下架';
 }
 
@@ -1597,6 +1748,29 @@ function formatPriceRange(value: [number, number] | null): string {
 
 function samePriceRange(left: [number, number], right: [number, number]): boolean {
   return left[0] === right[0] && left[1] === right[1];
+}
+
+function formatInventoryVersion(value: number | null): string {
+  return value === null ? '版本待核验' : `库存 v${value}`;
+}
+
+export function summarizeInventorySnapshot(
+  value: ProductBatchInventorySnapshot | null,
+): { totalStock: number; skuCount: number } | null {
+  if (!value) return null;
+  return {
+    totalStock: value.items.reduce((total, item) => total + item.stock, 0),
+    skuCount: value.items.length,
+  };
+}
+
+export function sameInventorySnapshot(
+  left: ProductBatchInventorySnapshot,
+  right: ProductBatchInventorySnapshot,
+): boolean {
+  if (left.items.length !== right.items.length) return false;
+  const leftStocks = new Map(left.items.map((item) => [item.sourceSkuId, item.stock] as const));
+  return right.items.every((item) => leftStocks.get(item.sourceSkuId) === item.stock);
 }
 
 export function validatePercentageInput(
@@ -1652,13 +1826,13 @@ export function shouldAcceptProductBatchPreviewResponse(
 ): boolean {
   if (!attempt || attempt.clientRequestId !== request.clientRequestId) return false;
   const input: ProductBatchPreviewInput =
-    request.action === 'offline'
-      ? { action: 'offline', publishedProductIds: request.publishedProductIds }
-      : {
+    request.action === 'edit_price'
+      ? {
           action: 'edit_price',
           publishedProductIds: request.publishedProductIds,
           priceRule: request.priceRule,
-        };
+        }
+      : { action: request.action, publishedProductIds: request.publishedProductIds };
   return attempt.fingerprint === productBatchPreviewFingerprint(input);
 }
 

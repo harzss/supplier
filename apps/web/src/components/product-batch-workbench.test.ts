@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  candidateUnavailableReason,
+  isCandidateSelectable,
   normalizeTargetPrice,
   productBatchPreviewFingerprint,
+  sameInventorySnapshot,
   shouldAcceptProductBatchPreviewResponse,
+  summarizeInventorySnapshot,
   validatePercentageInput,
 } from './product-batch-workbench';
 import {
@@ -111,6 +115,73 @@ describe('product batch price inputs', () => {
       ),
     ).toBe(false);
   });
+
+  it('keeps inventory-sync fingerprints stable without a price rule', () => {
+    const left = productBatchPreviewFingerprint({
+      action: 'sync_inventory',
+      publishedProductIds: ['2', '1'],
+    });
+    const right = productBatchPreviewFingerprint({
+      action: 'sync_inventory',
+      publishedProductIds: ['1', '2'],
+    });
+    const request = {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'sync_inventory' as const,
+      publishedProductIds: ['2', '1'],
+    };
+
+    expect(left).toBe(right);
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        request,
+      ),
+    ).toBe(true);
+  });
+
+  it('selects only inventory-sync eligible products and surfaces the server reason', () => {
+    const eligible = candidate('11', '可同步商品');
+    const blocked = {
+      ...candidate('12', '不可同步商品'),
+      inventorySyncEligible: false,
+      inventorySyncReason: '1688 货源 SKU 结构已变化，请先换源或下架商品',
+    };
+
+    expect(isCandidateSelectable(eligible, 'sync_inventory')).toBe(true);
+    expect(isCandidateSelectable(blocked, 'sync_inventory')).toBe(false);
+    expect(candidateUnavailableReason(blocked, 'sync_inventory')).toBe(blocked.inventorySyncReason);
+  });
+
+  it('summarizes and compares authoritative inventory snapshots by SKU', () => {
+    const snapshot = {
+      version: 1 as const,
+      items: [
+        { sourceSkuId: 'sku-a', stock: 7 },
+        { sourceSkuId: 'sku-b', stock: 13 },
+      ],
+    };
+
+    expect(summarizeInventorySnapshot(snapshot)).toEqual({ totalStock: 20, skuCount: 2 });
+    expect(
+      sameInventorySnapshot(snapshot, {
+        version: 1,
+        items: [
+          { sourceSkuId: 'sku-b', stock: 13 },
+          { sourceSkuId: 'sku-a', stock: 7 },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      sameInventorySnapshot(snapshot, {
+        version: 1,
+        items: [
+          { sourceSkuId: 'sku-a', stock: 7 },
+          { sourceSkuId: 'sku-b', stock: 12 },
+        ],
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('product batch workbench session recovery', () => {
@@ -142,6 +213,115 @@ describe('product batch workbench session recovery', () => {
     expect(writeProductBatchWorkbenchSession(scope, session, storage)).toBe(true);
 
     expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(session);
+  });
+
+  it('restores inventory-sync action and its eligibility snapshot', () => {
+    const storage = new MemoryStorage();
+    const inventorySession: ProductBatchWorkbenchSession = {
+      ...session,
+      draft: {
+        ...session.draft,
+        action: 'sync_inventory',
+        targetInputs: {},
+        selected: [candidate('11', '待同步库存商品')],
+      },
+    };
+
+    expect(writeProductBatchWorkbenchSession(scope, inventorySession, storage)).toBe(true);
+    expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(inventorySession);
+  });
+
+  it.each(['offline', 'edit_price'] as const)(
+    'migrates legacy v1 %s drafts without losing their preview identity',
+    (action) => {
+      const storage = new MemoryStorage();
+      const key = productBatchWorkbenchStorageKey(scope);
+      const preview = { ...session.preview!, taskId: '42' };
+      const selected = legacyCandidate('11', '旧版会话商品');
+      storage.setItem(
+        key,
+        JSON.stringify({
+          version: 1,
+          ...scope,
+          draft: { ...session.draft, action, selected: [selected] },
+          preview,
+        }),
+      );
+
+      const restored = readProductBatchWorkbenchSession(scope, storage);
+
+      expect(restored?.preview).toEqual(preview);
+      expect(restored?.draft.selected).toEqual([
+        {
+          ...selected,
+          sourceTotalStock: 0,
+          sourceSkuCount: 0,
+          sourceInventoryVersion: 0,
+          syncedInventoryVersion: 0,
+          inventoryLastSyncedAt: null,
+          inventorySyncError: null,
+          inventorySyncEligible: false,
+          inventorySyncReason: '旧版会话缺少库存快照，请刷新商品后再同步库存',
+        },
+      ]);
+      expect(isCandidateSelectable(restored!.draft.selected[0]!, 'sync_inventory')).toBe(false);
+    },
+  );
+
+  it('does not migrate legacy candidates into an inventory-sync draft', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          action: 'sync_inventory',
+          selected: [legacyCandidate('11', '旧版会话商品')],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it('still rejects a partially populated or malformed current candidate', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    const partiallyPopulated = legacyCandidate('11', '字段不完整商品');
+    partiallyPopulated.sourceTotalStock = 20;
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: { ...session.draft, selected: [partiallyPopulated] },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
+
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          selected: [{ ...candidate('11', '字段错误商品'), sourceTotalStock: -1 }],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+    expect(storage.getItem(key)).toBeNull();
   });
 
   it('isolates saved state by account and current pathname', () => {
@@ -236,8 +416,33 @@ function candidate(publishedProductId: string, title: string) {
     priceEditReason: null,
     sourceProductId: `source-${publishedProductId}`,
     sourceAvailability: 'available',
+    sourceTotalStock: 20,
+    sourceSkuCount: 2,
+    sourceInventoryVersion: 4,
     inventorySyncStatus: 'synced',
+    syncedInventoryVersion: 3,
+    inventoryLastSyncedAt: '2026-08-04T00:00:00.000Z',
+    inventorySyncError: null,
+    inventorySyncEligible: true,
+    inventorySyncReason: null,
     mutationRevision: 2,
     publishedAt: '2026-08-04T00:00:00.000Z',
   };
+}
+
+function legacyCandidate(publishedProductId: string, title: string): Record<string, unknown> {
+  const legacy: Record<string, unknown> = { ...candidate(publishedProductId, title) };
+  for (const field of [
+    'sourceTotalStock',
+    'sourceSkuCount',
+    'sourceInventoryVersion',
+    'syncedInventoryVersion',
+    'inventoryLastSyncedAt',
+    'inventorySyncError',
+    'inventorySyncEligible',
+    'inventorySyncReason',
+  ]) {
+    delete legacy[field];
+  }
+  return legacy;
 }

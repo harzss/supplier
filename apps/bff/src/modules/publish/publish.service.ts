@@ -13,6 +13,7 @@ import type { PlatformType } from '@supplier/shared-types';
 import type {
   CategoryPropertyMap,
   PlatformAdapter,
+  PlatformProductInventoryState,
   PlatformProductState,
   ProductQualification,
   PublishProductDto,
@@ -1290,7 +1291,66 @@ export class PublishService {
           lease,
         );
         const publishedPriceSnapshot = publishedSkuPriceSnapshot(publishInput.skus);
+        const requestedInventorySnapshot = publishedSkuInventorySnapshot(publishInput.skus);
+        const publishedInventoryState = isDemoShop(shop)
+          ? null
+          : await this.readPublishedProductInventory(adapter, accessToken, pub.platformProductId);
+        const publishedInventorySnapshot = publishedInventoryState
+          ? publishedSkuInventorySnapshotFromPlatform(publishedInventoryState.items)
+          : requestedInventorySnapshot;
+        if (
+          !publishedInventorySnapshot ||
+          !requestedInventorySnapshot ||
+          !samePublishedSkuInventoryIds(publishedInventorySnapshot, requestedInventorySnapshot)
+        ) {
+          throw new ServiceUnavailableException('平台返回的 SKU 库存不完整，暂不保存发布结果');
+        }
+        const latestSourceInventory = await this.prisma.sourceProduct.findUnique({
+          where: { id: product.id },
+          select: { inventoryFingerprint: true, inventoryVersion: true },
+        });
+        if (!latestSourceInventory) {
+          throw new ConflictException('1688 货源已不存在，暂不保存发布结果');
+        }
+        const platformInventoryMatchesRequest = samePublishedSkuInventory(
+          publishedInventorySnapshot,
+          requestedInventorySnapshot,
+        );
+        const sourceInventoryUnchanged =
+          latestSourceInventory.inventoryFingerprint === product.inventoryFingerprint &&
+          latestSourceInventory.inventoryVersion === product.inventoryVersion;
+        const inventoryConfirmed = platformInventoryMatchesRequest && sourceInventoryUnchanged;
+        const inventoryCheckedAt = new Date();
+        const publishedStatus = publishedInventoryState
+          ? mapPlatformProductState(publishedInventoryState, 'draft')
+          : 'online';
         const priceSyncedAt = publishedPriceSnapshot ? new Date() : null;
+        const publishedInventoryData = product.inventoryFingerprint
+          ? {
+              skuInventorySnapshot: publishedInventorySnapshot as unknown as Prisma.InputJsonValue,
+              inventorySyncStatus: inventoryConfirmed ? ('synced' as const) : ('pending' as const),
+              inventoryFingerprint: platformInventoryMatchesRequest
+                ? product.inventoryFingerprint
+                : null,
+              inventoryTargetFingerprint: latestSourceInventory.inventoryFingerprint,
+              inventoryVersion: platformInventoryMatchesRequest ? product.inventoryVersion : 0,
+              inventoryTargetVersion: latestSourceInventory.inventoryVersion,
+              inventoryNextRunAt: inventoryConfirmed ? null : inventoryCheckedAt,
+              inventoryLastSyncedAt: inventoryConfirmed ? inventoryCheckedAt : null,
+              inventorySyncReason: inventoryConfirmed
+                ? 'published'
+                : sourceInventoryUnchanged
+                  ? 'publish_readback_mismatch'
+                  : 'source_changed_during_publish',
+              inventorySyncError: inventoryConfirmed
+                ? null
+                : sourceInventoryUnchanged
+                  ? '平台发布后的 SKU 库存与请求不一致，已进入同步队列'
+                  : '发布期间 1688 货源库存已变化，已进入同步队列',
+            }
+          : {
+              skuInventorySnapshot: publishedInventorySnapshot as unknown as Prisma.InputJsonValue,
+            };
         const publishedData: Prisma.PublishedProductUncheckedCreateInput = {
           taskId: task.id,
           shopId: shop.id,
@@ -1305,20 +1365,18 @@ export class PublishService {
                 priceSyncedAt,
               }
             : {}),
-          status: isDemoShop(shop) ? 'online' : 'draft',
-          categoryId,
-          mainImage: publishMainImage,
-          ...(product.inventoryFingerprint
+          ...publishedInventoryData,
+          status: publishedStatus,
+          ...(publishedInventoryState
             ? {
-                inventorySyncStatus: 'synced',
-                inventoryFingerprint: product.inventoryFingerprint,
-                inventoryTargetFingerprint: product.inventoryFingerprint,
-                inventoryVersion: product.inventoryVersion,
-                inventoryTargetVersion: product.inventoryVersion,
-                inventoryLastSyncedAt: new Date(),
-                inventorySyncReason: 'published',
+                platformStatusRaw: publishedInventoryState.status,
+                platformCheckStatusRaw: publishedInventoryState.checkStatus,
+                platformStatusSyncedAt: inventoryCheckedAt,
+                platformStatusError: null,
               }
             : {}),
+          categoryId,
+          mainImage: publishMainImage,
         };
         await assertPublishExecutionOwned(lease);
         await this.prisma.publishedProduct.upsert({
@@ -1338,23 +1396,69 @@ export class PublishService {
                   priceSyncedAt,
                 }
               : {}),
-            status: isDemoShop(shop) ? 'online' : 'draft',
+            ...publishedInventoryData,
+            status: publishedStatus,
+            ...(publishedInventoryState
+              ? {
+                  platformStatusRaw: publishedInventoryState.status,
+                  platformCheckStatusRaw: publishedInventoryState.checkStatus,
+                  platformStatusSyncedAt: inventoryCheckedAt,
+                  platformStatusError: null,
+                }
+              : {}),
             categoryId,
             mainImage: publishMainImage,
             mutationRevision: { increment: 1 },
-            ...(product.inventoryFingerprint
-              ? {
-                  inventorySyncStatus: 'synced',
-                  inventoryFingerprint: product.inventoryFingerprint,
-                  inventoryTargetFingerprint: product.inventoryFingerprint,
-                  inventoryVersion: product.inventoryVersion,
-                  inventoryTargetVersion: product.inventoryVersion,
-                  inventoryLastSyncedAt: new Date(),
-                  inventorySyncReason: 'published',
-                }
-              : {}),
           },
         });
+        await assertPublishExecutionOwned(lease);
+        const sourceAfterPublishPersist = await this.prisma.sourceProduct.findUnique({
+          where: { id: product.id },
+          select: { inventoryFingerprint: true, inventoryVersion: true },
+        });
+        await assertPublishExecutionOwned(lease);
+        if (!sourceAfterPublishPersist) {
+          throw new ConflictException('1688 货源已不存在，发布结果需要人工核验');
+        }
+        if (
+          sourceAfterPublishPersist.inventoryFingerprint !==
+            latestSourceInventory.inventoryFingerprint ||
+          sourceAfterPublishPersist.inventoryVersion !== latestSourceInventory.inventoryVersion
+        ) {
+          const sourceChangedAt = new Date();
+          const reconciled = await this.prisma.publishedProduct.updateMany({
+            where: {
+              taskId: task.id,
+              shopId: shop.id,
+              platformProductId: pub.platformProductId,
+              status: publishedStatus,
+              sourceProduct: {
+                inventoryFingerprint: sourceAfterPublishPersist.inventoryFingerprint,
+                inventoryVersion: sourceAfterPublishPersist.inventoryVersion,
+              },
+            },
+            data:
+              publishedStatus === 'online'
+                ? {
+                    inventorySyncStatus: 'pending',
+                    inventoryTargetFingerprint: sourceAfterPublishPersist.inventoryFingerprint,
+                    inventoryTargetVersion: sourceAfterPublishPersist.inventoryVersion,
+                    inventorySyncAttempts: 0,
+                    inventoryNextRunAt: sourceChangedAt,
+                    inventoryLockedAt: null,
+                    inventoryLockedBy: null,
+                    inventorySyncReason: 'source_changed_after_publish',
+                    inventorySyncError: '发布落库期间 1688 货源库存已变化，已进入同步队列',
+                  }
+                : {
+                    inventoryTargetFingerprint: sourceAfterPublishPersist.inventoryFingerprint,
+                    inventoryTargetVersion: sourceAfterPublishPersist.inventoryVersion,
+                  },
+          });
+          if (reconciled.count !== 1) {
+            throw new ConflictException('发布落库期间货源或商品状态再次变化，请刷新后重试');
+          }
+        }
         await assertPublishExecutionOwned(lease);
         results.push({
           shopId: shop.id.toString(),
@@ -1487,6 +1591,17 @@ export class PublishService {
     }
   }
 
+  private async readPublishedProductInventory(
+    adapter: PlatformAdapter,
+    accessToken: string,
+    platformProductId: string,
+  ): Promise<PlatformProductInventoryState> {
+    if (!adapter.getProductInventory) {
+      throw new ServiceUnavailableException('当前平台无法回读 SKU 库存，暂不保存发布结果');
+    }
+    return adapter.getProductInventory(accessToken, platformProductId);
+  }
+
   private assertPricingFeature(
     user: CurrentUser,
     strategy: CreatePublishTaskDto['pricingStrategy'],
@@ -1596,6 +1711,11 @@ export class PublishService {
     const baseEditSkus =
       skuSnapshot[shop.platform]?.skus ?? defaultPublishSkus(Number(record.salePrice));
     let confirmedPriceSnapshot = parsePublishedSkuPriceSnapshot(record.skuPriceSnapshot);
+    let confirmedInventorySnapshot = parsePublishedSkuInventorySnapshot(
+      record.skuInventorySnapshot,
+    );
+    let confirmedEditPlatformState: PlatformProductState | null = null;
+    const sourceInventorySnapshot = publishedSkuInventorySnapshot(baseEditSkus);
     let editSkus = applyPublishedSkuPrices(baseEditSkus, record.skuPriceSnapshot);
     let editSalePrice = Number(record.salePrice);
     const aiOptimized = jsonRecord(record.task.aiOptimized ?? undefined);
@@ -1695,8 +1815,113 @@ export class PublishService {
             platformPrices as unknown as Prisma.JsonValue,
           );
           editSalePrice = publishedSkuStartPrice(platformPrices);
+
+          const platformInventoryState = await this.readPublishedProductInventory(
+            adapter,
+            token,
+            record.platformProductId,
+          );
+          assertFullProductEditState(platformInventoryState);
+          const platformInventory = publishedSkuInventorySnapshotFromPlatform(
+            platformInventoryState.items,
+          );
+          if (
+            !platformInventory ||
+            !sourceInventorySnapshot ||
+            !samePublishedSkuInventoryIds(platformInventory, sourceInventorySnapshot)
+          ) {
+            throw new ServiceUnavailableException('平台返回的 SKU 库存不完整，拒绝编辑商品');
+          }
+          if (
+            confirmedInventorySnapshot &&
+            !samePublishedSkuInventory(confirmedInventorySnapshot, platformInventory)
+          ) {
+            const synced = await this.prisma.publishedProduct.updateMany({
+              where: {
+                id: record.id,
+                platformProductId: currentProduct.platformProductId,
+                mutationRevision: currentProduct.mutationRevision,
+                sourceProduct: {
+                  inventoryFingerprint: record.sourceProduct.inventoryFingerprint,
+                  inventoryVersion: record.sourceProduct.inventoryVersion,
+                },
+              },
+              data: {
+                skuInventorySnapshot: platformInventory as unknown as Prisma.InputJsonValue,
+                inventorySyncStatus: 'pending',
+                inventoryTargetFingerprint: record.sourceProduct.inventoryFingerprint,
+                inventoryTargetVersion: record.sourceProduct.inventoryVersion,
+                inventoryNextRunAt: new Date(),
+                inventorySyncReason: 'platform_inventory_changed',
+                inventorySyncError: '平台 SKU 库存已变化，请确认后重试商品编辑',
+                lastEditError: '平台 SKU 库存已变化，请确认后重试商品编辑',
+                mutationRevision: { increment: 1 },
+              },
+            });
+            if (synced.count !== 1) {
+              throw new ConflictException('商品已在库存同步期间发生变化，请刷新后重试');
+            }
+            throw new ConflictException('平台 SKU 库存已变化并同步，请确认后重新编辑');
+          }
+          confirmedInventorySnapshot = platformInventory;
+          editSkus = applyPublishedSkuInventory(editSkus, platformInventory);
         }
         await this.platformProductLocks.renew(record.id, platformLock);
+        if (!isDemoShop(shop)) {
+          // product.editV2 requires stock_num for every SKU and exposes no conditional stock write.
+          // Only a platform-confirmed non-saleable product may cross this full-edit boundary.
+          const platformStateBeforeWrite = await this.readPublishedProductInventory(
+            adapter,
+            token,
+            record.platformProductId,
+          );
+          assertFullProductEditState(platformStateBeforeWrite);
+          const platformInventoryBeforeWrite = publishedSkuInventorySnapshotFromPlatform(
+            platformStateBeforeWrite.items,
+          );
+          if (
+            !platformInventoryBeforeWrite ||
+            !sourceInventorySnapshot ||
+            !samePublishedSkuInventoryIds(platformInventoryBeforeWrite, sourceInventorySnapshot)
+          ) {
+            throw new ServiceUnavailableException('平台返回的 SKU 库存不完整，拒绝编辑商品');
+          }
+          if (
+            !confirmedInventorySnapshot ||
+            !samePublishedSkuInventory(platformInventoryBeforeWrite, confirmedInventorySnapshot)
+          ) {
+            const synced = await this.prisma.publishedProduct.updateMany({
+              where: {
+                id: record.id,
+                platformProductId: currentProduct.platformProductId,
+                mutationRevision: currentProduct.mutationRevision,
+                sourceProduct: {
+                  inventoryFingerprint: record.sourceProduct.inventoryFingerprint,
+                  inventoryVersion: record.sourceProduct.inventoryVersion,
+                },
+              },
+              data: {
+                skuInventorySnapshot:
+                  platformInventoryBeforeWrite as unknown as Prisma.InputJsonValue,
+                inventorySyncStatus: 'pending',
+                inventoryTargetFingerprint: record.sourceProduct.inventoryFingerprint,
+                inventoryTargetVersion: record.sourceProduct.inventoryVersion,
+                inventoryNextRunAt: new Date(),
+                inventorySyncReason: 'platform_inventory_changed_before_edit',
+                inventorySyncError: '商品编辑提交前平台 SKU 库存已变化',
+                lastEditError: '商品编辑提交前平台 SKU 库存已变化',
+                mutationRevision: { increment: 1 },
+              },
+            });
+            if (synced.count !== 1) {
+              throw new ConflictException('商品已在库存同步期间发生变化，请刷新后重试');
+            }
+            throw new ConflictException('平台 SKU 库存在提交前发生变化并已同步，请重新编辑');
+          }
+          confirmedInventorySnapshot = platformInventoryBeforeWrite;
+          confirmedEditPlatformState = platformStateBeforeWrite;
+          editSkus = applyPublishedSkuInventory(editSkus, platformInventoryBeforeWrite);
+        }
         await adapter.updateProduct(token, {
           platformProductId: record.platformProductId,
           title,
@@ -1711,6 +1936,50 @@ export class PublishService {
           costPrice: record.costPrice === null ? undefined : Number(record.costPrice),
         });
         await this.platformProductLocks.renew(record.id, platformLock);
+        if (!isDemoShop(shop)) {
+          const platformStateAfterEdit = await this.readPublishedProductInventory(
+            adapter,
+            token,
+            record.platformProductId,
+          );
+          const platformInventoryAfterEdit = publishedSkuInventorySnapshotFromPlatform(
+            platformStateAfterEdit.items,
+          );
+          if (
+            !platformInventoryAfterEdit ||
+            !confirmedInventorySnapshot ||
+            !samePublishedSkuInventory(platformInventoryAfterEdit, confirmedInventorySnapshot)
+          ) {
+            if (platformInventoryAfterEdit) {
+              await this.prisma.publishedProduct.updateMany({
+                where: {
+                  id: record.id,
+                  platformProductId: currentProduct.platformProductId,
+                  mutationRevision: currentProduct.mutationRevision,
+                  sourceProduct: {
+                    inventoryFingerprint: record.sourceProduct.inventoryFingerprint,
+                    inventoryVersion: record.sourceProduct.inventoryVersion,
+                  },
+                },
+                data: {
+                  skuInventorySnapshot:
+                    platformInventoryAfterEdit as unknown as Prisma.InputJsonValue,
+                  inventorySyncStatus: 'pending',
+                  inventoryTargetFingerprint: record.sourceProduct.inventoryFingerprint,
+                  inventoryTargetVersion: record.sourceProduct.inventoryVersion,
+                  inventoryNextRunAt: new Date(),
+                  inventorySyncReason: 'product_edit_readback_mismatch',
+                  inventorySyncError: '商品编辑后的平台 SKU 库存与提交前不一致',
+                  lastEditError: '商品编辑后的平台 SKU 库存与提交前不一致',
+                  mutationRevision: { increment: 1 },
+                },
+              });
+            }
+            throw new ConflictException('平台未确认商品编辑后的 SKU 库存，请刷新后重试');
+          }
+          confirmedInventorySnapshot = platformInventoryAfterEdit;
+          confirmedEditPlatformState = platformStateAfterEdit;
+        }
       } catch (error) {
         if (error instanceof ConflictException || error instanceof ServiceUnavailableException) {
           throw error;
@@ -1727,12 +1996,25 @@ export class PublishService {
       }
 
       const lastEditedAt = new Date();
-      const status = currentProduct.status === 'rejected' ? 'draft' : currentProduct.status;
+      const editedInventorySnapshot =
+        confirmedInventorySnapshot ?? publishedSkuInventorySnapshot(editSkus);
+      const inventoryMatchesSource =
+        !!editedInventorySnapshot &&
+        !!sourceInventorySnapshot &&
+        samePublishedSkuInventory(editedInventorySnapshot, sourceInventorySnapshot);
+      const fallbackStatus = currentProduct.status === 'rejected' ? 'draft' : currentProduct.status;
+      const status = confirmedEditPlatformState
+        ? mapPlatformProductState(confirmedEditPlatformState, fallbackStatus)
+        : fallbackStatus;
       const updated = await this.prisma.publishedProduct.updateMany({
         where: {
           id: record.id,
           platformProductId: currentProduct.platformProductId,
           mutationRevision: currentProduct.mutationRevision,
+          sourceProduct: {
+            inventoryFingerprint: record.sourceProduct.inventoryFingerprint,
+            inventoryVersion: record.sourceProduct.inventoryVersion,
+          },
         },
         data: {
           title,
@@ -1746,12 +2028,48 @@ export class PublishService {
                 priceSyncedAt: lastEditedAt,
               }
             : {}),
+          ...(editedInventorySnapshot
+            ? {
+                skuInventorySnapshot: editedInventorySnapshot as unknown as Prisma.InputJsonValue,
+                inventorySyncStatus: inventoryMatchesSource
+                  ? ('synced' as const)
+                  : ('pending' as const),
+                inventoryFingerprint: inventoryMatchesSource
+                  ? record.sourceProduct.inventoryFingerprint
+                  : record.inventoryFingerprint,
+                inventoryTargetFingerprint: record.sourceProduct.inventoryFingerprint,
+                inventoryVersion: inventoryMatchesSource
+                  ? record.sourceProduct.inventoryVersion
+                  : record.inventoryVersion,
+                inventoryTargetVersion: record.sourceProduct.inventoryVersion,
+                inventorySyncAttempts: 0,
+                inventoryNextRunAt: inventoryMatchesSource ? null : lastEditedAt,
+                inventoryLockedAt: null,
+                inventoryLockedBy: null,
+                inventoryLastSyncedAt: inventoryMatchesSource
+                  ? lastEditedAt
+                  : record.inventoryLastSyncedAt,
+                inventorySyncReason: inventoryMatchesSource
+                  ? 'product_edit'
+                  : 'product_edit_inventory_pending',
+                inventorySyncError: null,
+              }
+            : {}),
           lastEditedAt,
           lastEditError: null,
-          platformStatusRaw: null,
-          platformCheckStatusRaw: null,
-          platformStatusSyncedAt: null,
-          platformStatusError: null,
+          ...(confirmedEditPlatformState
+            ? {
+                platformStatusRaw: confirmedEditPlatformState.status,
+                platformCheckStatusRaw: confirmedEditPlatformState.checkStatus,
+                platformStatusSyncedAt: lastEditedAt,
+                platformStatusError: null,
+              }
+            : {
+                platformStatusRaw: null,
+                platformCheckStatusRaw: null,
+                platformStatusSyncedAt: null,
+                platformStatusError: null,
+              }),
           mutationRevision: { increment: 1 },
         },
       });
@@ -1817,6 +2135,12 @@ export class PublishService {
       await this.platformProductLocks.renew(current.id, platformLock);
       const status = mapPlatformProductState(platformState, current.status);
       const syncedAt = new Date();
+      const inventoryBehindTarget =
+        status === 'online' &&
+        !!current.inventoryTargetFingerprint &&
+        current.inventoryTargetVersion > 0 &&
+        (current.inventoryFingerprint !== current.inventoryTargetFingerprint ||
+          current.inventoryVersion !== current.inventoryTargetVersion);
       const updated = await this.prisma.publishedProduct.updateMany({
         where: {
           id: current.id,
@@ -1829,6 +2153,16 @@ export class PublishService {
           platformCheckStatusRaw: platformState.checkStatus,
           platformStatusSyncedAt: syncedAt,
           platformStatusError: null,
+          ...(inventoryBehindTarget
+            ? {
+                inventorySyncStatus: 'pending',
+                inventorySyncAttempts: 0,
+                inventoryNextRunAt: syncedAt,
+                inventoryLockedAt: null,
+                inventoryLockedBy: null,
+                inventorySyncError: null,
+              }
+            : {}),
           mutationRevision: { increment: 1 },
         },
       });
@@ -2134,6 +2468,14 @@ function mapPlatformProductState(
     return 'draft';
   }
   return currentStatus;
+}
+
+function assertFullProductEditState(state: PlatformProductState): void {
+  if (state.state === 'offline' || state.state === 'draft') return;
+  if (state.state === 'online') {
+    throw new ConflictException('在线商品不能执行完整编辑，请先下架商品后重试');
+  }
+  throw new ConflictException(`平台商品当前状态为 ${state.state}，不能执行完整编辑`);
 }
 
 function parseCategoryPropertyMap(value: unknown): CategoryPropertyMap | undefined {
@@ -2534,6 +2876,11 @@ interface PublishedSkuPriceSnapshot {
   items: Array<{ sourceSkuId: string; priceCents: number }>;
 }
 
+interface PublishedSkuInventorySnapshot {
+  version: 1;
+  items: Array<{ sourceSkuId: string; stock: number }>;
+}
+
 function publishedSkuPriceSnapshot(
   skus: PublishSkuSnapshotEntry['skus'],
 ): PublishedSkuPriceSnapshot | null {
@@ -2549,6 +2896,106 @@ function publishedSkuPriceSnapshot(
   if (new Set(normalized.map((item) => item.sourceSkuId)).size !== normalized.length) return null;
   normalized.sort((left, right) => left.sourceSkuId.localeCompare(right.sourceSkuId));
   return { version: 1, items: normalized };
+}
+
+function publishedSkuInventorySnapshot(
+  skus: PublishSkuSnapshotEntry['skus'],
+): PublishedSkuInventorySnapshot | null {
+  const items = skus.map((sku) => {
+    const sourceSkuId = sku.sourceSkuId?.trim();
+    return sourceSkuId && Number.isSafeInteger(sku.stock) && sku.stock >= 0
+      ? { sourceSkuId, stock: sku.stock }
+      : null;
+  });
+  if (!items.length || items.some((item) => !item)) return null;
+  const normalized = items as Array<{ sourceSkuId: string; stock: number }>;
+  if (new Set(normalized.map((item) => item.sourceSkuId)).size !== normalized.length) return null;
+  normalized.sort((left, right) => left.sourceSkuId.localeCompare(right.sourceSkuId));
+  return { version: 1, items: normalized };
+}
+
+function publishedSkuInventorySnapshotFromPlatform(
+  items: Array<{ sourceSkuId: string; stock: number }>,
+): PublishedSkuInventorySnapshot | null {
+  if (!items.length) return null;
+  const normalized = items.map((item) => ({
+    sourceSkuId: item.sourceSkuId.trim(),
+    stock: item.stock,
+  }));
+  if (
+    normalized.some(
+      (item) =>
+        !item.sourceSkuId ||
+        item.sourceSkuId.length > 128 ||
+        !Number.isSafeInteger(item.stock) ||
+        item.stock < 0,
+    ) ||
+    new Set(normalized.map((item) => item.sourceSkuId)).size !== normalized.length
+  ) {
+    return null;
+  }
+  normalized.sort((left, right) => left.sourceSkuId.localeCompare(right.sourceSkuId));
+  return { version: 1, items: normalized };
+}
+
+function parsePublishedSkuInventorySnapshot(
+  value: Prisma.JsonValue | null,
+): PublishedSkuInventorySnapshot | null {
+  const record = jsonRecord(value ?? undefined);
+  if (record?.version !== 1 || !Array.isArray(record.items) || !record.items.length) return null;
+  const items = record.items.map((itemValue) => {
+    const item = jsonRecord(itemValue);
+    const sourceSkuId = stringOrNull(item?.sourceSkuId)?.trim();
+    const stock = item?.stock;
+    return sourceSkuId &&
+      sourceSkuId.length <= 128 &&
+      Number.isSafeInteger(stock) &&
+      Number(stock) >= 0
+      ? { sourceSkuId, stock: Number(stock) }
+      : null;
+  });
+  if (items.some((item) => !item)) return null;
+  return publishedSkuInventorySnapshotFromPlatform(
+    items as Array<{ sourceSkuId: string; stock: number }>,
+  );
+}
+
+function samePublishedSkuInventoryIds(
+  left: PublishedSkuInventorySnapshot,
+  right: PublishedSkuInventorySnapshot,
+): boolean {
+  return (
+    left.items.length === right.items.length &&
+    left.items.every((item, index) => item.sourceSkuId === right.items[index]?.sourceSkuId)
+  );
+}
+
+function samePublishedSkuInventory(
+  left: PublishedSkuInventorySnapshot,
+  right: PublishedSkuInventorySnapshot,
+): boolean {
+  return (
+    samePublishedSkuInventoryIds(left, right) &&
+    left.items.every((item, index) => item.stock === right.items[index]?.stock)
+  );
+}
+
+function applyPublishedSkuInventory(
+  skus: PublishSkuSnapshotEntry['skus'],
+  snapshot: PublishedSkuInventorySnapshot,
+): PublishSkuSnapshotEntry['skus'] {
+  const byId = new Map(snapshot.items.map((item) => [item.sourceSkuId, item.stock]));
+  if (byId.size !== skus.length) {
+    throw new ConflictException('商品 SKU 库存快照与原发布规格不一致，请先同步商品库存');
+  }
+  return skus.map((sku) => {
+    const sourceSkuId = sku.sourceSkuId?.trim();
+    const stock = sourceSkuId ? byId.get(sourceSkuId) : undefined;
+    if (!sourceSkuId || stock === undefined) {
+      throw new ConflictException('商品 SKU 库存快照与原发布规格不一致，请先同步商品库存');
+    }
+    return { ...sku, stock };
+  });
 }
 
 function publishedSkuPriceSnapshotFromPlatform(

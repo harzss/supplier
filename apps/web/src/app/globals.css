@@ -1591,6 +1591,35 @@ button:not(:disabled),
   color: #aeb8ff;
 }
 
+.batch-inventory-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin-top: 1rem;
+  border: 1px solid rgb(103 123 255 / 18%);
+  border-radius: 0.9rem;
+  background: rgb(103 123 255 / 8%);
+  color: #d8dcf3;
+  padding: 0.8rem 0.9rem;
+}
+
+.batch-inventory-notice strong,
+.batch-inventory-notice small {
+  display: block;
+}
+
+.batch-inventory-notice strong {
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.batch-inventory-notice small {
+  margin-top: 0.25rem;
+  color: #9ea7bb;
+  font-size: 0.62rem;
+  line-height: 1.5;
+}
+
 .batch-price-rule-panel {
   min-width: 0;
   margin: 1rem 0 0;
@@ -2625,7 +2654,7 @@ button:not(:disabled),
   min-width: 61rem;
 }
 
-.batch-result-table.is-price {
+.batch-result-table.is-verified {
   min-width: 74rem;
 }
 
@@ -2648,11 +2677,15 @@ button:not(:disabled),
 .batch-price-range-stack,
 .batch-price-range-stack strong,
 .batch-price-range-stack small,
+.batch-inventory-stack,
+.batch-inventory-stack strong,
+.batch-inventory-stack small,
 .batch-price-delta {
   display: block;
 }
 
-.batch-price-range-stack strong {
+.batch-price-range-stack strong,
+.batch-inventory-stack strong {
   overflow: hidden;
   color: var(--ink-soft);
   font-size: 0.65rem;
@@ -2661,7 +2694,8 @@ button:not(:disabled),
   white-space: nowrap;
 }
 
-.batch-price-range-stack small {
+.batch-price-range-stack small,
+.batch-inventory-stack small {
   margin-top: 0.18rem;
   color: var(--muted-light);
   font-family: var(--font-sans);

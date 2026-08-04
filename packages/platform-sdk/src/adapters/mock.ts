@@ -9,6 +9,7 @@ import type {
   CategoryRecommendationResult,
   OrderQuery,
   PlatformOrder,
+  PlatformProductInventoryState,
   PlatformProductPriceState,
   PlatformProductState,
   PublishProductDto,
@@ -28,6 +29,8 @@ const DEFAULT_CONFIG: AdapterConfig = {
 };
 
 const MOCK_PRODUCT_PRICES = new Map<string, Map<string, number>>();
+const MOCK_PRODUCT_INVENTORY = new Map<string, Map<string, number>>();
+const MOCK_PRODUCT_STATES = new Map<string, PlatformProductState>();
 
 /**
  * Mock 平台适配器：模拟发布 / 订单 / 发货。
@@ -64,11 +67,14 @@ export class MockPlatformAdapter extends BasePlatformAdapter {
   async publishProduct(_token: string, dto: PublishProductDto): Promise<PublishResult> {
     const id = `${this.platform}-${Date.now()}-${hashTitle(dto.title)}`;
     storeProductPrices(this.platform, id, dto.skus);
+    storeProductInventory(this.platform, id, dto.skus);
+    MOCK_PRODUCT_STATES.set(mockProductKey(this.platform, id), onlineMockProductState());
     return { platformProductId: id, url: `https://mock.${this.platform}.shop/item/${id}` };
   }
 
   async updateProduct(_token: string, dto: UpdateProductDto): Promise<void> {
     storeProductPrices(this.platform, dto.platformProductId, dto.skus);
+    storeProductInventory(this.platform, dto.platformProductId, dto.skus);
   }
 
   async updateProductPrice(_token: string, dto: UpdateProductPriceDto): Promise<void> {
@@ -81,12 +87,11 @@ export class MockPlatformAdapter extends BasePlatformAdapter {
   }
 
   async getProductPrices(_token: string, productId: string): Promise<PlatformProductPriceState> {
-    const prices = MOCK_PRODUCT_PRICES.get(mockProductKey(this.platform, productId));
+    const key = mockProductKey(this.platform, productId);
+    const prices = MOCK_PRODUCT_PRICES.get(key);
     if (!prices?.size) throw new Error('Mock product prices are unavailable');
     return {
-      state: 'online',
-      status: 0,
-      checkStatus: 3,
+      ...mockProductState(key),
       items: [...prices]
         .map(([sourceSkuId, priceCents]) => ({ sourceSkuId, priceCents }))
         .sort((left, right) =>
@@ -95,16 +100,48 @@ export class MockPlatformAdapter extends BasePlatformAdapter {
     };
   }
 
-  async getProductState(_token: string, _productId: string): Promise<PlatformProductState> {
-    return { state: 'online', status: 0, checkStatus: 3 };
+  async getProductState(_token: string, productId: string): Promise<PlatformProductState> {
+    return mockProductState(mockProductKey(this.platform, productId));
   }
 
-  async syncInventory(_token: string, _dto: SyncInventoryDto): Promise<void> {
-    /* 模拟：无操作 */
+  async getProductInventory(
+    _token: string,
+    productId: string,
+  ): Promise<PlatformProductInventoryState> {
+    const key = mockProductKey(this.platform, productId);
+    const inventory = MOCK_PRODUCT_INVENTORY.get(key);
+    if (!inventory?.size) throw new Error('Mock product inventory is unavailable');
+    return {
+      ...mockProductState(key),
+      items: [...inventory]
+        .map(([sourceSkuId, stock]) => ({ sourceSkuId, stock }))
+        .sort((left, right) =>
+          left.sourceSkuId < right.sourceSkuId ? -1 : left.sourceSkuId > right.sourceSkuId ? 1 : 0,
+        ),
+    };
   }
 
-  async offlineProduct(_token: string, _productId: string): Promise<void> {
-    /* 模拟：无操作 */
+  async syncInventory(_token: string, dto: SyncInventoryDto): Promise<void> {
+    const key = mockProductKey(this.platform, dto.platformProductId);
+    const inventory = new Map(MOCK_PRODUCT_INVENTORY.get(key));
+    const seen = new Set<string>();
+    for (const item of dto.items) {
+      const sourceSkuId = validMockSkuId(item.sourceSkuId);
+      if (seen.has(sourceSkuId)) {
+        throw new Error(`Mock duplicate external SKU ID: ${sourceSkuId}`);
+      }
+      seen.add(sourceSkuId);
+      inventory.set(sourceSkuId, validMockStock(item.stock));
+    }
+    if (inventory.size) MOCK_PRODUCT_INVENTORY.set(key, inventory);
+  }
+
+  async offlineProduct(_token: string, productId: string): Promise<void> {
+    MOCK_PRODUCT_STATES.set(mockProductKey(this.platform, productId), {
+      state: 'offline',
+      status: 1,
+      checkStatus: 3,
+    });
   }
 
   async getCategoryTree(_token: string): Promise<CategoryNode[]> {
@@ -247,8 +284,33 @@ function storeProductPrices(
   if (prices.size) MOCK_PRODUCT_PRICES.set(mockProductKey(platform, productId), prices);
 }
 
+function storeProductInventory(
+  platform: PlatformType,
+  productId: string,
+  skus: PublishProductDto['skus'],
+): void {
+  const inventory = new Map<string, number>();
+  for (const sku of skus) {
+    if (!sku.sourceSkuId) continue;
+    const sourceSkuId = validMockSkuId(sku.sourceSkuId);
+    if (inventory.has(sourceSkuId)) {
+      throw new Error(`Mock duplicate external SKU ID: ${sourceSkuId}`);
+    }
+    inventory.set(sourceSkuId, validMockStock(sku.stock));
+  }
+  if (inventory.size) MOCK_PRODUCT_INVENTORY.set(mockProductKey(platform, productId), inventory);
+}
+
 function mockProductKey(platform: PlatformType, productId: string): string {
   return `${platform}:${productId}`;
+}
+
+function onlineMockProductState(): PlatformProductState {
+  return { state: 'online', status: 0, checkStatus: 3 };
+}
+
+function mockProductState(key: string): PlatformProductState {
+  return MOCK_PRODUCT_STATES.get(key) ?? onlineMockProductState();
 }
 
 function validMockSkuId(value: string): string {
@@ -259,6 +321,11 @@ function validMockSkuId(value: string): string {
 
 function validMockPrice(value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error('Mock SKU price is invalid');
+  return value;
+}
+
+function validMockStock(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error('Mock SKU stock is invalid');
   return value;
 }
 

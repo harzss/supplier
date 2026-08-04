@@ -1,6 +1,7 @@
 import type { PlatformType, TokenSet } from '@supplier/shared-types';
 import { createHmac } from 'node:crypto';
 import { BasePlatformAdapter } from '../adapter';
+import { PlatformMutationResultUnknownError } from '../types';
 import type {
   AdapterConfig,
   CategoryAttr,
@@ -12,6 +13,7 @@ import type {
   OrderQuery,
   PlatformExecutionGuard,
   PlatformOrder,
+  PlatformProductInventoryState,
   PlatformProductPriceState,
   PlatformProductState,
   PlatformShipmentPackage,
@@ -107,6 +109,7 @@ const AUTH_URL = 'https://fuwu.jinritemai.com/authorize';
 const API_VERSION = '2';
 const MAX_CATEGORY_NODES = 20_000;
 const CATEGORY_FETCH_CONCURRENCY = 6;
+const ACCEPTED_INVENTORY_IDEMPOTENCY_RESPONSE = Symbol('accepted inventory idempotency response');
 
 /**
  * 抖音小店适配器
@@ -252,6 +255,33 @@ export class DouyinAdapter extends BasePlatformAdapter {
     };
   }
 
+  async getProductInventory(
+    token: string,
+    productIdValue: string,
+  ): Promise<PlatformProductInventoryState> {
+    const productId = positiveNumericId(productIdValue, 'product ID');
+    const data = await this.requestApi<DouyinProductDetailData>(
+      '/product/detail',
+      'product.detail',
+      'product detail',
+      token,
+      { product_id: productId },
+    );
+    if (!data) throw new Error('Douyin product detail returned an invalid response');
+    const returnedProductId = stringValue(data.product_id_str ?? data.product_id).trim();
+    if (returnedProductId && returnedProductId !== productId) {
+      throw new Error('Douyin product detail returned a mismatched product ID');
+    }
+    const status = optionalInteger(data.status);
+    const checkStatus = optionalInteger(data.check_status);
+    return {
+      state: mapProductState(status, checkStatus),
+      status,
+      checkStatus,
+      items: parseProductInventory(data.spec_prices),
+    };
+  }
+
   async getProductState(token: string, productIdValue: string): Promise<PlatformProductState> {
     const productId = positiveNumericId(productIdValue, 'product ID');
     const data = await this.requestApi<DouyinProductDetailData>(
@@ -291,25 +321,48 @@ export class DouyinAdapter extends BasePlatformAdapter {
     const chunks = chunk(items, 50);
     for (const [index, current] of chunks.entries()) {
       const chunkKey = chunks.length === 1 ? idempotencyKey : `${idempotencyKey}-${index + 1}`;
-      const data = await this.requestApi<DouyinInventorySyncData>(
-        '/sku/syncStockBatchMultiProducts',
-        'sku.syncStockBatchMultiProducts',
-        'inventory sync',
-        token,
-        {
-          idempotent_id: chunkKey,
-          incremental: false,
-          inventory_loss: false,
-          items: current,
-          source: 'supplier',
-        },
-        ['isv.business-failed:-20002'],
-      );
-      if (!data) continue;
-      validateInventoryResults(
-        data.results,
-        current.map((item) => item.uniq_id),
-      );
+      let data:
+        | DouyinInventorySyncData
+        | typeof ACCEPTED_INVENTORY_IDEMPOTENCY_RESPONSE
+        | undefined;
+      try {
+        data = await this.requestApi<
+          DouyinInventorySyncData | typeof ACCEPTED_INVENTORY_IDEMPOTENCY_RESPONSE
+        >(
+          '/sku/syncStockBatchMultiProducts',
+          'sku.syncStockBatchMultiProducts',
+          'inventory sync',
+          token,
+          {
+            idempotent_id: chunkKey,
+            incremental: false,
+            inventory_loss: false,
+            items: current,
+            source: 'supplier',
+          },
+          ['isv.business-failed:-20002'],
+          ACCEPTED_INVENTORY_IDEMPOTENCY_RESPONSE,
+        );
+      } catch (error) {
+        if (inventoryMutationResultIsUnknown(error)) {
+          throw new PlatformMutationResultUnknownError(
+            error instanceof Error ? error.message : 'Douyin inventory sync result is unknown',
+          );
+        }
+        throw error;
+      }
+      if (data === ACCEPTED_INVENTORY_IDEMPOTENCY_RESPONSE) continue;
+      try {
+        validateInventoryResults(
+          data?.results,
+          current.map((item) => item.uniq_id),
+        );
+      } catch (error) {
+        if (error instanceof InvalidInventoryMutationResponseError) {
+          throw new PlatformMutationResultUnknownError(error.message);
+        }
+        throw error;
+      }
     }
   }
 
@@ -811,6 +864,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
     accessToken: string,
     params: Record<string, unknown>,
     acceptedSubCodes: readonly string[] = [],
+    acceptedResult?: T,
   ): Promise<T | undefined> {
     const timestamp = formatDouyinTimestamp(this.now());
     const paramJson = canonicalJson(params);
@@ -847,10 +901,13 @@ export class DouyinAdapter extends BasePlatformAdapter {
     } catch {
       throw new Error(`Douyin ${operation} returned an invalid response`);
     }
-    if (payload.code !== 10000 && !acceptedSubCodes.includes(payload.sub_code ?? '')) {
-      throw new Error(
-        `Douyin ${operation} failed: ${safeMessage(payload.sub_msg ?? payload.msg, payload.code ?? -1)}`,
-      );
+    if (payload.code !== 10000) {
+      if (!acceptedSubCodes.includes(payload.sub_code ?? '')) {
+        throw new Error(
+          `Douyin ${operation} failed: ${safeMessage(payload.sub_msg ?? payload.msg, payload.code ?? -1)}`,
+        );
+      }
+      return acceptedResult;
     }
     return payload.data as T;
   }
@@ -1127,11 +1184,10 @@ function toCents(value: number, label: string): number {
 }
 
 function toStock(value: number): number {
-  const stock = Math.trunc(value);
-  if (!Number.isSafeInteger(stock) || stock < 0) {
+  if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error('Douyin SKU stock must be a non-negative integer');
   }
-  return stock;
+  return value;
 }
 
 function positiveNumericId(value: string, label: string): string {
@@ -1160,23 +1216,49 @@ function chunk<T>(items: T[], size: number): T[][] {
 
 function validateInventoryResults(value: unknown, expectedUniqIds: string[]): void {
   if (!Array.isArray(value) || value.length !== expectedUniqIds.length) {
-    throw new Error('Douyin inventory sync returned an invalid response');
+    throw new InvalidInventoryMutationResponseError(
+      'Douyin inventory sync returned an invalid response',
+    );
   }
-  const results = new Map<string, string>();
+  const expected = new Set(expectedUniqIds);
+  const results = new Map<string, number>();
   for (const itemValue of value) {
     const item = recordValue(itemValue);
     const uniqId = stringValue(item?.uniq_id);
-    const statusCode = stringValue(item?.status_code);
-    if (!uniqId || results.has(uniqId)) {
-      throw new Error('Douyin inventory sync returned an invalid response');
+    const statusCode = inventoryStatusCode(item?.status_code);
+    if (!uniqId || !expected.has(uniqId) || results.has(uniqId) || statusCode === null) {
+      throw new InvalidInventoryMutationResponseError(
+        'Douyin inventory sync returned an invalid response',
+      );
     }
     results.set(uniqId, statusCode);
   }
   for (const uniqId of expectedUniqIds) {
-    if (results.get(uniqId) !== '0') {
+    if (results.get(uniqId) !== 0) {
       throw new Error(`Douyin inventory sync failed for item ${uniqId}`);
     }
   }
+}
+
+function inventoryStatusCode(value: unknown): number | null {
+  const number =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^-?\d+$/.test(value.trim())
+        ? Number(value.trim())
+        : Number.NaN;
+  return Number.isSafeInteger(number) ? number : null;
+}
+
+class InvalidInventoryMutationResponseError extends Error {}
+
+function inventoryMutationResultIsUnknown(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message === 'Douyin inventory sync request failed' ||
+    error.message.startsWith('Douyin inventory sync failed (HTTP ') ||
+    error.message === 'Douyin inventory sync returned an invalid response'
+  );
 }
 
 function mapCategoryNode(value: unknown, requestedParentId: string): CategoryNode {
@@ -1285,6 +1367,29 @@ function parseProductPrices(value: unknown): PlatformProductPriceState['items'] 
     return {
       sourceSkuId,
       priceCents: positiveInteger(item.price, 'SKU price in cents'),
+    };
+  });
+  return items.sort((left, right) =>
+    left.sourceSkuId < right.sourceSkuId ? -1 : left.sourceSkuId > right.sourceSkuId ? 1 : 0,
+  );
+}
+
+function parseProductInventory(value: unknown): PlatformProductInventoryState['items'] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('Douyin product detail returned no SKU inventory');
+  }
+  const seen = new Set<string>();
+  const items = value.map((itemValue) => {
+    const item = recordValue(itemValue);
+    if (!item) throw new Error('Douyin product detail returned invalid SKU inventory');
+    const sourceSkuId = strictExternalSkuId(item.outer_sku_id);
+    if (seen.has(sourceSkuId)) {
+      throw new Error(`Douyin product detail returned duplicate external SKU ID: ${sourceSkuId}`);
+    }
+    seen.add(sourceSkuId);
+    return {
+      sourceSkuId,
+      stock: nonNegativeInteger(item.stock_num, 'SKU stock'),
     };
   });
   return items.sort((left, right) =>
@@ -1925,6 +2030,19 @@ function strictCompanyCode(value: unknown): string {
 function positiveInteger(value: unknown, label: string): number {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`Douyin ${label} is invalid`);
+  }
+  return number;
+}
+
+function nonNegativeInteger(value: unknown, label: string): number {
+  const number =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value.trim())
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isSafeInteger(number) || number < 0) {
     throw new Error(`Douyin ${label} is invalid`);
   }
   return number;

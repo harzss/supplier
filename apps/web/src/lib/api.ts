@@ -475,12 +475,20 @@ export interface ProductBatchCandidate {
   priceEditReason: string | null;
   sourceProductId: string;
   sourceAvailability: string;
+  sourceTotalStock: number;
+  sourceSkuCount: number;
+  sourceInventoryVersion: number;
   inventorySyncStatus: string;
+  syncedInventoryVersion: number;
+  inventoryLastSyncedAt: string | null;
+  inventorySyncError: string | null;
+  inventorySyncEligible: boolean;
+  inventorySyncReason: string | null;
   mutationRevision: number;
   publishedAt: string;
 }
 
-export type ProductBatchAction = 'offline' | 'edit_price';
+export type ProductBatchAction = 'offline' | 'edit_price' | 'sync_inventory';
 
 export type ProductBatchPriceRule =
   | {
@@ -504,6 +512,11 @@ export type ProductBatchPreviewRequest =
       action: 'edit_price';
       publishedProductIds: string[];
       priceRule: ProductBatchPriceRule;
+    }
+  | {
+      clientRequestId: string;
+      action: 'sync_inventory';
+      publishedProductIds: string[];
     };
 
 export interface ProductBatchCandidatePage {
@@ -526,6 +539,11 @@ export interface ProductBatchSummary {
   progressPercent: number;
 }
 
+export interface ProductBatchInventorySnapshot {
+  version: 1;
+  items: Array<{ sourceSkuId: string; stock: number }>;
+}
+
 export interface ProductBatchItem {
   itemId: string;
   publishedProductId: string;
@@ -543,6 +561,11 @@ export interface ProductBatchItem {
   desiredPriceRange: [number, number] | null;
   actualPriceRange: [number, number] | null;
   skuCount: number;
+  beforeInventory: ProductBatchInventorySnapshot | null;
+  desiredInventory: ProductBatchInventorySnapshot | null;
+  actualInventory: ProductBatchInventorySnapshot | null;
+  beforeInventoryVersion: number | null;
+  desiredInventoryVersion: number | null;
   status: string;
   attempts: number;
   maxAttempts: number;

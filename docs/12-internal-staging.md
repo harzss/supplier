@@ -114,7 +114,7 @@ pnpm audit:supabase-boundary
 
 完成标准：仓库 migration 全部 applied，0 unfinished、0 rolled back、checksum 全匹配，live schema diff 为空。BFF/Redis readiness 属于下一节环境 smoke，不作为数据库审计的循环前置条件。
 
-2026-08-03 审计快照：PostgreSQL 17.6，当时仓库与 staging 为 33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。当前仓库共有 39 个 migration，尚无第 34～39 个已应用的实时证据，因此当前候选发布账面为 33/39（6 个待应用）。部署新代码前必须重新完成本节只读审计、备份和隔离预检，由单一 migration-once 一次应用第 34～39 个，再完成 39/39、checksum、schema diff、RLS/ACL 审计；不得写成已迁移。
+2026-08-03 审计快照：PostgreSQL 17.6，当时仓库与 staging 为 33/33 migration applied，0 unfinished，0 rolled back，checksum 全匹配，live schema diff 为空；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`。28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。migration 前的一致性归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`，已在隔离 PostgreSQL 17 恢复，Docker volume 为 `supplier-staging-pre-rls-20260803-1730`。`supplier-assets` 上传、公开读取、删除均返回 200；公开注册关闭，匿名业务表访问返回 401。当前仓库共有 40 个 migration，尚无第 34～40 个已应用的实时证据，因此当前候选发布账面为 33/40（7 个待应用）。部署新代码前必须重新完成本节只读审计、备份和隔离预检，由单一 migration-once 一次应用第 34～40 个，再完成 40/40、checksum、schema diff、RLS/ACL 审计；不得写成已迁移。
 
 ## 4. 部署 Cloudflare staging gateway
 
@@ -176,7 +176,7 @@ curl -fsS http://127.0.0.1:3001/api/health/live
 curl -fsS http://127.0.0.1:3001/api/health/ready
 ```
 
-当前 Redis `supplier-staging-redis` 仅监听 `127.0.0.1:6379`，使用 `supplier-staging-redis-data` 命名卷、AOF 和 `unless-stopped`。BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、批量商品执行和批量货源采集六项开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本已前移到 `20260804210000_add_source_imports`，因此第 39 个 migration 未应用时新 BFF 必须保持 503，不能绕过后接流量。
+当前 Redis `supplier-staging-redis` 仅监听 `127.0.0.1:6379`，使用 `supplier-staging-redis-data` 命名卷、AOF 和 `unless-stopped`。BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、批量商品执行和批量货源采集六项开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本已前移到 `20260805010000_add_published_source_bindings`，因此第 40 个 migration 未应用时新 BFF 必须保持 503，不能绕过后接流量。
 
 批量货源采集不得仅因页面可见就开启。先保持 `SOURCE_IMPORT_ENABLED=false`，用两个受控 1688 买家账号对同一组 offer 分别取证标题、SKU、分销价和库存；只有确认这些字段不随账号变化，并完成方案配额、限流和曝光回传要求核验后，才在维护窗口写入 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 并开启 worker。开启后至少用两个 Supabase 测试用户分别验证任务列表、按 client request 恢复和“我的货源”互不可见；再演练 BFF 重启、Redis 不可用、停止未开始项、单个失败项重试、相同 UUID 同参恢复和异参 409。任何一项失败都应重新关闭开关，不得回退 Mock。
 
@@ -306,12 +306,12 @@ pnpm deploy:verify
 
 验证器按顺序执行，避免 Supabase Free 单连接环境因测试自身的并发请求产生假 503；30 秒只是 staging 的单请求上限，不能替代延迟监控或正式 SLA。
 
-再按登录、选品、筛选、收藏、AI 文案、类目/SKU、铺货记录、批量经营、订单和经营看板顺序人工验证。批量经营当前验收 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory` 与 `cleanup`；SKU 编辑和换源仍是未来动作，不能把数据库 enum 当作已实现能力。
+再按登录、选品、筛选、收藏、AI 文案、类目/SKU、铺货记录、批量经营、订单和经营看板顺序人工验证。批量经营当前验收 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory`、`cleanup` 与抖店离线 `change_source`。`change_source` 只切换版本化采购绑定，必须保持平台 SKU、售价和离线状态不变；任意平台 SKU 编辑仍是未来能力，不能把换源或数据库 enum 写成已支持平台 SKU 编辑。
 
 首次批量 worker 验收分两阶段：
 
 1. 保持 `PRODUCT_BATCH_ENABLED=false`，创建最多 100 件的持久化预览并刷新页面，确认任务仍可恢复、预览不调用平台；确认执行必须返回 503，数据库不得出现 queued/running item。
-2. 选定可清理的抖店测试商品，在维护窗口把 `PRODUCT_BATCH_ENABLED=true` 后重启 BFF。先验收普通批量下架：确认前再次核对预览；观察 item 从 pending 到 running/终态，真实平台必须回读为下架才算成功。再用至少 2 个 SKU 的在线商品分别验收比例上调/下调、逐项目标起售价、多 SKU 价格区间、平台回读、部分失败续跑和外部价格漂移阻断；随后执行一次标题修正并确认不会把新价格写回旧值。库存同步必须显示同步前/1688 目标/平台回读三列，分别演练完整成功、部分 SKU 成功后只续跑剩余项、源版本变化和平台外部漂移；发布恢复与标题修正也要确认不会把请求库存误记成功或覆盖平台当前值。然后选择有可售库存的已下架商品验收批量上架：平台库存不一致时必须先保持下架补齐，只有两次状态回读均为在线且逐 SKU 库存完全一致才成功；演练超时、状态/库存反向不一致、隔离后迟到上线和普通状态同步阻断，未知结果只能走逐项核验，不能直接重试。最后验收 `cleanup`：先保持历史确认变量为空并确认真实店全部候选被阻断；强制完成一次覆盖最近 30 天的全量订单回补并记录完成时间，等待店铺在该时间后成功完成增量同步，再把精确 UTC 时间写入 `DOUYIN_ORDER_SYNC_HISTORY_VERIFIED_AT` 并重启 BFF。只选择上架满 7 天且近 30 天无有效订单的商品，确认预览不调用平台；分别演练预览后出单、下架期间出单、同步错误/运行中/水位过期、网络超时和 worker 中断。未知下架结果只能逐项核验，未核验期间完整编辑、状态同步、库存与其他批量动作必须被阻断；清理不得删除商品或历史数据。完成后清空历史确认变量并恢复 `PRODUCT_BATCH_ENABLED=false`，直到真实平台验收和运营策略批准长期开启。
+2. 选定可清理的抖店测试商品，在维护窗口把 `PRODUCT_BATCH_ENABLED=true` 后重启 BFF。先验收普通批量下架：确认前再次核对预览；观察 item 从 pending 到 running/终态，真实平台必须回读为下架才算成功。再用至少 2 个 SKU 的在线商品分别验收比例上调/下调、逐项目标起售价、多 SKU 价格区间、平台回读、部分失败续跑和外部价格漂移阻断；随后执行一次标题修正并确认不会把新价格写回旧值。库存同步必须显示同步前/1688 目标/平台回读三列，分别演练完整成功、部分 SKU 成功后只续跑剩余项、源版本变化和平台外部漂移；发布恢复与标题修正也要确认不会把请求库存误记成功或覆盖平台当前值。然后选择有可售库存的已下架商品验收批量上架：平台库存不一致时必须先保持下架补齐，只有两次状态回读均为在线且逐 SKU 库存完全一致才成功；演练超时、状态/库存反向不一致、隔离后迟到上线和普通状态同步阻断，未知结果只能走逐项核验，不能直接重试。最后验收 `cleanup` 与离线安全换源：先保持历史确认变量为空并确认真实店全部候选被阻断；强制完成一次覆盖最近 30 天的全量订单回补并记录完成时间，等待店铺在该时间后成功完成增量同步，再把精确 UTC 时间写入 `DOUYIN_ORDER_SYNC_HISTORY_VERIFIED_AT` 并重启 BFF。`cleanup` 只选择上架满 7 天且近 30 天无有效订单的商品，确认预览不调用平台；分别演练预览后出单、下架期间出单、同步错误/运行中/水位过期、网络超时和 worker 中断。换源只选择已连续确认下架、无未核验写入且当前绑定唯一的抖店商品，目标必须是当前用户已采集、可售且支持一件代发的 1688 offer；执行前记录平台商品 ID、SKU key、售价、离线状态和旧绑定，执行后确认只有采购绑定/成本/库存目标变更，平台事实不变，并分别验证切换前付款订单仍走旧绑定、切换后订单走新绑定。未知下架结果只能逐项核验，未核验期间完整编辑、状态同步、库存与其他批量动作必须被阻断；清理不得删除商品或历史数据。完成后清空历史确认变量并恢复 `PRODUCT_BATCH_ENABLED=false`，直到真实平台 E2E 和运营策略批准长期开启。
 
 真实平台其他自动化严格按以下顺序开放：
 

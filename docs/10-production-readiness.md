@@ -5,7 +5,7 @@
 > [00-roadmap.md](./00-roadmap.md) 为准，工程实现证据见
 > [09-main-flow.md](./09-main-flow.md)。
 >
-> **时效说明（2026-08-04）**：现有 Supabase 项目已明确按 staging 管理。2026-08-03 实时审计确认当时仓库与 staging 为 PostgreSQL 17.6、33/33 applied、0 unfinished/rolled back、checksum 全匹配且 live schema diff 为空；28/28 public 表启用 RLS，anon/authenticated 对业务表和 sequence 均无权限。当前仓库共有 39 个 migration，尚无第 34～39 个已应用的实时证据，因此当前候选发布账面为 33/39（6 个待应用）；迁移前必须重新只读审计，生产数据库仍必须独立核验。
+> **时效说明（2026-08-04）**：现有 Supabase 项目已明确按 staging 管理。2026-08-03 实时审计确认当时仓库与 staging 为 PostgreSQL 17.6、33/33 applied、0 unfinished/rolled back、checksum 全匹配且 live schema diff 为空；28/28 public 表启用 RLS，anon/authenticated 对业务表和 sequence 均无权限。当前仓库共有 40 个 migration，尚无第 34～40 个已应用的实时证据，因此当前候选发布账面为 33/40（7 个待应用）；迁移前必须重新只读审计，生产数据库仍必须独立核验。
 
 ## 1. 当前结论（治理与技术证据截至 2026-08-04）
 
@@ -13,11 +13,11 @@
 
 当前 staging 已完成数据库备份恢复、RLS、Storage、关闭公开注册、匿名访问拒绝、Cloudflare Worker、Redis AOF、BFF readiness、告警 firing/resolved 基础 smoke，以及 Redis / 数据库队列非空重启持久性实测；已部署旧候选的 Web 为 59 个纯静态 Cloudflare Assets，固定 URL、BFF CORS/OAuth、Supabase Site/Redirect 和 15/15 HTTPS 验收均通过，且没有可执行 Worker CPU 路径。新旧 Supabase Key 兼容和安全轮换/Auth 验收器已有代码证据，但尚未在 Dashboard 创建新 Key、重部署 Web/BFF、停用 legacy Key 或完成真实邀请账号生命周期；长期进程守护尚未获得安装授权，也尚未验收，因此 R0-03 保持进行中。当前 staging 证据和临时 Quick Tunnel 都不能当作生产部署证据。
 
-R2-01 当前已有跨页首次铺货进度、利润试算、统一风险预检、服务端草稿、用户内请求幂等键和上下文绑定的 OAuth 安全回跳。回跳目标只接受站内相对地址并绑定进一次性 state；callback 只在 URL 携带短期一次性、用户绑定的结果 token，登录用户消费后才能读取成功、店铺或错误信息，跨用户、伪造和重放均拒绝。草稿恢复后强制重新试算/预检，多标签旧 generation 不能覆盖新草稿，重复点击和响应丢失恢复原任务。当前候选部署须应用第 34～39 个 migration（其中本能力数据结构依赖第 34/35 个）并重部署后才能进入 staging，且尚缺真实店 E2E 和 5 人无指导可用性验收，因此仍只属于应用侧进行中。
+R2-01 当前已有跨页首次铺货进度、利润试算、统一风险预检、服务端草稿、用户内请求幂等键和上下文绑定的 OAuth 安全回跳。回跳目标只接受站内相对地址并绑定进一次性 state；callback 只在 URL 携带短期一次性、用户绑定的结果 token，登录用户消费后才能读取成功、店铺或错误信息，跨用户、伪造和重放均拒绝。草稿恢复后强制重新试算/预检，多标签旧 generation 不能覆盖新草稿，重复点击和响应丢失恢复原任务。当前候选部署须应用第 34～40 个 migration（其中本能力数据结构依赖第 34/35 个）并重部署后才能进入 staging，且尚缺真实店 E2E 和 5 人无指导可用性验收，因此仍只属于应用侧进行中。
 
-R2-02 当前有七个候选代码切片。M77 新增基于订单证据的滞销安全下架：候选至少上架 7 天，按子单商品关联聚合最近 30 天有效订单；真实店要求订单同步已启用、回溯不少于 30 天、历史回补已由运维显式确认，且水位新鲜、无错误、未在同步。预览不调用平台，执行前后重新核验；平台写入前持久化 fence，未知下架结果禁止直接重试，只能逐项双重回读。M76 的持久批量采集以及 M71～M75 的上架、下架、标题、价格和库存切片继续保留最多 100 件物化预览、item 级状态、租户隔离、平台强回读与商品 revision 漂移保护。SKU 编辑和换源仍未实现；第 36～39 个 migration、双租户采集、真实 1688 配额/数据口径、30 天订单历史回补和真实抖店行为均尚未在 staging 验收，因此不能把七个切片写成 R2-02 完成或生产可用。
+R2-02 当前有八个候选代码切片。M78 新增抖店离线安全换源：真实店必须具备可用的 30 天订单历史与新鲜同步水位，平台连续两次确认稳定离线后，应用才在事务内关闭旧采购绑定、创建带生效区间的新绑定并切换库存目标；历史订单按付款时间保留原 offer/spec/成本快照，新订单与库存任务跟随当前绑定。换源不调用平台 SKU、价格或上下架写接口，平台 SKU key 和离线状态保持不变。M77 的滞销安全下架与 M71～M76 的持久批量采集、上下架、标题、价格和库存切片继续保留最多 100 件物化预览、item 级状态、租户隔离、平台强回读与商品 revision 漂移保护。任意平台 SKU 编辑仍未实现；第 36～40 个 migration、双租户采集、真实 1688 配额/数据口径、30 天订单历史回补和真实抖店/1688 行为均尚未在 staging 验收，因此不能把八个切片写成 R2-02 完成或生产可用。
 
-当前候选已通过全仓 8 个测试包 1055/1055（BFF 704、Platform SDK 166、Web 75、crawler 62、其余包 48），以及 238/238 BFF 定向测试、54 项运维测试、lint、typecheck、build、Prisma validate/format、migration-history RLS/ACL、Prettier 和差异检查。主进程在受限沙箱内启动 Vitest 会因 `localhost`/listen 权限失败，已在获准的非沙箱测试进程中使用 `turbo run test --force` 完成零缓存全量回归；2026-08-04 联网执行 `pnpm audit --prod --audit-level high` 返回 0 已知漏洞。全新 PostgreSQL 17 的 38/38 migration、schema diff、价格/库存快照列和批量表权限仍是 M73 的已有证据；第 39 个 migration 已通过 Prisma 与静态迁移/RLS 门禁，但本轮未实际应用到新 PostgreSQL 或 staging。M77 浏览器证据覆盖 390×844、1440×900、滞销安全下架默认入口与 30 天订单/7 天观察期说明、无横向溢出、至少 44px 触控和零 console warning/error；当时未连接真实 BFF，因此不替代 preview/worker 端到端验收。BFF、migration、Web 三个非 root Linux 镜像仍属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用 staging 第 34～39 个 migration。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
+当前 BFF 754/754、Web 80/80 全量测试通过，其中 M78 相关 BFF 定向 320/320、Web 工作台 42/42。M78 已在一次性 PostgreSQL 15 从空库应用 40/40，并用历史双 SKU 订单验证绑定与 8.50/14.75 成本快照回填；RLS/ACL 和 live schema → Prisma datamodel diff 均通过，临时资源已删除。该结果不等于 staging 已迁移：staging 账面仍为 33/40。BFF、migration、Web 三个非 root Linux 镜像仍属于 R2-01 之前的已验证基线，本次新增代码尚未重建镜像、部署或应用 staging 第 34～40 个 migration；真实抖店/1688 E2E 和任意平台 SKU 编辑均未完成。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
 
 ### M13～M67 历史账本（按记录当时理解）
 
@@ -334,8 +334,8 @@ git diff --check
 - 生产 Web 漏配认证或 HTTP BFF/Supabase origin 时安全失败，不展示商家工作台
 - `/api/health/live` 返回 200
 - `/api/health/ready` 仅在 PostgreSQL、Redis 都可用时返回 200
-- `/api/health/ready` 必须确认最新必需 migration `20260804210000_add_source_imports` 已完成且未回滚；当前发布账面 33/39 必须返回 503
-- `PRODUCT_BATCH_ENABLED=false` 时批量商品预览不产生平台副作用、确认执行返回 503；启用后只允许当前已实现的 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory` 与 `cleanup`。标题/上架/下架未知结果未核验前不得重放；下架 fence 必须同时阻断完整编辑、普通状态同步和库存 worker。`cleanup` 不得删除商品，真实店必须先验证 30 天订单历史回补并配置 `DOUYIN_ORDER_SYNC_HISTORY_VERIFIED_AT`，同步水位过期、运行中、失败或执行期间出现订单都必须停止或进入人工复核
+- `/api/health/ready` 必须确认最新必需 migration `20260805010000_add_published_source_bindings` 已完成且未回滚；当前发布账面 33/40 必须返回 503
+- `PRODUCT_BATCH_ENABLED=false` 时批量商品预览不产生平台副作用、确认执行返回 503；启用后只允许当前已实现的 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory`、`cleanup` 与抖店离线 `change_source`。标题/上架/下架未知结果未核验前不得重放；下架 fence 必须同时阻断完整编辑、普通状态同步和库存 worker。`cleanup` 不得删除商品，真实店必须先验证 30 天订单历史回补并配置 `DOUYIN_ORDER_SYNC_HISTORY_VERIFIED_AT`，同步水位过期、运行中、失败或执行期间出现订单都必须停止或进入人工复核。`change_source` 必须保持平台 SKU、售价和离线状态不变，不能作为任意平台 SKU 编辑入口
 - `SOURCE_IMPORT_ENABLED=false` 时可读取已有采集任务但确认执行返回 503；生产启用必须同时具备 1688 AppKey/AppSecret、HTTPS OAuth 回调和 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer`。预览不得调用详情或请求用户 URL；worker 必须重新校验任务用户、buyer Shop、Token、Redis 限流和 item 所有权
 - 受保护 API 无 Bearer、仅伪造演示头或携带无效 token 时返回 401
 - 运维端点无 `OPERATIONS_TOKEN` 返回 401；携带有效 token 时 status/check/alerts/metrics 均成功

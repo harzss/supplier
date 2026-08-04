@@ -28,6 +28,111 @@ function redis(setResult: 'OK' | null = 'OK'): Redis {
   } as unknown as Redis;
 }
 
+function sourceBindingHarness(
+  sourceBindings: Array<{
+    id: bigint;
+    effectiveFrom: Date;
+    effectiveTo: Date | null;
+    sourceOfferId: string;
+    sourceSupplierId: string | null;
+    sourceOnePieceDrop: boolean;
+    skuRoutes: unknown;
+  }>,
+) {
+  const paidAt = new Date('2026-08-04T08:00:00.000Z');
+  const orderUpsert = vi.fn().mockResolvedValue({ id: 20n });
+  const orderItemUpsert = vi.fn().mockResolvedValue({});
+  const stalePublishedProductFindMany = vi.fn().mockResolvedValue([
+    {
+      id: 7n,
+      platformProductId: 'product-binding-1',
+      sourceProduct: { productId1688: 'stale-offer', supplierId: 'stale-supplier' },
+      sourceBindings: [],
+    },
+  ]);
+  const transactionPublishedProductFindMany = vi.fn().mockResolvedValue([
+    {
+      id: 7n,
+      platformProductId: 'product-binding-1',
+      sourceProduct: { productId1688: 'legacy-offer', supplierId: 'legacy-supplier' },
+      sourceBindings,
+    },
+  ]);
+  const platformOrder = {
+    platformOrderId: 'order-binding-1',
+    buyerNick: '',
+    receiverName: '',
+    receiverPhone: '',
+    receiverAddress: '',
+    amount: 29.9,
+    status: 'paid',
+    paidAt,
+    skuList: [
+      {
+        platformOrderItemId: 'sku-order-binding-1',
+        platformProductId: 'product-binding-1',
+        skuId: 'platform-sku-1',
+        sourceSkuId: 'stable-platform-key-1',
+        title: '绑定商品',
+        quantity: 1,
+        unitPrice: 29.9,
+        specs: { 颜色: '蓝色', 尺码: 'L' },
+      },
+    ],
+  };
+  const prisma = {
+    order: {
+      findFirst: vi.fn().mockResolvedValue({
+        id: 20n,
+        shopId: 9n,
+        platformOrderId: platformOrder.platformOrderId,
+        shop: {
+          id: 9n,
+          userId: 1n,
+          platform: 'douyin',
+          platformShopId: '4463798',
+          accessTokenEnc: 'encrypted-token',
+          status: 'active',
+        },
+      }),
+      findUnique: vi.fn().mockResolvedValue({ status: 'paid', afterSaleStatus: 'none' }),
+    },
+    publishedProduct: {
+      findMany: stalePublishedProductFindMany,
+    },
+    $transaction: vi.fn(async (callback) =>
+      callback({
+        publishedProduct: { findMany: transactionPublishedProductFindMany },
+        order: { findUnique: vi.fn().mockResolvedValue(null), upsert: orderUpsert },
+        orderItem: {
+          upsert: orderItemUpsert,
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+      }),
+    ),
+  } as unknown as PrismaService;
+  const service = new OrderSyncService(
+    prisma,
+    new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
+    { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
+    {
+      create: vi.fn().mockReturnValue({
+        listOrders: vi.fn(),
+        getOrder: vi.fn().mockResolvedValue(platformOrder),
+      }),
+    } as unknown as PlatformAdapterFactory,
+    runtimeConfig(),
+    redis(),
+  );
+  return {
+    orderItemUpsert,
+    paidAt,
+    service,
+    stalePublishedProductFindMany,
+    transactionPublishedProductFindMany,
+  };
+}
+
 describe('OrderSyncService', () => {
   it('rejects legacy demo shops before acquiring a sync lock in supabase auth mode', async () => {
     const findFirst = vi.fn().mockResolvedValue(null);
@@ -288,6 +393,15 @@ describe('OrderSyncService', () => {
       accessTokenEnc: 'encrypted-token',
       status: 'active',
     };
+    const publishedProductFindMany = vi.fn().mockResolvedValue([
+      {
+        id: 7n,
+        platformProductId: 'product-1',
+        sourceProduct: { productId1688: '554456348334', supplierId: 'supplier-1688-1' },
+        sourceBindings: [],
+      },
+    ]);
+    const stalePublishedProductFindMany = vi.fn();
     const prisma = {
       shop: {
         findFirst: vi.fn().mockResolvedValue(shop),
@@ -295,16 +409,11 @@ describe('OrderSyncService', () => {
         updateMany: shopUpdate,
       },
       publishedProduct: {
-        findMany: vi.fn().mockResolvedValue([
-          {
-            id: 7n,
-            platformProductId: 'product-1',
-            sourceProduct: { productId1688: '554456348334', supplierId: 'supplier-1688-1' },
-          },
-        ]),
+        findMany: stalePublishedProductFindMany,
       },
       $transaction: vi.fn(async (callback) =>
         callback({
+          publishedProduct: { findMany: publishedProductFindMany },
           order: { findUnique: vi.fn().mockResolvedValue(null), upsert: orderUpsert },
           orderItem: { upsert: orderItemUpsert, deleteMany: orderItemDeleteMany },
         }),
@@ -402,7 +511,169 @@ describe('OrderSyncService', () => {
         sourceSpecId: '1688-spec-white-m',
       }),
     });
+    expect(stalePublishedProductFindMany).not.toHaveBeenCalled();
+    expect(publishedProductFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { shopId: 9n, platformProductId: { in: ['product-1'] } },
+      }),
+    );
     expect(result).toEqual({ shopId: '9', synced: 1, skipped: 0 });
+  });
+
+  it('routes an order item through the source binding effective at payment time', async () => {
+    const paidAt = new Date('2026-08-04T08:00:00.000Z');
+    const {
+      orderItemUpsert,
+      service,
+      stalePublishedProductFindMany,
+      transactionPublishedProductFindMany,
+    } = sourceBindingHarness([
+      {
+        id: 81n,
+        effectiveFrom: new Date(paidAt.getTime() - 60_000),
+        effectiveTo: null,
+        sourceOfferId: '665567459445',
+        sourceSupplierId: 'supplier-current',
+        sourceOnePieceDrop: true,
+        skuRoutes: [
+          {
+            platformSkuKey: 'stable-platform-key-1',
+            sourceSpecId: 'new-source-spec-blue-l',
+            sourceSpecRequired: true,
+            sourceUnitCost: 11.25,
+            values: ['蓝色', 'L'],
+          },
+        ],
+      },
+    ]);
+
+    await expect(service.refreshOrder(USER, '20')).resolves.toMatchObject({ status: 'paid' });
+
+    expect(orderItemUpsert).toHaveBeenCalledWith({
+      where: {
+        uk_order_platform_item: {
+          orderId: 20n,
+          platformOrderItemId: 'sku-order-binding-1',
+        },
+      },
+      create: expect.objectContaining({
+        sourceBindingId: 81n,
+        sourceOfferId: '665567459445',
+        sourceSupplierId: 'supplier-current',
+        sourceSpecId: 'new-source-spec-blue-l',
+        sourceSpecRequired: true,
+        sourceUnitCost: 11.25,
+        sourceOnePieceDrop: true,
+      }),
+      update: expect.objectContaining({
+        sourceBindingId: 81n,
+        sourceOfferId: '665567459445',
+        sourceSpecId: 'new-source-spec-blue-l',
+        sourceUnitCost: 11.25,
+        sourceOnePieceDrop: true,
+      }),
+    });
+    expect(stalePublishedProductFindMany).not.toHaveBeenCalled();
+    expect(transactionPublishedProductFindMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a delayed pre-switch order on the historical source binding', async () => {
+    const seedPaidAt = new Date('2026-08-04T08:00:00.000Z');
+    const switchAt = new Date(seedPaidAt.getTime() + 60_000);
+    const { orderItemUpsert, service } = sourceBindingHarness([
+      {
+        id: 80n,
+        effectiveFrom: new Date(seedPaidAt.getTime() - 24 * 60 * 60_000),
+        effectiveTo: switchAt,
+        sourceOfferId: '554456348334',
+        sourceSupplierId: 'supplier-old',
+        sourceOnePieceDrop: true,
+        skuRoutes: [
+          {
+            platformSkuKey: 'stable-platform-key-1',
+            sourceSpecId: 'old-source-spec-blue-l',
+            sourceSpecRequired: true,
+            sourceUnitCost: 9.5,
+            values: ['蓝色', 'L'],
+          },
+        ],
+      },
+      {
+        id: 81n,
+        effectiveFrom: switchAt,
+        effectiveTo: null,
+        sourceOfferId: '665567459445',
+        sourceSupplierId: 'supplier-new',
+        sourceOnePieceDrop: true,
+        skuRoutes: [
+          {
+            platformSkuKey: 'stable-platform-key-1',
+            sourceSpecId: 'new-source-spec-blue-l',
+            sourceSpecRequired: true,
+            sourceUnitCost: 11.25,
+            values: ['蓝色', 'L'],
+          },
+        ],
+      },
+    ]);
+
+    await expect(service.refreshOrder(USER, '20')).resolves.toMatchObject({ status: 'paid' });
+
+    expect(orderItemUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          sourceBindingId: 80n,
+          sourceOfferId: '554456348334',
+          sourceSupplierId: 'supplier-old',
+          sourceSpecId: 'old-source-spec-blue-l',
+          sourceUnitCost: 9.5,
+        }),
+        update: expect.objectContaining({
+          sourceBindingId: 80n,
+          sourceOfferId: '554456348334',
+          sourceSpecId: 'old-source-spec-blue-l',
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    [
+      'payment time is outside every binding interval',
+      (paidAt: Date) => [
+        {
+          id: 81n,
+          effectiveFrom: new Date(paidAt.getTime() + 1),
+          effectiveTo: null,
+          sourceOfferId: '665567459445',
+          sourceSupplierId: 'supplier-current',
+          sourceOnePieceDrop: true,
+          skuRoutes: [],
+        },
+      ],
+      '订单付款时间没有对应的货源绑定',
+    ],
+    [
+      'the effective binding has no route for the platform SKU key',
+      (paidAt: Date) => [
+        {
+          id: 81n,
+          effectiveFrom: new Date(paidAt.getTime() - 1),
+          effectiveTo: null,
+          sourceOfferId: '665567459445',
+          sourceSupplierId: 'supplier-current',
+          sourceOnePieceDrop: true,
+          skuRoutes: [],
+        },
+      ],
+      '平台订单 SKU 没有对应的货源路由',
+    ],
+  ])('fails closed when %s', async (_label, bindings, message) => {
+    const seedPaidAt = new Date('2026-08-04T08:00:00.000Z');
+    const { orderItemUpsert, service } = sourceBindingHarness(bindings(seedPaidAt));
+
+    await expect(service.refreshOrder(USER, '20')).rejects.toThrow(message);
+    expect(orderItemUpsert).not.toHaveBeenCalled();
   });
 
   it('does not downgrade or rewrite procurement items after a purchase order exists', async () => {

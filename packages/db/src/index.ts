@@ -9,6 +9,7 @@ export type {
   PublishTask,
   PublishJob,
   PublishedProduct,
+  PublishedProductSourceBinding,
   ProductBatchTask,
   ProductBatchItem,
   SourceImportTask,

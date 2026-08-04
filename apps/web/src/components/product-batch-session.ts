@@ -26,6 +26,11 @@ const OFFLINE_CANDIDATE_FIELDS = [
   'offlineVerificationItemId',
 ] as const;
 const CLEANUP_CANDIDATE_FIELDS = ['cleanupEligible', 'cleanupReason', 'cleanupEvidence'] as const;
+const SOURCE_CHANGE_CANDIDATE_FIELDS = [
+  'sourceChangeEligible',
+  'sourceChangeReason',
+  'currentSourceRouteCount',
+] as const;
 
 type LegacyProductBatchCandidate = Omit<
   ProductBatchCandidate,
@@ -34,6 +39,7 @@ type LegacyProductBatchCandidate = Omit<
   | (typeof ONLINE_CANDIDATE_FIELDS)[number]
   | (typeof OFFLINE_CANDIDATE_FIELDS)[number]
   | (typeof CLEANUP_CANDIDATE_FIELDS)[number]
+  | (typeof SOURCE_CHANGE_CANDIDATE_FIELDS)[number]
 >;
 
 export interface ProductBatchSessionScope {
@@ -52,6 +58,7 @@ export interface ProductBatchComposerDraft {
   percentageInput: string;
   targetInputs: Record<string, string>;
   titleInputs: Record<string, string>;
+  sourceTargetInputs: Record<string, string>;
   bulkTargetInput: string;
   targetPage: number;
   selected: ProductBatchCandidate[];
@@ -198,7 +205,12 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     !Array.isArray(value.selected) ||
     value.selected.length > MAX_SELECTION ||
     !isStringRecord(value.targetInputs) ||
-    (value.titleInputs !== undefined && !isStringRecord(value.titleInputs))
+    (value.titleInputs !== undefined && !isStringRecord(value.titleInputs)) ||
+    (value.sourceTargetInputs !== undefined && !isStringRecord(value.sourceTargetInputs)) ||
+    (action === 'change_source' &&
+      (value.status !== 'offline' ||
+        !isStringRecord(value.sourceTargetInputs) ||
+        !hasValidSourceTargetInputs(value.sourceTargetInputs)))
   ) {
     return null;
   }
@@ -216,6 +228,11 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
       selectedIds.has(id),
     ),
   );
+  const sourceTargetInputs = Object.fromEntries(
+    Object.entries(isStringRecord(value.sourceTargetInputs) ? value.sourceTargetInputs : {}).filter(
+      ([id]) => selectedIds.has(id),
+    ),
+  );
   return {
     page: value.page,
     status: value.status,
@@ -227,6 +244,7 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     percentageInput: value.percentageInput,
     targetInputs,
     titleInputs,
+    sourceTargetInputs,
     bulkTargetInput: value.bulkTargetInput,
     targetPage: value.targetPage,
     selected: candidates,
@@ -258,6 +276,7 @@ function parseProductBatchCandidate(
   if (isProductBatchCandidate(value)) {
     return (action !== 'online' || value.onlineEligible === true) &&
       (action !== 'cleanup' || value.cleanupEligible === true) &&
+      (action !== 'change_source' || value.sourceChangeEligible === true) &&
       value.offlineVerificationTaskId === null
       ? value
       : null;
@@ -269,22 +288,29 @@ function parseProductBatchCandidate(
   const hasOnlineFields = ONLINE_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
   const hasOfflineFields = OFFLINE_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
   const hasCleanupFields = CLEANUP_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
+  const hasSourceChangeFields = SOURCE_CHANGE_CANDIDATE_FIELDS.some((field) =>
+    Object.hasOwn(value, field),
+  );
   const inventoryFieldsValid = hasInventoryCandidateFields(value);
   const titleFieldsValid = hasTitleCandidateFields(value);
   const onlineFieldsValid = hasValidOnlineCandidateState(value);
   const offlineFieldsValid = hasValidOfflineCandidateState(value);
   const cleanupFieldsValid = hasValidCleanupCandidateState(value);
+  const sourceChangeFieldsValid = hasValidSourceChangeCandidateState(value);
   if (
     (hasInventoryFields && !inventoryFieldsValid) ||
     (hasTitleFields && !titleFieldsValid) ||
     (hasOnlineFields && !onlineFieldsValid) ||
     (hasOfflineFields && (!offlineFieldsValid || value.offlineVerificationTaskId !== null)) ||
     (hasCleanupFields && !cleanupFieldsValid) ||
+    (hasSourceChangeFields && !sourceChangeFieldsValid) ||
     (action === 'sync_inventory' && !inventoryFieldsValid) ||
     (action === 'edit_title' && !titleFieldsValid) ||
     (action === 'online' && (!onlineFieldsValid || value.onlineEligible !== true)) ||
     (action === 'cleanup' && (!cleanupFieldsValid || value.cleanupEligible !== true)) ||
-    (['offline', 'cleanup'].includes(action) &&
+    (action === 'change_source' &&
+      (!sourceChangeFieldsValid || value.sourceChangeEligible !== true)) ||
+    (['offline', 'cleanup', 'change_source'].includes(action) &&
       (!offlineFieldsValid || value.offlineVerificationTaskId !== null))
   ) {
     return null;
@@ -330,6 +356,13 @@ function parseProductBatchCandidate(
     cleanupEvidence: cleanupFieldsValid
       ? (value.cleanupEvidence as ProductBatchCandidate['cleanupEvidence'])
       : null,
+    sourceChangeEligible: sourceChangeFieldsValid ? (value.sourceChangeEligible as boolean) : false,
+    sourceChangeReason: sourceChangeFieldsValid
+      ? (value.sourceChangeReason as string | null)
+      : '旧版会话缺少安全换源状态，请刷新商品后再操作',
+    currentSourceRouteCount: sourceChangeFieldsValid
+      ? (value.currentSourceRouteCount as number)
+      : 0,
   };
 }
 
@@ -369,7 +402,8 @@ function isProductBatchCandidate(
     hasTitleCandidateFields(value) &&
     hasValidOnlineCandidateState(value) &&
     hasValidOfflineCandidateState(value) &&
-    hasValidCleanupCandidateState(value)
+    hasValidCleanupCandidateState(value) &&
+    hasValidSourceChangeCandidateState(value)
   );
 }
 
@@ -436,6 +470,16 @@ export function hasValidCleanupCandidateState(value: unknown): boolean {
   return typeof reason === 'string' && reason.trim().length > 0;
 }
 
+export function hasValidSourceChangeCandidateState(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const eligible = value.sourceChangeEligible;
+  const reason = value.sourceChangeReason;
+  const routeCount = value.currentSourceRouteCount;
+  if (typeof eligible !== 'boolean' || !isNonNegativeInteger(routeCount)) return false;
+  if (eligible) return value.status === 'offline' && reason === null && routeCount > 0;
+  return typeof reason === 'string' && reason.trim().length > 0;
+}
+
 function isCleanupEvidence(
   value: unknown,
 ): value is NonNullable<ProductBatchCandidate['cleanupEvidence']> {
@@ -470,6 +514,7 @@ function isProductBatchAction(value: unknown): value is ProductBatchAction {
     value === 'edit_title' ||
     value === 'edit_price' ||
     value === 'sync_inventory' ||
+    value === 'change_source' ||
     value === 'cleanup'
   );
 }
@@ -484,6 +529,13 @@ function isPriceDirection(value: unknown): value is 'increase' | 'decrease' {
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string');
+}
+
+function hasValidSourceTargetInputs(value: Record<string, string>): boolean {
+  return Object.values(value).every((entry) => {
+    const offerId = entry.trim();
+    return offerId === '' || /^[1-9]\d{0,31}$/.test(offerId);
+  });
 }
 
 function isPositiveInteger(value: unknown): value is number {

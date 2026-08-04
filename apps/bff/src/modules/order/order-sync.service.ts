@@ -16,6 +16,11 @@ import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
 import { REDIS_CLIENT } from '../../common/redis.module';
 import type { CurrentUser } from '../entitlement/user-context.service';
+import {
+  findSourceBindingRoute,
+  type SourceBindingRoute,
+  SourceBindingValidationError,
+} from '../publish/source-binding';
 import { PlatformAdapterFactory, runtimeShopWhere } from '../shop/platform-adapter.factory';
 import { ShopTokenService } from '../shop/shop-token.service';
 import { maskReceiverName } from './order.service';
@@ -26,6 +31,23 @@ type SyncedOrderStatus = 'paid' | 'shipped' | 'received' | 'refunded' | 'closed'
 const ORDER_STATUS_FILTER = '105,2,101,3,4,5';
 const PAGE_SIZE = 100;
 const SYNC_LOCK_TTL_MS = 15 * 60 * 1000;
+
+interface OrderRoutingBinding {
+  id: bigint;
+  effectiveFrom: Date;
+  effectiveTo: Date | null;
+  sourceOfferId: string;
+  sourceSupplierId: string | null;
+  sourceOnePieceDrop: boolean;
+  skuRoutes: Prisma.JsonValue;
+}
+
+interface PublishedProductOrderRouting {
+  id: bigint;
+  platformProductId: string | null;
+  sourceProduct: { productId1688: string; supplierId: string | null };
+  sourceBindings: OrderRoutingBinding[];
+}
 
 export interface OrderSyncResult {
   shopId: string;
@@ -201,50 +223,12 @@ export class OrderSyncService {
       }
       return status;
     });
-    const productIds = [
-      ...new Set(
-        platformOrders.flatMap((order) =>
-          order.skuList
-            .map((sku) => sku.platformProductId)
-            .filter((value): value is string => !!value),
-        ),
-      ),
-    ];
-    const publishedProducts = productIds.length
-      ? await this.prisma.publishedProduct.findMany({
-          where: { shopId, platformProductId: { in: productIds } },
-          select: {
-            id: true,
-            platformProductId: true,
-            sourceProduct: { select: { productId1688: true, supplierId: true } },
-          },
-        })
-      : [];
-    const publishedByPlatformId = new Map(
-      publishedProducts.flatMap((product) =>
-        product.platformProductId ? [[product.platformProductId, product] as const] : [],
-      ),
-    );
-
     let synced = 0;
     for (const [index, order] of platformOrders.entries()) {
       const platformStatus = platformStatuses[index]!;
       const afterSaleStatus = summarizeAfterSale(order.skuList);
       const status = afterSaleStatus === 'refunded' ? 'refunded' : platformStatus;
-      const firstPublishedProduct = order.skuList.flatMap((sku) => {
-        const published = sku.platformProductId
-          ? publishedByPlatformId.get(sku.platformProductId)
-          : undefined;
-        return published ? [published] : [];
-      })[0];
-      await this.upsertOrder(
-        shopId,
-        order,
-        status,
-        afterSaleStatus,
-        firstPublishedProduct?.id,
-        publishedByPlatformId,
-      );
+      await this.upsertOrder(shopId, order, status, afterSaleStatus);
       synced++;
     }
 
@@ -327,15 +311,6 @@ export class OrderSyncService {
     order: PlatformOrder,
     status: SyncedOrderStatus,
     afterSaleStatus: OrderAfterSaleStatus,
-    publishedProductId: bigint | undefined,
-    publishedByPlatformId: Map<
-      string,
-      {
-        id: bigint;
-        platformProductId: string | null;
-        sourceProduct: { productId1688: string; supplierId: string | null };
-      }
-    >,
   ): Promise<void> {
     const receiverPhoneEnc = order.receiverPhone ? this.crypto.encrypt(order.receiverPhone) : null;
     const receiverNameEnc = order.receiverName ? this.crypto.encrypt(order.receiverName) : null;
@@ -346,13 +321,12 @@ export class OrderSyncService {
       ? this.crypto.encrypt(JSON.stringify(order.receiverAddressDetail))
       : null;
     const partialRefundFingerprint = afterSaleFingerprint(order.skuList);
-    const shared = {
+    const sharedOrderData = {
       amount: order.amount,
       afterSaleStatus,
       afterSaleSyncedAt: new Date(),
       buyerNick: order.buyerNick || null,
       paidAt: order.paidAt,
-      publishedProductId,
       receiverAddressEnc,
       receiverAddressDetailEnc,
       receiverName: order.receiverName ? maskReceiverName(order.receiverName) : null,
@@ -361,6 +335,47 @@ export class OrderSyncService {
       skuInfo: order.skuList as unknown as Prisma.InputJsonValue,
     };
     await this.withSerializableTransaction(async (tx) => {
+      const productIds = [
+        ...new Set(
+          order.skuList
+            .map((sku) => sku.platformProductId)
+            .filter((value): value is string => !!value),
+        ),
+      ];
+      const publishedProducts = productIds.length
+        ? await tx.publishedProduct.findMany({
+            where: { shopId, platformProductId: { in: productIds } },
+            select: {
+              id: true,
+              platformProductId: true,
+              sourceProduct: { select: { productId1688: true, supplierId: true } },
+              sourceBindings: {
+                orderBy: [{ effectiveFrom: 'asc' }, { revision: 'asc' }],
+                select: {
+                  id: true,
+                  effectiveFrom: true,
+                  effectiveTo: true,
+                  sourceOfferId: true,
+                  sourceSupplierId: true,
+                  sourceOnePieceDrop: true,
+                  skuRoutes: true,
+                },
+              },
+            },
+          })
+        : [];
+      const publishedByPlatformId = new Map(
+        publishedProducts.flatMap((product) =>
+          product.platformProductId ? [[product.platformProductId, product] as const] : [],
+        ),
+      );
+      const publishedProductId = order.skuList.flatMap((sku) => {
+        const published = sku.platformProductId
+          ? publishedByPlatformId.get(sku.platformProductId)
+          : undefined;
+        return published ? [published.id] : [];
+      })[0];
+      const shared = { ...sharedOrderData, publishedProductId };
       const existing = await tx.order.findUnique({
         where: { shopId_platformOrderId: { shopId, platformOrderId: order.platformOrderId } },
         select: {
@@ -466,16 +481,12 @@ export class OrderSyncService {
         const published = sku.platformProductId
           ? publishedByPlatformId.get(sku.platformProductId)
           : undefined;
-        const sourceSpecId =
-          sku.sourceSkuId && sku.sourceSkuId !== 'default' ? sku.sourceSkuId : null;
+        const source = resolveOrderItemSourceSnapshot(published, sku, order.paidAt);
         const data = {
           publishedProductId: published?.id,
           platformProductId: sku.platformProductId,
           platformSkuId: sku.skuId,
-          sourceOfferId: published?.sourceProduct.productId1688,
-          sourceSupplierId: published?.sourceProduct.supplierId,
-          sourceSpecId,
-          sourceSpecRequired: Object.keys(sku.specs ?? {}).length > 0,
+          ...source,
           afterSaleStatusRaw: sku.afterSaleStatus ?? null,
           afterSaleTypeRaw: sku.afterSaleType ?? null,
           refundStatusRaw: sku.refundStatus ?? null,
@@ -515,6 +526,77 @@ export class OrderSyncService {
     }
     throw new ServiceUnavailableException('订单快照更新失败，请稍后重试');
   }
+}
+
+interface OrderItemSourceSnapshot {
+  sourceBindingId: bigint | null;
+  sourceOfferId: string | null;
+  sourceSupplierId: string | null;
+  sourceSpecId: string | null;
+  sourceSpecRequired: boolean;
+  sourceUnitCost: number | null;
+  sourceOnePieceDrop: boolean | null;
+}
+
+function resolveOrderItemSourceSnapshot(
+  published: PublishedProductOrderRouting | undefined,
+  sku: PlatformOrder['skuList'][number],
+  paidAt: Date,
+): OrderItemSourceSnapshot {
+  const legacy = (): OrderItemSourceSnapshot => ({
+    sourceBindingId: null,
+    sourceOfferId: published?.sourceProduct.productId1688 ?? null,
+    sourceSupplierId: published?.sourceProduct.supplierId ?? null,
+    sourceSpecId: sku.sourceSkuId && sku.sourceSkuId !== 'default' ? sku.sourceSkuId : null,
+    sourceSpecRequired: Object.keys(sku.specs ?? {}).length > 0,
+    sourceUnitCost: null,
+    sourceOnePieceDrop: null,
+  });
+  if (!published || published.sourceBindings.length === 0) return legacy();
+
+  const paidAtMs = paidAt.getTime();
+  if (!Number.isFinite(paidAtMs)) {
+    throw new ServiceUnavailableException('平台订单付款时间无效，无法匹配货源绑定');
+  }
+  const matching = published.sourceBindings.filter(
+    (binding) =>
+      binding.effectiveFrom.getTime() <= paidAtMs &&
+      (binding.effectiveTo === null || paidAtMs < binding.effectiveTo.getTime()),
+  );
+  if (matching.length !== 1) {
+    throw new ServiceUnavailableException(
+      matching.length === 0
+        ? '订单付款时间没有对应的货源绑定，已停止同步以避免错单'
+        : '订单付款时间命中多条货源绑定，已停止同步以避免错单',
+    );
+  }
+
+  const platformSkuKey = sku.sourceSkuId?.trim();
+  if (!platformSkuKey) {
+    throw new ServiceUnavailableException('平台订单缺少货源绑定所需的外部 SKU key');
+  }
+  const binding = matching[0]!;
+  let route: SourceBindingRoute | null;
+  try {
+    route = findSourceBindingRoute(binding.skuRoutes, platformSkuKey);
+  } catch (error) {
+    if (error instanceof SourceBindingValidationError) {
+      throw new ServiceUnavailableException(`货源绑定 SKU 路由无效：${error.message}`);
+    }
+    throw error;
+  }
+  if (!route) {
+    throw new ServiceUnavailableException('平台订单 SKU 没有对应的货源路由，已停止同步以避免错单');
+  }
+  return {
+    sourceBindingId: binding.id,
+    sourceOfferId: binding.sourceOfferId,
+    sourceSupplierId: binding.sourceSupplierId,
+    sourceSpecId: route.sourceSpecId,
+    sourceSpecRequired: route.sourceSpecRequired,
+    sourceUnitCost: route.sourceUnitCost,
+    sourceOnePieceDrop: binding.sourceOnePieceDrop,
+  };
 }
 
 function reconcileOrderStatus(

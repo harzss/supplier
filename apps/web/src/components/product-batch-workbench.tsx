@@ -19,6 +19,7 @@ import {
   hasValidCleanupCandidateState,
   hasValidOfflineCandidateState,
   hasValidOnlineCandidateState,
+  hasValidSourceChangeCandidateState,
   productBatchWorkbenchStorageKey,
   readProductBatchWorkbenchSession,
   shouldRestoreProductBatchPreview,
@@ -72,12 +73,14 @@ type PriceMode = ProductBatchPriceRule['mode'];
 type PriceDirection = Extract<ProductBatchPriceRule, { mode: 'percentage' }>['direction'];
 type TargetPriceValidation = { value: string | null; error: string };
 type TargetTitleValidation = { value: string | null; error: string };
+type TargetSourceValidation = { value: string | null; error: string };
 type ProductBatchPreviewInput =
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'online' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'offline' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_title' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_price' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'sync_inventory' }>, 'clientRequestId'>
+  | Omit<Extract<ProductBatchPreviewRequest, { action: 'change_source' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'cleanup' }>, 'clientRequestId'>;
 
 const EMPTY_COMPOSER_DRAFT: ProductBatchComposerDraft = {
@@ -91,6 +94,7 @@ const EMPTY_COMPOSER_DRAFT: ProductBatchComposerDraft = {
   percentageInput: '10',
   targetInputs: {},
   titleInputs: {},
+  sourceTargetInputs: {},
   bulkTargetInput: '',
   targetPage: 1,
   selected: [],
@@ -161,6 +165,7 @@ function BatchComposer({
   const [percentageInput, setPercentageInput] = useState('10');
   const [targetInputs, setTargetInputs] = useState<Record<string, string>>({});
   const [titleInputs, setTitleInputs] = useState<Record<string, string>>({});
+  const [sourceTargetInputs, setSourceTargetInputs] = useState<Record<string, string>>({});
   const [bulkTargetInput, setBulkTargetInput] = useState('');
   const [targetPage, setTargetPage] = useState(1);
   const [validationAttempted, setValidationAttempted] = useState(false);
@@ -244,10 +249,23 @@ function BatchComposer({
       ),
     [selectedItems, titleInputs],
   );
+  const sourceTargetValidations = useMemo(
+    () =>
+      new Map(
+        selectedItems.map((item) => [
+          item.publishedProductId,
+          normalizeTargetSource(sourceTargetInputs[item.publishedProductId] ?? ''),
+        ]),
+      ),
+    [selectedItems, sourceTargetInputs],
+  );
   const invalidPriceTargetCount = [...priceTargetValidations.values()].filter(
     (value) => !value.value,
   ).length;
   const invalidTitleTargetCount = [...titleTargetValidations.values()].filter(
+    (value) => !value.value,
+  ).length;
+  const invalidSourceTargetCount = [...sourceTargetValidations.values()].filter(
     (value) => !value.value,
   ).length;
   const composerDraft = useMemo<ProductBatchComposerDraft>(
@@ -262,6 +280,7 @@ function BatchComposer({
       percentageInput,
       targetInputs,
       titleInputs,
+      sourceTargetInputs,
       bulkTargetInput,
       targetPage,
       selected: selectedItems,
@@ -279,6 +298,7 @@ function BatchComposer({
       status,
       targetInputs,
       titleInputs,
+      sourceTargetInputs,
       targetPage,
     ],
   );
@@ -293,6 +313,7 @@ function BatchComposer({
     setPercentageInput(draft.percentageInput);
     setTargetInputs(draft.targetInputs);
     setTitleInputs(draft.titleInputs);
+    setSourceTargetInputs(draft.sourceTargetInputs);
     setBulkTargetInput(draft.bulkTargetInput);
     setTargetPage(draft.targetPage);
     setSelected(new Map(draft.selected.map((item) => [item.publishedProductId, item] as const)));
@@ -428,11 +449,12 @@ function BatchComposer({
     if (nextAction === action) return;
     if (requestedAction) router.replace('/published/batch');
     setAction(nextAction);
-    setStatus(nextAction === 'online' ? 'offline' : 'online');
+    setStatus(nextAction === 'online' || nextAction === 'change_source' ? 'offline' : 'online');
     setPage(1);
     setSelected(new Map());
     setTargetInputs({});
     setTitleInputs({});
+    setSourceTargetInputs({});
     setTargetPage(1);
     resetPreviewFeedback();
   };
@@ -482,6 +504,11 @@ function BatchComposer({
 
   const setTitleInput = (id: string, value: string) => {
     setTitleInputs((current) => ({ ...current, [id]: value }));
+    resetPreviewFeedback();
+  };
+
+  const setSourceTargetInput = (id: string, value: string) => {
+    setSourceTargetInputs((current) => ({ ...current, [id]: value }));
     resetPreviewFeedback();
   };
 
@@ -539,6 +566,17 @@ function BatchComposer({
         return;
       }
     }
+    if (action === 'change_source') {
+      const firstInvalidIndex = selectedItems.findIndex(
+        (item) => !sourceTargetValidations.get(item.publishedProductId)?.value,
+      );
+      if (firstInvalidIndex >= 0) {
+        const item = selectedItems[firstInvalidIndex]!;
+        setTargetPage(Math.floor(firstInvalidIndex / TARGET_PAGE_SIZE) + 1);
+        setPendingTargetFocusId(item.publishedProductId);
+        return;
+      }
+    }
     const requestWithoutId = {
       action,
       publishedProductIds: selectedIds,
@@ -549,6 +587,15 @@ function BatchComposer({
               publishedProductId: item.publishedProductId,
               expectedMutationRevision: item.mutationRevision,
               targetTitle: titleTargetValidations.get(item.publishedProductId)!.value!,
+            })),
+          }
+        : {}),
+      ...(action === 'change_source'
+        ? {
+            sourceTargets: selectedItems.map((item) => ({
+              publishedProductId: item.publishedProductId,
+              expectedMutationRevision: item.mutationRevision,
+              targetSourceProductId: sourceTargetValidations.get(item.publishedProductId)!.value!,
             })),
           }
         : {}),
@@ -671,15 +718,20 @@ function BatchComposer({
               </span>
               <em>已开放</em>
             </button>
-            <button type="button" className="batch-action-card" disabled>
+            <button
+              type="button"
+              className={`batch-action-card ${action === 'change_source' ? 'is-active' : ''}`}
+              aria-pressed={action === 'change_source'}
+              onClick={() => chooseAction('change_source')}
+            >
               <span className="batch-action-icon" aria-hidden="true">
-                ·
+                ⇄
               </span>
               <span>
-                <strong>换源 / SKU 编辑</strong>
-                <small>货源迁移与规格调整</small>
+                <strong>离线安全换源</strong>
+                <small>保留平台 SKU → 切换 1688 履约</small>
               </span>
-              <em>下一阶段</em>
+              <em>已开放</em>
             </button>
           </div>
 
@@ -831,6 +883,19 @@ function BatchComposer({
               </span>
             </div>
           ) : null}
+          {action === 'change_source' ? (
+            <div className="batch-inventory-notice" role="note">
+              <span className="batch-action-icon" aria-hidden="true">
+                ✓
+              </span>
+              <span>
+                <strong>平台商品保持下架，SKU 与售价不变</strong>
+                <small>
+                  新货源必须已采集、支持一件代发且规格一一对应；切换前后的订单按付款时间使用各自货源，完成后需另行核验库存并上架。
+                </small>
+              </span>
+            </div>
+          ) : null}
         </div>
       </section>
 
@@ -912,9 +977,17 @@ function BatchComposer({
                           ? '1688 权威库存'
                           : action === 'edit_title'
                             ? '标题状态'
-                            : '起售价 / SKU'}
+                            : action === 'change_source'
+                              ? '当前货源 / SKU'
+                              : '起售价 / SKU'}
                   </th>
-                  <th>{action === 'cleanup' ? '最近成交' : '货源'}</th>
+                  <th>
+                    {action === 'cleanup'
+                      ? '最近成交'
+                      : action === 'change_source'
+                        ? '货源状态'
+                        : '货源'}
+                  </th>
                   <th>
                     {action === 'cleanup'
                       ? '订单同步'
@@ -922,7 +995,9 @@ function BatchComposer({
                         ? '平台库存基线'
                         : action === 'sync_inventory'
                           ? '最近同步'
-                          : '库存同步'}
+                          : action === 'change_source'
+                            ? '换源资格'
+                            : '库存同步'}
                   </th>
                   <th>{action === 'cleanup' ? '清理判断' : '当前状态'}</th>
                 </tr>
@@ -1007,6 +1082,21 @@ function BatchComposer({
         />
       ) : null}
 
+      {action === 'change_source' && selected.size > 0 ? (
+        <TargetSourceEditor
+          items={visibleTargetItems}
+          page={targetPage}
+          totalPages={targetTotalPages}
+          values={sourceTargetInputs}
+          validations={sourceTargetValidations}
+          validationAttempted={validationAttempted}
+          invalidCount={invalidSourceTargetCount}
+          onValueChange={setSourceTargetInput}
+          onPageChange={setTargetPage}
+          inputRefs={targetInputRefs}
+        />
+      ) : null}
+
       {recent.data?.items.length ? (
         <section className="batch-recent-panel">
           <div>
@@ -1041,7 +1131,9 @@ function BatchComposer({
                 ? `还需填写 ${invalidPriceTargetCount} 件商品的目标起售价。`
                 : action === 'edit_title' && invalidTitleTargetCount > 0
                   ? `还有 ${invalidTitleTargetCount} 件商品的标题不符合目标平台规则。`
-                  : '下一步只生成差异预览，不会立即调用平台。'}
+                  : action === 'change_source' && invalidSourceTargetCount > 0
+                    ? `还需填写 ${invalidSourceTargetCount} 件商品已采集的 1688 offer ID。`
+                    : '下一步只生成差异预览，不会立即调用平台。'}
             </span>
           </div>
           <div className="batch-selection-actions">
@@ -1052,6 +1144,7 @@ function BatchComposer({
                 setSelected(new Map());
                 setTargetInputs({});
                 setTitleInputs({});
+                setSourceTargetInputs({});
                 resetPreviewFeedback();
               }}
             >
@@ -1145,6 +1238,15 @@ function CandidateRow({
             </strong>
             <small className="batch-cell-secondary">{titleRuleLabel(item.platform)}</small>
           </>
+        ) : action === 'change_source' ? (
+          <>
+            <strong className="batch-cell-primary">1688 · {item.sourceProductId}</strong>
+            <small className="batch-cell-secondary">
+              {item.currentSourceRouteCount > 0
+                ? `${item.currentSourceRouteCount} 条平台 SKU 路由`
+                : 'SKU 路由待核验'}
+            </small>
+          </>
         ) : (
           <>
             <strong className="batch-price-range">
@@ -1155,7 +1257,11 @@ function CandidateRow({
             </small>
           </>
         )}
-        {action !== 'sync_inventory' && action !== 'cleanup' && !selectable && unavailableReason ? (
+        {action !== 'sync_inventory' &&
+        action !== 'cleanup' &&
+        action !== 'change_source' &&
+        !selectable &&
+        unavailableReason ? (
           <small className="batch-row-note">{unavailableReason}</small>
         ) : null}
         {action === 'edit_title' && item.titleVerificationTaskId ? (
@@ -1202,6 +1308,16 @@ function CandidateRow({
         ) : (
           <StatusPill value={item.inventorySyncStatus} />
         )}
+        {action === 'change_source' ? (
+          <>
+            <strong className={selectable ? 'batch-row-success' : 'batch-row-note'}>
+              {selectable ? '可安全换源' : '当前不可换源'}
+            </strong>
+            <small className="batch-cell-secondary">
+              {selectable ? '平台已下架，等待指定新 offer' : unavailableReason}
+            </small>
+          </>
+        ) : null}
         {action === 'sync_inventory' || action === 'online' ? (
           <>
             <small className="batch-cell-secondary">
@@ -1536,6 +1652,150 @@ function TargetTitleEditor({
   );
 }
 
+function TargetSourceEditor({
+  items,
+  page,
+  totalPages,
+  values,
+  validations,
+  validationAttempted,
+  invalidCount,
+  onValueChange,
+  onPageChange,
+  inputRefs,
+}: {
+  items: ProductBatchCandidate[];
+  page: number;
+  totalPages: number;
+  values: Record<string, string>;
+  validations: Map<string, TargetSourceValidation>;
+  validationAttempted: boolean;
+  invalidCount: number;
+  onValueChange: (id: string, value: string) => void;
+  onPageChange: (page: number) => void;
+  inputRefs: { current: Map<string, HTMLInputElement> };
+}) {
+  return (
+    <section className="batch-target-panel" aria-labelledby="batch-source-target-heading">
+      <div className="batch-catalog-toolbar">
+        <div>
+          <p className="batch-step-label">03 · 指定新货源</p>
+          <h2 id="batch-source-target-heading" className="batch-section-title">
+            逐件填写 1688 offer ID
+          </h2>
+          <p className="batch-target-description">
+            只接受已经在选品中心采集的纯数字 offer
+            ID。预览会校验一件代发、规格一一映射、成本与库存，平台商品全程保持下架。
+          </p>
+        </div>
+      </div>
+
+      {validationAttempted && invalidCount > 0 ? (
+        <p className="batch-target-error-summary" role="alert">
+          还有 {invalidCount} 件商品缺少有效的 1688 offer ID，请完成后再生成预览。
+        </p>
+      ) : null}
+
+      <div className="batch-table-shell">
+        <table className="batch-table batch-target-table batch-source-target-table">
+          <thead>
+            <tr>
+              <th>平台商品</th>
+              <th>当前 1688 offer</th>
+              <th>平台 SKU 路由</th>
+              <th>新 1688 offer ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => {
+              const id = item.publishedProductId;
+              const validation = validations.get(id) ?? normalizeTargetSource('');
+              const errorId = `batch-target-source-error-${id}`;
+              return (
+                <tr key={id}>
+                  <td>
+                    <div className="batch-product-cell">
+                      {item.mainImage ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={item.mainImage} alt="" width={37} height={37} loading="lazy" />
+                      ) : (
+                        <span className="batch-image-placeholder" aria-hidden="true" />
+                      )}
+                      <span>
+                        <strong>{item.title}</strong>
+                        <small>{item.shopName ?? '未命名店铺'} · 已下架</small>
+                      </span>
+                    </div>
+                  </td>
+                  <td className="batch-mono">
+                    <span className="batch-mobile-field-label">当前 1688 offer</span>
+                    {item.sourceProductId}
+                  </td>
+                  <td className="batch-mono">
+                    <span className="batch-mobile-field-label">平台 SKU 路由</span>
+                    {item.currentSourceRouteCount} 条
+                  </td>
+                  <td>
+                    <span className="batch-mobile-field-label">新 1688 offer ID</span>
+                    <label className="batch-target-price-field batch-source-target-field">
+                      <span className="sr-only">{item.title} 的新 1688 offer ID</span>
+                      <input
+                        ref={(node) => {
+                          if (node) inputRefs.current.set(id, node);
+                          else inputRefs.current.delete(id);
+                        }}
+                        name={`target-source-${id}`}
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="off"
+                        maxLength={32}
+                        placeholder="例如 673201001001"
+                        value={values[id] ?? ''}
+                        aria-invalid={validationAttempted && !validation.value}
+                        aria-describedby={
+                          validationAttempted && !validation.value ? errorId : undefined
+                        }
+                        onChange={(event) => onValueChange(id, event.target.value)}
+                      />
+                    </label>
+                    {validationAttempted && !validation.value ? (
+                      <small id={errorId} className="batch-field-error">
+                        {validation.error}
+                      </small>
+                    ) : (
+                      <small className="batch-cell-secondary">必须先在选品中心完成采集</small>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {totalPages > 1 ? (
+        <div className="batch-pagination">
+          <span>
+            换源目标第 {page} / {totalPages} 页
+          </span>
+          <div>
+            <button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>
+              上一页
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() => onPageChange(page + 1)}
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function BatchTask({
   taskId,
   sessionScope,
@@ -1609,8 +1869,14 @@ function BatchTask({
   const titleAction = value.action === 'edit_title';
   const priceAction = value.action === 'edit_price';
   const inventoryAction = value.action === 'sync_inventory';
+  const changeSourceAction = value.action === 'change_source';
   const verifiedAction =
-    onlineAction || offlineLikeAction || titleAction || priceAction || inventoryAction;
+    onlineAction ||
+    offlineLikeAction ||
+    titleAction ||
+    priceAction ||
+    inventoryAction ||
+    changeSourceAction;
   const active = ACTIVE_TASK_STATUSES.has(value.status);
   const preview = value.status === 'preview';
   const retryableFailedIds = value.items
@@ -1669,9 +1935,11 @@ function BatchTask({
                       ? '确认前请检查每件商品的起售价、SKU 价格区间和调整方向。'
                       : inventoryAction
                         ? '确认前请检查同步前库存、1688 权威目标快照及库存版本；执行后将逐 SKU 回读平台核验。'
-                        : '确认前请检查每件商品的当前状态与执行后状态。'
+                        : changeSourceAction
+                          ? '确认前请核对旧、新 1688 offer、SKU 路由数和采购成本；执行只切换离线采购路由，平台商品保持下架。'
+                          : '确认前请检查每件商品的当前状态与执行后状态。'
               : active
-                ? `任务按商品独立${cleanupAction ? '复核订单证据、安全下架并回读平台状态' : onlineAction ? '补齐库存、上架并回读平台状态与库存' : titleAction ? '改标题并回读平台标题' : priceAction ? '改价并回读平台价格' : inventoryAction ? '同步并回读平台库存' : offlineAction ? '下架并回读平台状态' : '执行'}；停止只影响尚未开始的条目。`
+                ? `任务按商品独立${cleanupAction ? '复核订单证据、安全下架并回读平台状态' : onlineAction ? '补齐库存、上架并回读平台状态与库存' : titleAction ? '改标题并回读平台标题' : priceAction ? '改价并回读平台价格' : inventoryAction ? '同步并回读平台库存' : changeSourceAction ? '复核平台下架状态并切换采购路由' : offlineAction ? '下架并回读平台状态' : '执行'}；停止只影响尚未开始的条目。`
                 : '任务结果已持久化，可安全刷新或稍后返回查看。'}
           </p>
         </div>
@@ -1688,6 +1956,21 @@ function BatchTask({
           <span>完成</span>
         </div>
       </section>
+
+      {changeSourceAction ? (
+        <div className="batch-inventory-notice" role="note">
+          <span className="batch-action-icon" aria-hidden="true">
+            ✓
+          </span>
+          <span>
+            <strong>平台商品始终保持下架</strong>
+            <small>
+              本任务只更新版本化采购路由，不修改平台
+              SKU、售价或商品内容；完成后需另行同步库存并执行上架。
+            </small>
+          </span>
+        </div>
+      ) : null}
 
       {task.isError ? (
         <div className="batch-inline-warning" role="alert">
@@ -1755,11 +2038,13 @@ function BatchTask({
                       ? '改价前'
                       : inventoryAction
                         ? '同步前'
-                        : cleanupAction
-                          ? '清理证据'
-                          : onlineAction
-                            ? '上架前'
-                            : '下架前'}
+                        : changeSourceAction
+                          ? '原 1688 offer'
+                          : cleanupAction
+                            ? '清理证据'
+                            : onlineAction
+                              ? '上架前'
+                              : '下架前'}
                 </th>
                 <th>
                   {titleAction
@@ -1768,13 +2053,15 @@ function BatchTask({
                       ? '目标价格'
                       : inventoryAction
                         ? '1688 目标'
-                        : cleanupAction
-                          ? '安全下架'
-                          : onlineAction
-                            ? '上架目标'
-                            : '下架目标'}
+                        : changeSourceAction
+                          ? '新 1688 offer'
+                          : cleanupAction
+                            ? '安全下架'
+                            : onlineAction
+                              ? '上架目标'
+                              : '下架目标'}
                 </th>
-                {verifiedAction ? <th>平台回读</th> : null}
+                {verifiedAction ? <th>{changeSourceAction ? '生效绑定' : '平台回读'}</th> : null}
                 <th>执行状态</th>
                 <th>尝试</th>
               </tr>
@@ -1936,6 +2223,7 @@ function TaskItemRow({
   const titleAction = action === 'edit_title';
   const priceAction = action === 'edit_price';
   const inventoryAction = action === 'sync_inventory';
+  const changeSourceAction = action === 'change_source';
   const actualMismatch =
     priceAction &&
     item.status === 'succeeded' &&
@@ -1949,7 +2237,7 @@ function TaskItemRow({
     item.desiredInventory !== null &&
     !sameInventorySnapshot(item.actualInventory, item.desiredInventory);
   const actualStatusMismatch =
-    (onlineAction || offlineLikeAction) &&
+    (onlineAction || offlineLikeAction || changeSourceAction) &&
     item.status === 'succeeded' &&
     item.actualStatus !== null &&
     item.actualStatus !== item.desiredStatus;
@@ -1959,6 +2247,12 @@ function TaskItemRow({
     item.actualTitle !== null &&
     item.desiredTitle !== null &&
     item.actualTitle !== item.desiredTitle;
+  const actualSourceMismatch =
+    changeSourceAction &&
+    item.status === 'succeeded' &&
+    item.actualSourceProductId !== null &&
+    item.desiredSourceProductId !== null &&
+    item.actualSourceProductId !== item.desiredSourceProductId;
   return (
     <tr>
       <td>
@@ -2087,6 +2381,42 @@ function TaskItemRow({
             ) : null}
           </td>
         </>
+      ) : changeSourceAction ? (
+        <>
+          <td>
+            <SourceBindingSummary
+              offerId={item.beforeSourceProductId}
+              title={item.beforeSourceTitle}
+              emptyLabel="原货源快照缺失"
+            />
+          </td>
+          <td>
+            <SourceBindingSummary
+              offerId={item.desiredSourceProductId}
+              title={item.desiredSourceTitle}
+              routeCount={item.sourceRouteCount}
+              costRange={item.sourceCostRange}
+              emptyLabel="新货源预览缺失"
+            />
+            <small className="batch-row-success">平台商品保持下架</small>
+          </td>
+          <td>
+            <SourceBindingSummary
+              offerId={item.actualSourceProductId}
+              title={item.status === 'succeeded' ? item.desiredSourceTitle : null}
+              routeCount={item.status === 'succeeded' ? item.sourceRouteCount : null}
+              costRange={item.status === 'succeeded' ? item.sourceCostRange : null}
+              emptyLabel={item.status === 'succeeded' ? '实际绑定待确认' : '执行后记录实际绑定'}
+            />
+            {item.actualStatus ? <StatusPill value={item.actualStatus} /> : null}
+            {actualSourceMismatch ? (
+              <small className="batch-row-error">实际货源与换源目标不一致</small>
+            ) : null}
+            {actualStatusMismatch ? (
+              <small className="batch-row-error">平台商品未保持下架</small>
+            ) : null}
+          </td>
+        </>
       ) : cleanupAction ? (
         <>
           <td>
@@ -2181,6 +2511,37 @@ function TitleValue({ value, emptyLabel }: { value: string | null; emptyLabel: s
     </span>
   ) : (
     <span className="batch-cell-secondary">{emptyLabel}</span>
+  );
+}
+
+function SourceBindingSummary({
+  offerId,
+  title,
+  routeCount,
+  costRange,
+  emptyLabel,
+}: {
+  offerId: string | null;
+  title: string | null;
+  routeCount?: number | null;
+  costRange?: [number, number] | null;
+  emptyLabel: string;
+}) {
+  if (!offerId) return <span className="batch-cell-secondary">{emptyLabel}</span>;
+  return (
+    <span className="batch-price-range-stack">
+      <strong>Offer {offerId}</strong>
+      <small>{title ?? '1688 货源标题待同步'}</small>
+      {routeCount !== undefined || costRange !== undefined ? (
+        <small>
+          {routeCount === null || routeCount === undefined
+            ? 'SKU 路由待核验'
+            : `${routeCount} 条 SKU 路由`}
+          {' · '}
+          {costRange ? `采购成本 ${formatPriceRange(costRange)}` : '成本待核验'}
+        </small>
+      ) : null}
+    </span>
   );
 }
 
@@ -2407,6 +2768,7 @@ function batchActionLabel(action: ProductBatchAction): string {
   if (action === 'edit_title') return '批量改标题';
   if (action === 'edit_price') return '批量改价';
   if (action === 'sync_inventory') return '同步并核验库存';
+  if (action === 'change_source') return '离线安全换源';
   return '批量下架';
 }
 
@@ -2416,6 +2778,7 @@ function batchActionVerb(action: ProductBatchAction): string {
   if (action === 'edit_title') return '改标题';
   if (action === 'edit_price') return '改价';
   if (action === 'sync_inventory') return '同步库存';
+  if (action === 'change_source') return '安全换源';
   return '下架';
 }
 
@@ -2434,6 +2797,9 @@ function batchActionDescription(action: ProductBatchAction): string {
   }
   if (action === 'cleanup') {
     return '仅选择满足固定 30 天已同步订单证据的在线商品；执行安全下架并回读平台，不永久删除。';
+  }
+  if (action === 'change_source') {
+    return '只选择服务端确认可换源的已下架商品；逐件填写已采集的 1688 offer ID，平台 SKU、售价和下架状态不变。';
   }
   return '先生成逐项预览，再安全下架；成功项不会因失败重试而重复执行。';
 }
@@ -2458,6 +2824,9 @@ export function isCandidateSelectable(
       item.offlineVerificationTaskId === null &&
       item.cleanupEligible === true
     );
+  }
+  if (action === 'change_source') {
+    return hasValidSourceChangeCandidateState(item) && item.sourceChangeEligible === true;
   }
   return (
     hasValidOfflineCandidateState(item) &&
@@ -2493,6 +2862,12 @@ export function candidateUnavailableReason(
       return '商品清理证据异常，请刷新商品后再操作';
     }
     return item.cleanupReason ?? '当前商品不满足滞销安全下架条件';
+  }
+  if (action === 'change_source') {
+    if (!hasValidSourceChangeCandidateState(item)) {
+      return '商品换源安全状态异常，请刷新商品后再操作';
+    }
+    return item.sourceChangeReason ?? '当前商品不能安全换源，请刷新后重试';
   }
   return item.status === 'offline' ? '商品已经下架' : '只有在线商品可以下架';
 }
@@ -2562,6 +2937,15 @@ export function normalizeTargetPrice(value: string): TargetPriceValidation {
   return { value: `${whole.toString()}.${fraction}`, error: '' };
 }
 
+export function normalizeTargetSource(value: string): TargetSourceValidation {
+  const offerId = value.trim();
+  if (!offerId) return { value: null, error: '请输入已采集的 1688 offer ID。' };
+  if (!/^[1-9]\d{0,31}$/.test(offerId)) {
+    return { value: null, error: '1688 offer ID 只能是 1～32 位纯数字，且不能以 0 开头。' };
+  }
+  return { value: offerId, error: '' };
+}
+
 export function normalizeTargetTitle(value: string, platform = 'douyin'): TargetTitleValidation {
   const title = value.trim();
   if (!title) return { value: null, error: '请输入目标标题。' };
@@ -2621,6 +3005,13 @@ export function productBatchPreviewFingerprint(input: ProductBatchPreviewInput):
               : input.priceRule,
         }
       : {}),
+    ...(input.action === 'change_source'
+      ? {
+          sourceTargets: [...input.sourceTargets].sort((left, right) =>
+            left.publishedProductId.localeCompare(right.publishedProductId),
+          ),
+        }
+      : {}),
   });
 }
 
@@ -2642,7 +3033,13 @@ export function shouldAcceptProductBatchPreviewResponse(
             publishedProductIds: request.publishedProductIds,
             priceRule: request.priceRule,
           }
-        : { action: request.action, publishedProductIds: request.publishedProductIds };
+        : request.action === 'change_source'
+          ? {
+              action: 'change_source',
+              publishedProductIds: request.publishedProductIds,
+              sourceTargets: request.sourceTargets,
+            }
+          : { action: request.action, publishedProductIds: request.publishedProductIds };
   return attempt.fingerprint === productBatchPreviewFingerprint(input);
 }
 

@@ -21,8 +21,25 @@ import {
 import { ShopTokenService } from '../shop/shop-token.service';
 import { PlatformProductLockService } from './platform-product-lock.service';
 import { OFFLINE_BATCH_ACTIONS, UNRESOLVED_OFFLINE_CODES } from './product-batch-fences';
+import { parseSourceBindingRoutes, SourceBindingValidationError } from './source-binding';
 
 const STALE_LOCK_MS = 5 * 60_000;
+const CURRENT_SOURCE_BINDING_INCLUDE = {
+  where: { currentSlot: 1 },
+  take: 1,
+  include: { sourceProduct: true },
+} as const;
+const CURRENT_SOURCE_BINDING_GUARD_SELECT = {
+  where: { currentSlot: 1 },
+  take: 1,
+  select: {
+    id: true,
+    revision: true,
+    sourceProductId: true,
+    sourceFingerprint: true,
+    bindingFingerprint: true,
+  },
+} as const;
 
 type InventoryRecord = Prisma.PublishedProductGetPayload<{
   include: {
@@ -30,8 +47,33 @@ type InventoryRecord = Prisma.PublishedProductGetPayload<{
     sourceProduct: true;
     task: { select: { skuSnapshot: true; userId: true } };
     batchItems: { select: { id: true } };
+    sourceBindings: typeof CURRENT_SOURCE_BINDING_INCLUDE;
   };
 }>;
+
+interface SourceBindingGuard {
+  id: bigint;
+  revision: number;
+  sourceProductId: bigint;
+  sourceFingerprint: string;
+  bindingFingerprint: string;
+}
+
+interface SourceBindingLike extends SourceBindingGuard {
+  skuRoutes?: Prisma.JsonValue;
+  sourceProduct?: {
+    skuList: Prisma.JsonValue | null;
+  };
+}
+
+interface SourceInventoryGuard {
+  inventoryFingerprint: string;
+  inventoryVersion: number;
+}
+
+type InventorySyncJob = PublishedProduct & {
+  sourceBindingGuard?: SourceBindingGuard | null;
+};
 
 type SkuInventoryItem = { sourceSkuId: string; stock: number };
 
@@ -58,7 +100,7 @@ export class InventorySyncService {
     return this.config.get<string>('INVENTORY_SYNC_ENABLED') === 'true';
   }
 
-  async claimNext(workerId: string): Promise<PublishedProduct | null> {
+  async claimNext(workerId: string): Promise<InventorySyncJob | null> {
     const now = new Date();
     await this.recoverStale(now);
     for (let index = 0; index < 5; index++) {
@@ -79,8 +121,10 @@ export class InventorySyncService {
           ...(this.demoMode ? {} : { shop: runtimeShopWhere(this.demoMode) }),
         },
         orderBy: [{ inventoryNextRunAt: 'asc' }, { id: 'asc' }],
+        include: { sourceBindings: CURRENT_SOURCE_BINDING_INCLUDE },
       });
       if (!candidate) return null;
+      const sourceBindingGuard = bindingGuard(currentSourceBinding(candidate));
       const claimed = await this.prisma.publishedProduct.updateMany({
         where: {
           id: candidate.id,
@@ -96,6 +140,7 @@ export class InventorySyncService {
               task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
             },
           },
+          ...sourceBindingOwnershipWhere(sourceBindingGuard),
           ...(this.demoMode ? {} : { shop: runtimeShopWhere(this.demoMode) }),
         },
         data: {
@@ -107,13 +152,14 @@ export class InventorySyncService {
         },
       });
       if (claimed.count === 1) {
-        return this.prisma.publishedProduct.findUnique({ where: { id: candidate.id } });
+        const job = await this.prisma.publishedProduct.findUnique({ where: { id: candidate.id } });
+        return job ? { ...job, sourceBindingGuard } : null;
       }
     }
     return null;
   }
 
-  async execute(job: PublishedProduct): Promise<'processed' | 'stale'> {
+  async execute(job: InventorySyncJob): Promise<'processed' | 'stale'> {
     const targetFingerprint = job.inventoryTargetFingerprint;
     const targetVersion = job.inventoryTargetVersion;
     const lockedBy = job.inventoryLockedBy;
@@ -127,6 +173,7 @@ export class InventorySyncService {
           shop: true,
           sourceProduct: true,
           task: { select: { skuSnapshot: true, userId: true } },
+          sourceBindings: CURRENT_SOURCE_BINDING_INCLUDE,
           batchItems: {
             where: {
               status: { in: ['running', 'retry_wait', 'failed'] },
@@ -139,15 +186,19 @@ export class InventorySyncService {
         },
       });
       if (!record) return 'stale';
+      const sourceBindingGuard = job.sourceBindingGuard ?? null;
+      const sourceBinding = currentSourceBinding(record);
       if (
         record.inventorySyncStatus !== 'syncing' ||
         record.inventorySyncAttempts !== attempts ||
         record.inventoryLockedBy !== lockedBy ||
         record.inventoryTargetFingerprint !== targetFingerprint ||
-        record.inventoryTargetVersion !== targetVersion
+        record.inventoryTargetVersion !== targetVersion ||
+        !sameSourceBindingGuard(sourceBinding, sourceBindingGuard)
       ) {
         return 'stale';
       }
+      const sourceProduct = sourceBinding?.sourceProduct ?? record.sourceProduct;
       if (record.batchItems.length > 0) {
         await this.prisma.publishedProduct.updateMany({
           where: {
@@ -157,6 +208,7 @@ export class InventorySyncService {
             inventoryLockedBy: lockedBy,
             inventoryTargetFingerprint: targetFingerprint,
             inventoryTargetVersion: targetVersion,
+            ...sourceBindingOwnershipWhere(sourceBindingGuard),
           },
           data: {
             inventorySyncStatus: 'pending',
@@ -169,8 +221,8 @@ export class InventorySyncService {
         return 'stale';
       }
       if (
-        record.sourceProduct.inventoryFingerprint !== targetFingerprint ||
-        record.sourceProduct.inventoryVersion !== targetVersion
+        sourceProduct.inventoryFingerprint !== targetFingerprint ||
+        sourceProduct.inventoryVersion !== targetVersion
       ) {
         await this.prisma.publishedProduct.updateMany({
           where: {
@@ -180,11 +232,12 @@ export class InventorySyncService {
             inventoryLockedBy: lockedBy,
             inventoryTargetFingerprint: targetFingerprint,
             inventoryTargetVersion: targetVersion,
+            ...sourceBindingOwnershipWhere(sourceBindingGuard),
           },
           data: {
             inventorySyncStatus: 'pending',
-            inventoryTargetFingerprint: record.sourceProduct.inventoryFingerprint,
-            inventoryTargetVersion: record.sourceProduct.inventoryVersion,
+            inventoryTargetFingerprint: sourceProduct.inventoryFingerprint,
+            inventoryTargetVersion: sourceProduct.inventoryVersion,
             inventorySyncAttempts: 0,
             inventoryNextRunAt: new Date(),
             inventoryLockedAt: null,
@@ -201,23 +254,15 @@ export class InventorySyncService {
         ? 'mock-token'
         : await this.shopTokens.getAccessToken(record.shop.id, record.task.userId);
       await this.platformProductLocks.renew(record.id, platformLock);
-      const owned = await this.prisma.publishedProduct.findUnique({
-        where: { id: record.id },
-        select: {
-          inventorySyncStatus: true,
-          inventorySyncAttempts: true,
-          inventoryLockedBy: true,
-          inventoryTargetFingerprint: true,
-          inventoryTargetVersion: true,
-        },
-      });
       if (
-        !owned ||
-        owned.inventorySyncStatus !== 'syncing' ||
-        owned.inventorySyncAttempts !== attempts ||
-        owned.inventoryLockedBy !== lockedBy ||
-        owned.inventoryTargetFingerprint !== targetFingerprint ||
-        owned.inventoryTargetVersion !== targetVersion
+        !(await this.isExecutionOwned(
+          record.id,
+          targetFingerprint,
+          targetVersion,
+          attempts,
+          lockedBy,
+          sourceBindingGuard,
+        ))
       ) {
         return 'stale';
       }
@@ -226,13 +271,13 @@ export class InventorySyncService {
       let offline = false;
       let offlineState: PlatformProductState | null = null;
       let syncedInventory: SkuInventorySnapshot | null = null;
-      if (record.sourceProduct.availability === 'offline') {
+      if (sourceProduct.availability === 'offline') {
         reason = 'source_offline';
         offline = true;
-      } else if (record.sourceProduct.availability === 'out_of_stock') {
+      } else if (sourceProduct.availability === 'out_of_stock') {
         reason = 'out_of_stock';
         offline = true;
-      } else if (record.sourceProduct.availability === 'unknown') {
+      } else if (sourceProduct.availability === 'unknown') {
         reason = 'inventory_unknown';
         offline = true;
       } else {
@@ -256,12 +301,26 @@ export class InventorySyncService {
             let syncFailed = false;
             let syncError: unknown;
             try {
+              await this.platformProductLocks.renew(record.id, platformLock);
+              if (
+                !(await this.isExecutionOwned(
+                  record.id,
+                  targetFingerprint,
+                  targetVersion,
+                  attempts,
+                  lockedBy,
+                  sourceBindingGuard,
+                ))
+              ) {
+                return 'stale';
+              }
               await adapter.syncInventory(token, {
                 platformProductId: record.platformProductId,
                 idempotencyKey: inventoryIdempotencyKey(
                   record.id,
                   targetVersion,
                   targetFingerprint,
+                  sourceBindingGuard,
                   pendingItems,
                 ),
                 items: pendingItems,
@@ -276,6 +335,7 @@ export class InventorySyncService {
                   targetVersion,
                   attempts,
                   lockedBy,
+                  sourceBindingGuard,
                   platformLock,
                 );
                 return quarantined ? 'processed' : 'stale';
@@ -310,6 +370,19 @@ export class InventorySyncService {
         }
         let offlineError: unknown;
         try {
+          await this.platformProductLocks.renew(record.id, platformLock);
+          if (
+            !(await this.isExecutionOwned(
+              record.id,
+              targetFingerprint,
+              targetVersion,
+              attempts,
+              lockedBy,
+              sourceBindingGuard,
+            ))
+          ) {
+            return 'stale';
+          }
           await adapter.offlineProduct(token, record.platformProductId);
         } catch (error) {
           offlineError = error;
@@ -332,6 +405,7 @@ export class InventorySyncService {
         offline,
         offlineState,
         syncedInventory,
+        sourceBindingGuard,
       );
       return completed ? 'processed' : 'stale';
     } finally {
@@ -339,7 +413,7 @@ export class InventorySyncService {
     }
   }
 
-  async fail(job: PublishedProduct, error: string): Promise<'retry_wait' | 'dead' | 'stale'> {
+  async fail(job: InventorySyncJob, error: string): Promise<'retry_wait' | 'dead' | 'stale'> {
     const targetFingerprint = job.inventoryTargetFingerprint;
     const targetVersion = job.inventoryTargetVersion;
     const lockedBy = job.inventoryLockedBy;
@@ -355,6 +429,7 @@ export class InventorySyncService {
         inventoryLockedBy: lockedBy,
         inventoryTargetFingerprint: targetFingerprint,
         inventoryTargetVersion: targetVersion,
+        ...sourceBindingOwnershipWhere(job.sourceBindingGuard ?? null),
       },
       data: {
         inventorySyncStatus: dead ? 'dead' : 'retry_wait',
@@ -379,13 +454,19 @@ export class InventorySyncService {
         task: { userId },
         ...(this.demoMode ? {} : { shop: runtimeShopWhere(this.demoMode) }),
       },
-      include: { sourceProduct: true },
+      include: {
+        sourceProduct: true,
+        sourceBindings: CURRENT_SOURCE_BINDING_INCLUDE,
+      },
     });
     if (!product) throw new NotFoundException('已发布商品不存在');
     if (product.status !== 'online') throw new BadRequestException('已下架商品无需重试库存同步');
     if (!['dead', 'retry_wait'].includes(product.inventorySyncStatus)) {
       throw new BadRequestException('只有库存同步失败的商品可以重试');
     }
+    const sourceBinding = currentSourceBinding(product);
+    const sourceBindingGuard = bindingGuard(sourceBinding);
+    const sourceProduct = sourceBinding?.sourceProduct ?? product.sourceProduct;
     const retried = await this.prisma.publishedProduct.updateMany({
       where: {
         id: product.id,
@@ -394,11 +475,12 @@ export class InventorySyncService {
         inventorySyncAttempts: product.inventorySyncAttempts,
         inventoryTargetFingerprint: product.inventoryTargetFingerprint,
         inventoryTargetVersion: product.inventoryTargetVersion,
+        ...sourceBindingOwnershipWhere(sourceBindingGuard),
       },
       data: {
         inventorySyncStatus: 'pending',
-        inventoryTargetFingerprint: product.sourceProduct.inventoryFingerprint,
-        inventoryTargetVersion: product.sourceProduct.inventoryVersion,
+        inventoryTargetFingerprint: sourceProduct.inventoryFingerprint,
+        inventoryTargetVersion: sourceProduct.inventoryVersion,
         inventorySyncAttempts: 0,
         inventoryNextRunAt: new Date(),
         inventoryLockedAt: null,
@@ -422,6 +504,7 @@ export class InventorySyncService {
     offline: boolean,
     offlineState: PlatformProductState | null,
     syncedInventory: SkuInventorySnapshot | null,
+    sourceBindingGuard: SourceBindingGuard | null,
   ): Promise<boolean> {
     const updated = await this.prisma.publishedProduct.updateMany({
       where: {
@@ -431,10 +514,10 @@ export class InventorySyncService {
         inventoryLockedBy: lockedBy,
         inventoryTargetFingerprint: targetFingerprint,
         inventoryTargetVersion: targetVersion,
-        sourceProduct: {
+        ...sourceBindingOwnershipWhere(sourceBindingGuard, {
           inventoryFingerprint: targetFingerprint,
           inventoryVersion: targetVersion,
-        },
+        }),
       },
       data: {
         ...(offline ? { status: 'offline' as const } : {}),
@@ -474,9 +557,22 @@ export class InventorySyncService {
     targetVersion: number,
     attempts: number,
     lockedBy: string,
+    sourceBindingGuard: SourceBindingGuard | null,
     platformLock: string,
   ): Promise<boolean> {
     await this.platformProductLocks.renew(record.id, platformLock);
+    if (
+      !(await this.isExecutionOwned(
+        record.id,
+        targetFingerprint,
+        targetVersion,
+        attempts,
+        lockedBy,
+        sourceBindingGuard,
+      ))
+    ) {
+      return false;
+    }
     let offlineError: unknown;
     try {
       await adapter.offlineProduct(token, record.platformProductId!);
@@ -517,6 +613,7 @@ export class InventorySyncService {
         inventoryLockedBy: lockedBy,
         inventoryTargetFingerprint: targetFingerprint,
         inventoryTargetVersion: targetVersion,
+        ...sourceBindingOwnershipWhere(sourceBindingGuard),
       },
       data: quarantineData,
     });
@@ -535,6 +632,37 @@ export class InventorySyncService {
       select: { platformProductId: true, status: true },
     });
     return latest?.platformProductId === record.platformProductId && latest.status === 'offline';
+  }
+
+  private async isExecutionOwned(
+    publishedProductId: bigint,
+    targetFingerprint: string,
+    targetVersion: number,
+    attempts: number,
+    lockedBy: string,
+    sourceBindingGuard: SourceBindingGuard | null,
+  ): Promise<boolean> {
+    const owned = await this.prisma.publishedProduct.findUnique({
+      where: { id: publishedProductId },
+      select: {
+        sourceProductId: true,
+        inventorySyncStatus: true,
+        inventorySyncAttempts: true,
+        inventoryLockedBy: true,
+        inventoryTargetFingerprint: true,
+        inventoryTargetVersion: true,
+        sourceBindings: CURRENT_SOURCE_BINDING_GUARD_SELECT,
+      },
+    });
+    return (
+      !!owned &&
+      owned.inventorySyncStatus === 'syncing' &&
+      owned.inventorySyncAttempts === attempts &&
+      owned.inventoryLockedBy === lockedBy &&
+      owned.inventoryTargetFingerprint === targetFingerprint &&
+      owned.inventoryTargetVersion === targetVersion &&
+      sameSourceBindingGuard(currentSourceBinding(owned), sourceBindingGuard)
+    );
   }
 
   private async recoverStale(now: Date): Promise<void> {
@@ -561,9 +689,68 @@ export class InventorySyncService {
   }
 }
 
+function currentSourceBinding<T extends SourceBindingLike>(record: {
+  sourceBindings?: readonly T[];
+}): T | null {
+  return record.sourceBindings?.[0] ?? null;
+}
+
+function bindingGuard(binding: SourceBindingLike | null): SourceBindingGuard | null {
+  if (!binding) return null;
+  return {
+    id: binding.id,
+    revision: binding.revision,
+    sourceProductId: binding.sourceProductId,
+    sourceFingerprint: binding.sourceFingerprint,
+    bindingFingerprint: binding.bindingFingerprint,
+  };
+}
+
+function sameSourceBindingGuard(
+  binding: SourceBindingLike | null,
+  guard: SourceBindingGuard | null,
+): boolean {
+  if (!binding || !guard) return binding === null && guard === null;
+  return (
+    binding.id === guard.id &&
+    binding.revision === guard.revision &&
+    binding.sourceProductId === guard.sourceProductId &&
+    binding.sourceFingerprint === guard.sourceFingerprint &&
+    binding.bindingFingerprint === guard.bindingFingerprint
+  );
+}
+
+function sourceBindingOwnershipWhere(
+  guard: SourceBindingGuard | null,
+  sourceInventory?: SourceInventoryGuard,
+): Prisma.PublishedProductWhereInput {
+  if (!guard) {
+    return {
+      sourceBindings: { none: { currentSlot: 1 } },
+      ...(sourceInventory ? { sourceProduct: sourceInventory } : {}),
+    };
+  }
+  return {
+    sourceBindings: {
+      some: {
+        id: guard.id,
+        revision: guard.revision,
+        currentSlot: 1,
+        sourceProductId: guard.sourceProductId,
+        sourceFingerprint: guard.sourceFingerprint,
+        bindingFingerprint: guard.bindingFingerprint,
+        ...(sourceInventory ? { sourceProduct: sourceInventory } : {}),
+      },
+    },
+  };
+}
+
 function inventoryItems(
   record: InventoryRecord,
 ): { kind: 'items'; items: SkuInventoryItem[] } | { kind: 'sku_changed' } {
+  const sourceBinding = currentSourceBinding(record);
+  if (sourceBinding) return boundInventoryItems(sourceBinding);
+
   const snapshot = jsonRecord(record.task.skuSnapshot);
   const platformSnapshot = jsonRecord(snapshot?.[record.shop.platform]);
   if (!platformSnapshot || !Array.isArray(platformSnapshot.skus)) return { kind: 'sku_changed' };
@@ -579,6 +766,36 @@ function inventoryItems(
     return stock === undefined ? [] : [{ sourceSkuId, stock }];
   });
   if (items.length !== publishedSkuIds.length) return { kind: 'sku_changed' };
+  return { kind: 'items', items };
+}
+
+function boundInventoryItems(
+  binding: SourceBindingLike,
+): { kind: 'items'; items: SkuInventoryItem[] } | { kind: 'sku_changed' } {
+  if (!binding.sourceProduct || binding.skuRoutes === undefined) return { kind: 'sku_changed' };
+  let routes;
+  try {
+    routes = parseSourceBindingRoutes(binding.skuRoutes);
+  } catch (error) {
+    if (error instanceof SourceBindingValidationError) return { kind: 'sku_changed' };
+    throw error;
+  }
+  const sourceItems = sourceInventoryItems(binding.sourceProduct.skuList);
+  if (!sourceItems || routes.length === 0) {
+    return { kind: 'sku_changed' };
+  }
+
+  const sourceStock = new Map(sourceItems.map((item) => [item.sourceSkuId, item.stock]));
+  const routedSourceIds = new Set<string>();
+  const items: SkuInventoryItem[] = [];
+  for (const route of routes) {
+    const sourceSpecId = route.sourceSpecId;
+    if (!sourceSpecId || routedSourceIds.has(sourceSpecId)) return { kind: 'sku_changed' };
+    const stock = sourceStock.get(sourceSpecId);
+    if (stock === undefined) return { kind: 'sku_changed' };
+    routedSourceIds.add(sourceSpecId);
+    items.push({ sourceSkuId: route.platformSkuKey, stock });
+  }
   return { kind: 'items', items };
 }
 
@@ -671,13 +888,17 @@ function inventoryIdempotencyKey(
   id: bigint,
   version: number,
   fingerprint: string,
+  sourceBindingGuard: SourceBindingGuard | null,
   items: SkuInventoryItem[],
 ): string {
   const remainingFingerprint = createHash('sha256')
     .update(JSON.stringify(items))
     .digest('hex')
     .slice(0, 16);
-  return `inventory-${id}-v${version}-${fingerprint.slice(0, 24)}-${remainingFingerprint}`;
+  const bindingFingerprint = sourceBindingGuard
+    ? `-b${sourceBindingGuard.bindingFingerprint.slice(0, 24)}`
+    : '';
+  return `inventory-${id}-v${version}-${fingerprint.slice(0, 24)}${bindingFingerprint}-${remainingFingerprint}`;
 }
 
 function retryDelayMs(attempts: number): number {

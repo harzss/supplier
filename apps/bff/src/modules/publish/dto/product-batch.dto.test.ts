@@ -87,6 +87,28 @@ describe('CreateProductBatchPreviewDto', () => {
     await expect(validate(dto)).resolves.toHaveLength(0);
   });
 
+  it('accepts exact per-product offline source targets', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'change_source',
+      publishedProductIds: ['1', '2'],
+      sourceTargets: [
+        {
+          publishedProductId: '1',
+          expectedMutationRevision: 3,
+          targetSourceProductId: '673201001001',
+        },
+        {
+          publishedProductId: '2',
+          expectedMutationRevision: 7,
+          targetSourceProductId: '673201001002',
+        },
+      ],
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
   it('accepts exact per-product title targets', async () => {
     const dto = plainToInstance(CreateProductBatchPreviewDto, {
       clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
@@ -135,6 +157,43 @@ describe('CreateProductBatchPreviewDto', () => {
   });
 
   it.each([
+    ['missing targets', undefined],
+    [
+      'a missing product revision',
+      [{ publishedProductId: '1', targetSourceProductId: '673201001001' }],
+    ],
+    [
+      'a non-numeric offer ID',
+      [
+        {
+          publishedProductId: '1',
+          expectedMutationRevision: 1,
+          targetSourceProductId: 'not-an-offer',
+        },
+      ],
+    ],
+    [
+      'a zero offer ID',
+      [
+        {
+          publishedProductId: '1',
+          expectedMutationRevision: 1,
+          targetSourceProductId: '0',
+        },
+      ],
+    ],
+  ])('rejects a source-change preview with %s', async (_label, sourceTargets) => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'change_source',
+      publishedProductIds: ['1'],
+      sourceTargets,
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
+  });
+
+  it.each([
     ['a missing percentage direction', { mode: 'percentage', basisPoints: 100 }],
     ['a fractional basis point', { mode: 'percentage', direction: 'increase', basisPoints: 10.5 }],
     [
@@ -157,7 +216,7 @@ describe('CreateProductBatchPreviewDto', () => {
 
   it.each([
     ['a duplicate product ID', { action: 'offline', publishedProductIds: ['1', '1'] }],
-    ['an unsupported action', { action: 'change_source', publishedProductIds: ['1'] }],
+    ['an unsupported action', { action: 'delete', publishedProductIds: ['1'] }],
     ['a zero product ID', { action: 'offline', publishedProductIds: ['0'] }],
     ['a non-numeric product ID', { action: 'offline', publishedProductIds: ['not-an-id'] }],
     [

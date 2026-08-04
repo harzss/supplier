@@ -178,17 +178,18 @@ model SourceProduct {
   availabilityChangedAt DateTime                  @default(now()) @map("availability_changed_at")
   syncedAt              DateTime                  @default(now()) @map("synced_at")
 
-  score                         ProductScore?
-  publishDrafts                 PublishDraft[]
-  publishTasks                  PublishTask[]
-  publishedProducts             PublishedProduct[]
-  favorites                     UserFavorite[]
-  categoryMappings              ProductCategoryMapping[]
-  categoryPropertyMappings      ProductCategoryPropertyMapping[]
-  categoryQualificationMappings ProductCategoryQualificationMapping[]
-  skuMappings                   ProductSkuMapping[]
-  sourceImportItems             SourceImportItem[]
-  userSourceProducts            UserSourceProduct[]
+  score                          ProductScore?
+  publishDrafts                  PublishDraft[]
+  publishTasks                   PublishTask[]
+  publishedProducts              PublishedProduct[]
+  favorites                      UserFavorite[]
+  categoryMappings               ProductCategoryMapping[]
+  categoryPropertyMappings       ProductCategoryPropertyMapping[]
+  categoryQualificationMappings  ProductCategoryQualificationMapping[]
+  skuMappings                    ProductSkuMapping[]
+  sourceImportItems              SourceImportItem[]
+  userSourceProducts             UserSourceProduct[]
+  publishedProductSourceBindings PublishedProductSourceBinding[]
 
   @@index([categoryL1])
   @@index([availability])
@@ -478,12 +479,13 @@ model PublishedProduct {
   platformStatusError        String?                @map("platform_status_error") @db.Text
   publishedAt                DateTime               @default(now()) @map("published_at")
 
-  task          PublishTask        @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  shop          Shop               @relation(fields: [shopId], references: [id])
-  sourceProduct SourceProduct      @relation(fields: [sourceProductId], references: [id])
-  orders        Order[]
-  orderItems    OrderItem[]
-  batchItems    ProductBatchItem[]
+  task           PublishTask                     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  shop           Shop                            @relation(fields: [shopId], references: [id])
+  sourceProduct  SourceProduct                   @relation(fields: [sourceProductId], references: [id])
+  orders         Order[]
+  orderItems     OrderItem[]
+  batchItems     ProductBatchItem[]
+  sourceBindings PublishedProductSourceBinding[]
 
   @@unique([taskId, shopId], name: "uk_publish_task_shop", map: "published_products_task_id_shop_id_key")
   @@unique([shopId, platformProductId], name: "uk_shop_platform_product", map: "published_products_shop_platform_product_key")
@@ -492,6 +494,37 @@ model PublishedProduct {
   @@index([inventorySyncStatus, inventoryNextRunAt], map: "published_products_inventory_sync_status_inventory_next_run_at_")
   @@index([inventoryLockedAt])
   @@map("published_products")
+}
+
+// 已发布商品的版本化 1688 货源与 SKU 路由快照。current_slot=1 表示当前绑定，
+// 历史绑定使用 NULL，从而允许同一商品保留多条历史但至多只有一条当前记录。
+model PublishedProductSourceBinding {
+  id                   BigInt    @id @default(autoincrement())
+  publishedProductId   BigInt    @map("published_product_id")
+  sourceProductId      BigInt    @map("source_product_id")
+  revision             Int
+  currentSlot          Int?      @map("current_slot")
+  effectiveFrom        DateTime  @map("effective_from")
+  effectiveTo          DateTime? @map("effective_to")
+  sourceOfferId        String    @map("source_offer_id") @db.VarChar(32)
+  sourceSupplierId     String?   @map("source_supplier_id") @db.VarChar(32)
+  sourceOnePieceDrop   Boolean   @map("source_one_piece_drop")
+  sourceFingerprint    String    @map("source_fingerprint") @db.VarChar(64)
+  inventoryFingerprint String    @map("inventory_fingerprint") @db.VarChar(64)
+  inventoryVersion     Int       @map("inventory_version")
+  skuRoutes            Json      @map("sku_routes") @db.JsonB
+  bindingFingerprint   String    @map("binding_fingerprint") @db.VarChar(64)
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  publishedProduct PublishedProduct @relation(fields: [publishedProductId], references: [id], onDelete: Cascade)
+  sourceProduct    SourceProduct    @relation(fields: [sourceProductId], references: [id], onDelete: Restrict)
+  orderItems       OrderItem[]
+
+  @@unique([publishedProductId, revision], name: "uk_published_product_source_binding_revision", map: "uk_published_product_source_binding_revision")
+  @@unique([publishedProductId, currentSlot], name: "uk_published_product_current_source_binding", map: "uk_published_product_current_source_binding")
+  @@index([publishedProductId, effectiveFrom, effectiveTo], map: "published_product_source_bindings_effective_interval_idx")
+  @@index([sourceProductId])
+  @@map("published_product_source_bindings")
 }
 
 // ----- 批量商品经营 -----
@@ -725,6 +758,9 @@ model OrderItem {
   sourceSupplierId    String?  @map("source_supplier_id") @db.VarChar(32)
   sourceSpecId        String?  @map("source_spec_id") @db.VarChar(128)
   sourceSpecRequired  Boolean  @default(false) @map("source_spec_required")
+  sourceBindingId     BigInt?  @map("source_binding_id")
+  sourceUnitCost      Decimal? @map("source_unit_cost") @db.Decimal(10, 2)
+  sourceOnePieceDrop  Boolean? @map("source_one_piece_drop")
   afterSaleStatusRaw  Int?     @map("after_sale_status_raw")
   afterSaleTypeRaw    Int?     @map("after_sale_type_raw")
   refundStatusRaw     Int?     @map("refund_status_raw")
@@ -735,8 +771,9 @@ model OrderItem {
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
-  order             Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  publishedProduct  PublishedProduct?      @relation(fields: [publishedProductId], references: [id], onDelete: SetNull)
+  order             Order                          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  publishedProduct  PublishedProduct?              @relation(fields: [publishedProductId], references: [id], onDelete: SetNull)
+  sourceBinding     PublishedProductSourceBinding? @relation(fields: [sourceBindingId], references: [id], onDelete: SetNull)
   purchaseOrderItem PurchaseOrderItem?
   shipmentItems     PurchaseShipmentItem[]
 
@@ -744,6 +781,7 @@ model OrderItem {
   @@index([sourceOfferId, sourceSpecId])
   @@index([sourceSupplierId])
   @@index([publishedProductId])
+  @@index([sourceBindingId])
   @@map("order_items")
 }
 

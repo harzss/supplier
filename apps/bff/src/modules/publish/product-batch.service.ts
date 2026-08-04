@@ -17,6 +17,7 @@ import type {
 } from '@supplier/platform-sdk';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
+import { buildSkuSuggestion, type SkuSuggestion } from '../sku/sku-normalizer';
 import { validateTitleForPlatform } from '../ai/prompts/title.prompt';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
@@ -30,6 +31,7 @@ import type {
   CreateProductBatchPreviewDto,
   ExecuteProductBatchDto,
   ProductBatchPriceRuleDto,
+  ProductBatchSourceTargetDto,
   ProductBatchTitleTargetDto,
   ProductBatchCandidateQueryDto,
   ProductBatchTaskListQueryDto,
@@ -42,6 +44,13 @@ import {
   UNRESOLVED_OFFLINE_CODES,
 } from './product-batch-fences';
 import { PlatformProductLockService } from './platform-product-lock.service';
+import {
+  parseSourceBindingRoutes,
+  sourceBindingFingerprint,
+  sourceBindingRoutesFingerprint,
+  SourceBindingValidationError,
+  type SourceBindingRoute,
+} from './source-binding';
 
 const STALE_ITEM_MS = 5 * 60_000;
 const TASK_RECONCILE_INTERVAL_MS = 30_000;
@@ -62,6 +71,7 @@ const RETRYABLE_FAILED_CODES = new Set([
   'ITEM_OWNERSHIP_LOST',
   'PLATFORM_ERROR',
   'PRICE_NOT_CONFIRMED',
+  'SOURCE_CHANGE_CONFLICT',
   'STATUS_NOT_OFFLINE',
   'STATUS_NOT_ONLINE',
   'ONLINE_RESULT_NOT_APPLIED',
@@ -72,6 +82,12 @@ const RETRYABLE_FAILED_CODES = new Set([
   'WORKER_STALE',
 ]);
 
+const CURRENT_SOURCE_BINDING_INCLUDE = {
+  where: { currentSlot: 1 },
+  orderBy: { revision: 'desc' as const },
+  take: 2,
+};
+
 const TASK_INCLUDE = {
   items: {
     orderBy: { ordinal: 'asc' as const },
@@ -80,6 +96,7 @@ const TASK_INCLUDE = {
         include: {
           shop: true,
           sourceProduct: true,
+          sourceBindings: CURRENT_SOURCE_BINDING_INCLUDE,
           task: { select: { skuSnapshot: true } },
         },
       },
@@ -93,6 +110,7 @@ const EXECUTION_INCLUDE = {
     include: {
       shop: true,
       sourceProduct: true,
+      sourceBindings: CURRENT_SOURCE_BINDING_INCLUDE,
       task: { select: { userId: true, skuSnapshot: true } },
     },
   },
@@ -131,6 +149,9 @@ export interface ProductBatchCandidatePage {
     cleanupEligible: boolean;
     cleanupReason: string | null;
     cleanupEvidence: ProductBatchCleanupEvidence;
+    sourceChangeEligible: boolean;
+    sourceChangeReason: string | null;
+    currentSourceRouteCount: number;
     sourceProductId: string;
     sourceAvailability: string;
     sourceTotalStock: number;
@@ -210,6 +231,13 @@ export interface ProductBatchItemView {
   beforeInventoryVersion: number | null;
   desiredInventoryVersion: number | null;
   cleanupEvidence: ProductBatchCleanupEvidence | null;
+  beforeSourceProductId: string | null;
+  desiredSourceProductId: string | null;
+  actualSourceProductId: string | null;
+  beforeSourceTitle: string | null;
+  desiredSourceTitle: string | null;
+  sourceRouteCount: number | null;
+  sourceCostRange: [number, number] | null;
   retryable: boolean;
   status: string;
   attempts: number;
@@ -247,6 +275,42 @@ type NormalizedTitleTarget = {
   expectedMutationRevision: number;
   targetTitle: string;
 };
+
+type NormalizedSourceTarget = {
+  publishedProductId: string;
+  expectedMutationRevision: number;
+  targetSourceProductId: string;
+};
+
+interface ProductBatchResolvedSourceTarget {
+  sourceProductDatabaseId: bigint;
+  sourceOfferId: string;
+  sourceTitle: string;
+  sourceSupplierId: string;
+  sourceOnePieceDrop: boolean;
+  sourceFingerprint: string;
+  inventoryFingerprint: string;
+  inventoryVersion: number;
+  syncedAt: Date;
+  skuRoutes: SourceBindingRoute[];
+  bindingFingerprint: string;
+  bindingRevision: number;
+}
+
+interface FrozenSourceChangeTarget {
+  sourceProductDatabaseId: bigint;
+  sourceOfferId: string;
+  sourceTitle: string;
+  sourceSupplierId: string;
+  sourceOnePieceDrop: boolean;
+  sourceFingerprint: string;
+  inventoryFingerprint: string;
+  inventoryVersion: number;
+  sourceSyncedAt: Date;
+  skuRoutes: SourceBindingRoute[];
+  bindingFingerprint: string;
+  bindingRevision: number;
+}
 
 interface ProductBatchCleanupAssessment {
   evidence: ProductBatchCleanupEvidence;
@@ -324,6 +388,7 @@ export class ProductBatchService {
         include: {
           shop: true,
           sourceProduct: true,
+          sourceBindings: CURRENT_SOURCE_BINDING_INCLUDE,
           task: { select: { skuSnapshot: true } },
         },
       }),
@@ -392,11 +457,7 @@ export class ProductBatchService {
         const beforeInventory =
           parseSkuInventorySnapshot(record.skuInventorySnapshot) ??
           inventorySnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
-        const desiredInventory = inventorySnapshotFromSource(
-          record.task.skuSnapshot,
-          record.shop.platform,
-          record.sourceProduct.skuList,
-        );
+        const desiredInventory = inventorySnapshotForProduct(record);
         const inventorySyncReason = inventorySyncUnavailableReason(
           record,
           beforeInventory,
@@ -416,6 +477,12 @@ export class ProductBatchService {
           unresolvedTitleByProduct.has(record.id) ||
           Boolean(onlineVerification) ||
           Boolean(offlineVerification);
+        const sourceChangeReason = sourceChangeUnavailableReason(
+          record,
+          cleanupBlockedByMutation,
+          this.sourceChangeSyncUnavailableReason(record.shop, new Date()),
+        );
+        const currentSourceRouteCount = sourceBindingRouteCountForCandidate(record.sourceBindings);
         return {
           publishedProductId: record.id.toString(),
           title: record.title,
@@ -451,6 +518,9 @@ export class ProductBatchService {
             ? '商品存在结果待核验的平台写入，请先在原批量任务完成核验'
             : cleanupAssessment.reason,
           cleanupEvidence: cleanupAssessment.evidence,
+          sourceChangeEligible: sourceChangeReason === null,
+          sourceChangeReason,
+          currentSourceRouteCount,
           sourceProductId: record.sourceProduct.productId1688,
           sourceAvailability: record.sourceProduct.availability,
           sourceTotalStock: desiredInventory
@@ -485,11 +555,17 @@ export class ProductBatchService {
       dto.titleTargets,
     );
     const priceRule = normalizePriceRule(dto.action, dto.publishedProductIds, dto.priceRule);
+    const sourceTargets = normalizeSourceTargets(
+      dto.action,
+      dto.publishedProductIds,
+      dto.sourceTargets,
+    );
     const fingerprint = requestFingerprint(
       dto.action,
       dto.publishedProductIds,
       titleTargets,
       priceRule,
+      sourceTargets,
     );
     const replay = await this.findByClientRequestId(user.userId, dto.clientRequestId);
     if (replay) {
@@ -511,6 +587,7 @@ export class ProductBatchService {
       include: {
         shop: true,
         sourceProduct: true,
+        sourceBindings: CURRENT_SOURCE_BINDING_INCLUDE,
         task: { select: { skuSnapshot: true } },
       },
     });
@@ -539,6 +616,16 @@ export class ProductBatchService {
       );
       if (staleTarget) {
         throw new ConflictException('商品已在选择后发生变化，请刷新列表并重新确认目标标题');
+      }
+    }
+    if (dto.action === 'change_source') {
+      const staleTarget = sourceTargets?.find(
+        (target) =>
+          records.find((record) => record.id.toString() === target.publishedProductId)
+            ?.mutationRevision !== target.expectedMutationRevision,
+      );
+      if (staleTarget) {
+        throw new ConflictException('商品已在选择后发生变化，请刷新列表并重新确认目标货源');
       }
     }
     if (dto.action === 'online') {
@@ -601,6 +688,10 @@ export class ProductBatchService {
       dto.action === 'cleanup'
         ? await this.assessCleanupCandidates(records, new Date())
         : new Map<bigint, ProductBatchCleanupAssessment>();
+    const sourceTargetsByProduct =
+      dto.action === 'change_source'
+        ? await this.resolveSourceChangeTargets(user.userId, records, sourceTargets ?? [])
+        : new Map<bigint, ProductBatchResolvedSourceTarget>();
     const byId = new Map(records.map((record) => [record.id.toString(), record]));
     const maxAttempts = this.maxAttempts();
     try {
@@ -619,6 +710,7 @@ export class ProductBatchService {
                 titleTargets,
                 priceRule,
                 cleanupAssessments.get(record.id),
+                sourceTargetsByProduct.get(record.id),
               );
               return {
                 publishedProductId: record.id,
@@ -1358,9 +1450,15 @@ export class ProductBatchService {
 
   async executeClaimed(item: ProductBatchExecutionRecord): Promise<'processed' | 'stale'> {
     if (
-      !['online', 'offline', 'edit_title', 'edit_price', 'sync_inventory', 'cleanup'].includes(
-        item.task.action,
-      )
+      ![
+        'online',
+        'offline',
+        'edit_title',
+        'edit_price',
+        'sync_inventory',
+        'change_source',
+        'cleanup',
+      ].includes(item.task.action)
     ) {
       throw new ProductBatchItemError('ACTION_UNSUPPORTED', '当前批量动作尚未实现', false);
     }
@@ -1383,33 +1481,43 @@ export class ProductBatchService {
       }
       const titleAction = current.task.action === 'edit_title';
       const onlineAction = current.task.action === 'online';
+      const sourceChangeAction = current.task.action === 'change_source';
       const offlineAction = OFFLINE_BATCH_ACTIONS.includes(
         current.task.action as (typeof OFFLINE_BATCH_ACTIONS)[number],
       );
       if (
         (titleAction && product.status !== 'online' && product.status !== 'offline') ||
         (onlineAction && product.status !== 'offline' && product.status !== 'online') ||
+        (sourceChangeAction && product.status !== 'offline') ||
         (offlineAction && product.status !== 'online' && product.status !== 'offline') ||
-        (!titleAction && !onlineAction && !offlineAction && product.status !== 'online')
+        (!titleAction &&
+          !onlineAction &&
+          !sourceChangeAction &&
+          !offlineAction &&
+          product.status !== 'online')
       ) {
         const actionLabel =
           current.task.action === 'offline'
             ? '下架'
             : onlineAction
               ? '上架'
-              : current.task.action === 'cleanup'
-                ? '滞销清理'
-                : titleAction
-                  ? '改标题'
-                  : current.task.action === 'edit_price'
-                    ? '改价'
-                    : '同步库存';
+              : sourceChangeAction
+                ? '换源'
+                : current.task.action === 'cleanup'
+                  ? '滞销清理'
+                  : titleAction
+                    ? '改标题'
+                    : current.task.action === 'edit_price'
+                      ? '改价'
+                      : '同步库存';
         throw new ProductBatchItemError(
           titleAction
             ? 'PRODUCT_NOT_PUBLISHED'
             : onlineAction
               ? 'PRODUCT_NOT_OFFLINE'
-              : 'PRODUCT_NOT_ONLINE',
+              : sourceChangeAction
+                ? 'PRODUCT_NOT_OFFLINE'
+                : 'PRODUCT_NOT_ONLINE',
           `商品当前状态为 ${product.status}，未执行${actionLabel}`,
           false,
         );
@@ -1497,11 +1605,314 @@ export class ProductBatchService {
       if (current.task.action === 'online') {
         return this.executeOnlineClaimed(current, adapter, token, lock);
       }
+      if (sourceChangeAction) {
+        return this.executeSourceChangeClaimed(current, adapter, token, lock);
+      }
       if (offlineAction) return this.executeOfflineClaimed(current, adapter, token, lock);
       throw new ProductBatchItemError('ACTION_UNSUPPORTED', '当前批量动作尚未实现', false);
     } finally {
       await this.platformProductLocks.release(item.publishedProductId, lock);
     }
+  }
+
+  private async executeSourceChangeClaimed(
+    item: ProductBatchExecutionRecord,
+    adapter: PlatformAdapter,
+    token: string,
+    lock: string,
+  ): Promise<'processed' | 'stale'> {
+    const product = item.publishedProduct;
+    if (!adapter.getProductState) {
+      throw new ProductBatchItemError(
+        'STATUS_READBACK_UNSUPPORTED',
+        '当前平台无法回读商品状态，拒绝执行安全换源',
+        false,
+      );
+    }
+    const firstState = await adapter.getProductState(token, product.platformProductId!);
+    let confirmedState = await adapter.getProductState(token, product.platformProductId!);
+    if (
+      firstState.state !== 'offline' ||
+      confirmedState.state !== 'offline' ||
+      !sameStableOfflineState(firstState, confirmedState)
+    ) {
+      throw new ProductBatchItemError(
+        'SOURCE_CHANGE_PLATFORM_NOT_OFFLINE',
+        '平台未连续确认商品处于下架状态，拒绝切换采购货源',
+        false,
+      );
+    }
+    const frozen = parseFrozenSourceChangeTarget(item.desiredSnapshot);
+    const before = jsonRecord(item.beforeSnapshot);
+    const beforeSourceProductDatabaseId = positiveIdOrNull(before?.sourceProductDatabaseId);
+    const beforeBindingId = positiveIdOrNull(before?.sourceBindingId);
+    const beforeBindingRevision = positiveIntegerOrNull(before?.sourceBindingRevision);
+    const beforeBindingFingerprint = strictFingerprintOrNull(before?.sourceBindingFingerprint);
+    const beforeRoutesFingerprint = strictFingerprintOrNull(before?.sourceRoutesFingerprint);
+    if (
+      beforeSourceProductDatabaseId === null ||
+      beforeBindingId === null ||
+      beforeBindingRevision === null ||
+      !beforeBindingFingerprint ||
+      !beforeRoutesFingerprint
+    ) {
+      throw new ProductBatchItemError(
+        'SOURCE_CHANGE_PREVIEW_INVALID',
+        '安全换源预览缺少当前货源绑定证据，请重新生成预览',
+        false,
+      );
+    }
+    await this.platformProductLocks.renew(product.id, lock);
+    if (!(await this.renewClaimedItemLease(item, false))) return 'stale';
+
+    let committed = false;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await this.prisma.$transaction(
+          async (tx) => {
+            const current = await tx.publishedProduct.findUnique({
+              where: { id: product.id },
+              include: {
+                shop: true,
+                sourceProduct: true,
+                sourceBindings: CURRENT_SOURCE_BINDING_INCLUDE,
+              },
+            });
+            if (
+              !current ||
+              current.platformProductId !== product.platformProductId ||
+              current.status !== 'offline' ||
+              current.mutationRevision !== item.expectedMutationRevision ||
+              current.sourceProductId !== beforeSourceProductDatabaseId
+            ) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_PRODUCT_CHANGED',
+                '商品已在换源执行前发生变化，请重新生成预览',
+                false,
+              );
+            }
+            const syncReason = this.sourceChangeSyncUnavailableReason(current.shop, new Date());
+            const unavailableReason = sourceChangeUnavailableReason(current, false, syncReason);
+            if (unavailableReason) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_UNAVAILABLE',
+                unavailableReason,
+                false,
+              );
+            }
+            const currentBinding = current.sourceBindings[0]!;
+            if (
+              currentBinding.id !== beforeBindingId ||
+              currentBinding.revision !== beforeBindingRevision ||
+              currentBinding.bindingFingerprint !== beforeBindingFingerprint ||
+              sourceBindingRoutesFingerprint(currentBinding.skuRoutes) !== beforeRoutesFingerprint
+            ) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_BINDING_CHANGED',
+                '商品当前货源绑定已变化，请重新生成预览',
+                false,
+              );
+            }
+            const target = await tx.sourceProduct.findFirst({
+              where: {
+                id: frozen.sourceProductDatabaseId,
+                productId1688: frozen.sourceOfferId,
+                userSourceProducts: { some: { userId: item.task.userId } },
+              },
+            });
+            if (!target) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_TARGET_MISSING',
+                '目标 1688 货源已从采集箱移除或不属于当前账号',
+                false,
+              );
+            }
+            const targetSupplierId = target.supplierId?.trim();
+            if (!targetSupplierId) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_TARGET_CHANGED',
+                '目标 1688 货源缺少供应商标识，不能安全采购',
+                false,
+              );
+            }
+            if (
+              target.availability !== 'available' ||
+              !target.isOnePieceDrop ||
+              target.totalStock <= 0 ||
+              target.inventoryFingerprint !== frozen.inventoryFingerprint ||
+              target.inventoryVersion !== frozen.inventoryVersion ||
+              target.syncedAt.getTime() !== frozen.sourceSyncedAt.getTime() ||
+              targetSupplierId !== frozen.sourceSupplierId ||
+              target.title !== frozen.sourceTitle
+            ) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_TARGET_CHANGED',
+                '目标 1688 货源已在预览后变化，请重新采集并生成预览',
+                false,
+              );
+            }
+            const suggestion = buildSkuSuggestion(target.skuList, Number(target.price));
+            const routes = buildSourceChangeRoutes(
+              currentBinding.skuRoutes,
+              suggestion,
+              target.skuList,
+            );
+            const recomputedFingerprint = sourceBindingFingerprint({
+              sourceProductId: target.id,
+              sourceOfferId: target.productId1688,
+              sourceSupplierId: targetSupplierId,
+              sourceOnePieceDrop: target.isOnePieceDrop,
+              sourceFingerprint: suggestion.sourceFingerprint,
+              inventoryFingerprint: target.inventoryFingerprint,
+              inventoryVersion: target.inventoryVersion,
+              skuRoutes: routes,
+            });
+            if (
+              frozen.bindingRevision !== currentBinding.revision + 1 ||
+              frozen.sourceFingerprint !== suggestion.sourceFingerprint ||
+              frozen.bindingFingerprint !== recomputedFingerprint ||
+              sourceBindingRoutesFingerprint(frozen.skuRoutes) !==
+                sourceBindingRoutesFingerprint(routes)
+            ) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_TARGET_CHANGED',
+                '目标货源 SKU 路由或指纹已变化，请重新生成预览',
+                false,
+              );
+            }
+
+            const switchedAt = new Date();
+            const closed = await tx.publishedProductSourceBinding.updateMany({
+              where: {
+                id: currentBinding.id,
+                publishedProductId: current.id,
+                revision: currentBinding.revision,
+                currentSlot: 1,
+                bindingFingerprint: currentBinding.bindingFingerprint,
+                effectiveTo: null,
+              },
+              data: { currentSlot: null, effectiveTo: switchedAt },
+            });
+            if (closed.count !== 1) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_BINDING_CHANGED',
+                '商品当前货源绑定已并发变化，请重新生成预览',
+                false,
+              );
+            }
+            const nextBinding = await tx.publishedProductSourceBinding.create({
+              data: {
+                publishedProductId: current.id,
+                sourceProductId: target.id,
+                revision: frozen.bindingRevision,
+                currentSlot: 1,
+                effectiveFrom: switchedAt,
+                sourceOfferId: target.productId1688,
+                sourceSupplierId: targetSupplierId,
+                sourceOnePieceDrop: target.isOnePieceDrop,
+                sourceFingerprint: suggestion.sourceFingerprint,
+                inventoryFingerprint: target.inventoryFingerprint,
+                inventoryVersion: target.inventoryVersion,
+                skuRoutes: routes as unknown as Prisma.InputJsonValue,
+                bindingFingerprint: recomputedFingerprint,
+              },
+            });
+            const updatedProduct = await tx.publishedProduct.updateMany({
+              where: {
+                id: current.id,
+                status: 'offline',
+                sourceProductId: beforeSourceProductDatabaseId,
+                mutationRevision: item.expectedMutationRevision,
+                inventorySyncStatus: { not: 'syncing' },
+              },
+              data: {
+                sourceProductId: target.id,
+                costPrice: Math.min(...routes.map((route) => route.sourceUnitCost)),
+                mutationRevision: { increment: 1 },
+                inventorySyncStatus: 'pending',
+                inventoryTargetFingerprint: target.inventoryFingerprint,
+                inventoryTargetVersion: target.inventoryVersion,
+                inventoryNextRunAt: switchedAt,
+                inventoryLockedAt: null,
+                inventoryLockedBy: null,
+                inventorySyncReason: 'source_changed_offline',
+                inventorySyncError: null,
+              },
+            });
+            if (updatedProduct.count !== 1) {
+              throw new ProductBatchItemError(
+                'SOURCE_CHANGE_PRODUCT_CHANGED',
+                '商品已在换源提交时发生变化，请重新生成预览',
+                false,
+              );
+            }
+            const updatedItem = await tx.productBatchItem.updateMany({
+              where: ownedItemWhere(item),
+              data: {
+                status: 'succeeded',
+                result: {
+                  reason: 'source_binding_switched',
+                  actualStatus: 'offline',
+                  actualSourceProductId: target.productId1688,
+                  sourceBindingId: nextBinding.id.toString(),
+                  sourceBindingRevision: nextBinding.revision,
+                  bindingFingerprint: nextBinding.bindingFingerprint,
+                  effectiveFrom: switchedAt.toISOString(),
+                  platformState: confirmedState,
+                } as unknown as Prisma.InputJsonValue,
+                errorCode: null,
+                errorMessage: null,
+                lockedAt: null,
+                lockedBy: null,
+                finishedAt: switchedAt,
+              },
+            });
+            if (updatedItem.count !== 1) {
+              throw new ProductBatchItemError(
+                'ITEM_OWNERSHIP_LOST',
+                '换源提交前任务所有权已变化，事务已回滚',
+                true,
+              );
+            }
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        );
+        committed = true;
+        break;
+      } catch (error) {
+        if (isSerializationConflict(error) && attempt < 3) {
+          await this.platformProductLocks.renew(product.id, lock);
+          const retryState = await adapter.getProductState(token, product.platformProductId!);
+          const retryConfirmation = await adapter.getProductState(
+            token,
+            product.platformProductId!,
+          );
+          if (
+            retryState.state !== 'offline' ||
+            retryConfirmation.state !== 'offline' ||
+            !sameStableOfflineState(retryState, retryConfirmation)
+          ) {
+            throw new ProductBatchItemError(
+              'SOURCE_CHANGE_PLATFORM_NOT_OFFLINE',
+              '并发重试前平台未连续确认商品下架，拒绝切换采购货源',
+              false,
+            );
+          }
+          confirmedState = retryConfirmation;
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (!committed) {
+      throw new ProductBatchItemError(
+        'SOURCE_CHANGE_CONFLICT',
+        '换源事务持续发生并发冲突，请刷新后重试',
+        true,
+      );
+    }
+    await this.refreshTask(item.taskId);
+    return 'processed';
   }
 
   private async executeOfflineClaimed(
@@ -4625,6 +5036,139 @@ export class ProductBatchService {
     return null;
   }
 
+  private sourceChangeSyncUnavailableReason(
+    shop: {
+      platform: string;
+      platformShopId: string;
+      lastOrderSyncAt: Date | null;
+      orderSyncAttemptAt: Date | null;
+      orderSyncError: string | null;
+    },
+    now: Date,
+  ): string | null {
+    const reason = this.cleanupSyncUnavailableReason(shop, now);
+    return (
+      reason
+        ?.replace('判断滞销商品', '执行安全换源')
+        .replace('执行滞销清理', '执行安全换源')
+        .replace('再清理', '再换源') ?? null
+    );
+  }
+
+  private async resolveSourceChangeTargets(
+    userId: bigint,
+    records: Array<{
+      id: bigint;
+      status: string;
+      platformProductId: string | null;
+      platformStatusRaw: number | null;
+      platformCheckStatusRaw: number | null;
+      mutationRevision: number;
+      sourceProductId: bigint;
+      inventorySyncStatus: string;
+      shop: {
+        platform: string;
+        platformShopId: string;
+        lastOrderSyncAt: Date | null;
+        orderSyncAttemptAt: Date | null;
+        orderSyncError: string | null;
+      };
+      sourceProduct: { productId1688: string };
+      sourceBindings?: Array<{
+        id: bigint;
+        sourceProductId: bigint;
+        revision: number;
+        currentSlot: number | null;
+        sourceOfferId: string;
+        bindingFingerprint: string;
+        skuRoutes: Prisma.JsonValue;
+      }>;
+    }>,
+    sourceTargets: NormalizedSourceTarget[],
+  ): Promise<Map<bigint, ProductBatchResolvedSourceTarget>> {
+    const requestedOfferIds = [
+      ...new Set(sourceTargets.map((target) => target.targetSourceProductId)),
+    ];
+    const targetProducts = await this.prisma.sourceProduct.findMany({
+      where: {
+        productId1688: { in: requestedOfferIds },
+        userSourceProducts: { some: { userId } },
+      },
+    });
+    const targetsByOfferId = new Map(
+      targetProducts.map((target) => [target.productId1688, target] as const),
+    );
+    const sourceTargetByProduct = new Map(
+      sourceTargets.map((target) => [target.publishedProductId, target] as const),
+    );
+    const resolved = new Map<bigint, ProductBatchResolvedSourceTarget>();
+    const now = new Date();
+
+    for (const record of records) {
+      const requested = sourceTargetByProduct.get(record.id.toString());
+      if (!requested) throw new BadRequestException('逐项目标货源缺少所选商品');
+      const unavailableReason = sourceChangeUnavailableReason(
+        record,
+        false,
+        this.sourceChangeSyncUnavailableReason(record.shop, now),
+      );
+      if (unavailableReason) throw new BadRequestException(unavailableReason);
+      const currentBinding = record.sourceBindings![0]!;
+      if (requested.targetSourceProductId === record.sourceProduct.productId1688) {
+        throw new BadRequestException('目标 1688 货源与当前货源相同');
+      }
+      const target = targetsByOfferId.get(requested.targetSourceProductId);
+      if (!target) throw new BadRequestException('目标 1688 货源尚未采集或不属于当前账号');
+      if (target.availability !== 'available') {
+        throw new BadRequestException(`目标 1688 货源当前状态为 ${target.availability}`);
+      }
+      if (!target.isOnePieceDrop) throw new BadRequestException('目标 1688 货源不支持一件代发');
+      const targetSupplierId = target.supplierId?.trim();
+      if (!targetSupplierId) {
+        throw new BadRequestException('目标 1688 货源缺少供应商标识，不能安全采购');
+      }
+      if (target.totalStock <= 0) throw new BadRequestException('目标 1688 货源当前没有可售库存');
+      if (!Array.isArray(target.skuList) || target.skuList.length === 0) {
+        throw new BadRequestException('目标 1688 货源缺少可核对的 SKU 库存，不能安全换源');
+      }
+      const inventoryFingerprint = inventoryFingerprintValue(target.inventoryFingerprint);
+      if (!inventoryFingerprint || target.inventoryVersion <= 0) {
+        throw new BadRequestException('目标 1688 货源库存版本无效，请重新采集后再换源');
+      }
+      const suggestion = buildSkuSuggestion(target.skuList, Number(target.price));
+      const skuRoutes = buildSourceChangeRoutes(
+        currentBinding.skuRoutes,
+        suggestion,
+        target.skuList,
+      );
+      const bindingFingerprint = sourceBindingFingerprint({
+        sourceProductId: target.id,
+        sourceOfferId: target.productId1688,
+        sourceSupplierId: targetSupplierId,
+        sourceOnePieceDrop: target.isOnePieceDrop,
+        sourceFingerprint: suggestion.sourceFingerprint,
+        inventoryFingerprint,
+        inventoryVersion: target.inventoryVersion,
+        skuRoutes,
+      });
+      resolved.set(record.id, {
+        sourceProductDatabaseId: target.id,
+        sourceOfferId: target.productId1688,
+        sourceTitle: target.title,
+        sourceSupplierId: targetSupplierId,
+        sourceOnePieceDrop: target.isOnePieceDrop,
+        sourceFingerprint: suggestion.sourceFingerprint,
+        inventoryFingerprint,
+        inventoryVersion: target.inventoryVersion,
+        syncedAt: target.syncedAt,
+        skuRoutes,
+        bindingFingerprint,
+        bindingRevision: currentBinding.revision + 1,
+      });
+    }
+    return resolved;
+  }
+
   private async requireTask(userId: bigint, taskId: bigint): Promise<ProductBatchTaskRecord> {
     const task = await this.prisma.productBatchTask.findFirst({
       where: { id: taskId, userId },
@@ -4700,6 +5244,8 @@ function toTaskView(task: ProductBatchTaskRecord): ProductBatchTaskView {
       const desiredInventory = parseSkuInventorySnapshot(desired?.skuInventory);
       const actualInventory = parseSkuInventorySnapshot(result?.actualInventory);
       const cleanupEvidence = parseCleanupEvidence(before?.cleanupEvidence);
+      const beforeSourceRoutes = parseSourceBindingRoutesOrNull(before?.sourceRoutes);
+      const desiredSourceRoutes = parseSourceBindingRoutesOrNull(desired?.sourceRoutes);
       const beforeStatus = stringValue(before?.status) ?? item.publishedProduct.status;
       const beforeTitle = stringValue(before?.title) ?? item.publishedProduct.title;
       return {
@@ -4731,6 +5277,17 @@ function toTaskView(task: ProductBatchTaskRecord): ProductBatchTaskView {
         beforeInventoryVersion: integerOrNull(before?.inventoryVersion),
         desiredInventoryVersion: integerOrNull(desired?.inventoryVersion),
         cleanupEvidence,
+        beforeSourceProductId: stringValue(before?.sourceProductId),
+        desiredSourceProductId: stringValue(desired?.sourceProductId),
+        actualSourceProductId: stringValue(result?.actualSourceProductId),
+        beforeSourceTitle: stringValue(before?.sourceTitle),
+        desiredSourceTitle: stringValue(desired?.sourceTitle),
+        sourceRouteCount: desiredSourceRoutes?.length ?? beforeSourceRoutes?.length ?? null,
+        sourceCostRange: desiredSourceRoutes
+          ? sourceRouteCostRange(desiredSourceRoutes)
+          : beforeSourceRoutes
+            ? sourceRouteCostRange(beforeSourceRoutes)
+            : null,
         retryable: item.status === 'failed' && isRetryableFailedError(item.errorCode),
         status: item.status,
         attempts: item.attempts,
@@ -4793,6 +5350,7 @@ function previewForAction(
     salePrice: Prisma.Decimal;
     platformProductId: string | null;
     shopId: bigint;
+    sourceProductId: bigint;
     mutationRevision: number;
     skuPriceSnapshot: Prisma.JsonValue | null;
     skuInventorySnapshot: Prisma.JsonValue | null;
@@ -4806,26 +5364,76 @@ function previewForAction(
     shop: { platform: string; platformShopId: string };
     task: { skuSnapshot: Prisma.JsonValue | null };
     sourceProduct: {
+      id: bigint;
+      productId1688: string;
+      title: string;
       availability: string;
       skuList: Prisma.JsonValue | null;
       inventoryFingerprint: string;
       inventoryVersion: number;
     };
+    sourceBindings?: Array<{
+      id: bigint;
+      sourceProductId: bigint;
+      revision: number;
+      currentSlot: number | null;
+      sourceOfferId: string;
+      bindingFingerprint: string;
+      skuRoutes: Prisma.JsonValue;
+    }>;
   },
   titleTargets: NormalizedTitleTarget[] | null,
   priceRule: NormalizedPriceRule | null,
   cleanupAssessment?: ProductBatchCleanupAssessment,
+  sourceTarget?: ProductBatchResolvedSourceTarget,
 ) {
   const before = beforeSnapshot(record);
+  if (action === 'change_source') {
+    if (!sourceTarget) throw new BadRequestException('逐项目标货源缺少所选商品');
+    const currentBinding = record.sourceBindings?.[0];
+    if (!currentBinding) throw new BadRequestException('商品缺少当前货源绑定，不能安全换源');
+    const beforeRoutes = parseSourceBindingRoutes(currentBinding.skuRoutes);
+    const beforeWithSource = {
+      ...before,
+      sourceProductDatabaseId: record.sourceProduct.id.toString(),
+      sourceProductId: record.sourceProduct.productId1688,
+      sourceTitle: record.sourceProduct.title,
+      sourceBindingId: currentBinding.id.toString(),
+      sourceBindingRevision: currentBinding.revision,
+      sourceBindingFingerprint: currentBinding.bindingFingerprint,
+      sourceRoutesFingerprint: sourceBindingRoutesFingerprint(beforeRoutes),
+      sourceRoutes: beforeRoutes,
+    };
+    const desiredSnapshot = {
+      status: 'offline',
+      sourceProductDatabaseId: sourceTarget.sourceProductDatabaseId.toString(),
+      sourceProductId: sourceTarget.sourceOfferId,
+      sourceTitle: sourceTarget.sourceTitle,
+      sourceSupplierId: sourceTarget.sourceSupplierId,
+      sourceOnePieceDrop: sourceTarget.sourceOnePieceDrop,
+      sourceFingerprint: sourceTarget.sourceFingerprint,
+      inventoryFingerprint: sourceTarget.inventoryFingerprint,
+      inventoryVersion: sourceTarget.inventoryVersion,
+      sourceSyncedAt: sourceTarget.syncedAt.toISOString(),
+      sourceBindingRevision: sourceTarget.bindingRevision,
+      sourceBindingFingerprint: sourceTarget.bindingFingerprint,
+      sourceRoutesFingerprint: sourceBindingRoutesFingerprint(sourceTarget.skuRoutes),
+      sourceRoutes: sourceTarget.skuRoutes,
+    };
+    return {
+      status: 'pending' as const,
+      result: undefined,
+      errorCode: null,
+      errorMessage: null,
+      beforeSnapshot: beforeWithSource,
+      desiredSnapshot,
+    };
+  }
   if (action === 'online') {
     const beforeInventory =
       parseSkuInventorySnapshot(record.skuInventorySnapshot) ??
       inventorySnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
-    const desiredInventory = inventorySnapshotFromSource(
-      record.task.skuSnapshot,
-      record.shop.platform,
-      record.sourceProduct.skuList,
-    );
+    const desiredInventory = inventorySnapshotForProduct(record);
     const beforeWithInventory = {
       ...before,
       inventoryFingerprint: record.inventoryFingerprint,
@@ -4949,11 +5557,7 @@ function previewForAction(
     const beforeInventory =
       parseSkuInventorySnapshot(record.skuInventorySnapshot) ??
       inventorySnapshotFromPublishTask(record.task.skuSnapshot, record.shop.platform);
-    const desiredInventory = inventorySnapshotFromSource(
-      record.task.skuSnapshot,
-      record.shop.platform,
-      record.sourceProduct.skuList,
-    );
+    const desiredInventory = inventorySnapshotForProduct(record);
     const beforeWithInventory = {
       ...before,
       inventoryFingerprint: record.inventoryFingerprint,
@@ -5310,11 +5914,49 @@ function normalizeTitleTargets(
   );
 }
 
+function normalizeSourceTargets(
+  action: string,
+  ids: string[],
+  value: ProductBatchSourceTargetDto[] | undefined,
+): NormalizedSourceTarget[] | null {
+  if (action !== 'change_source') {
+    if (value) throw new BadRequestException('当前批量动作不能携带目标货源');
+    return null;
+  }
+  if (!value?.length) throw new BadRequestException('安全换源必须提供逐项目标 1688 offerId');
+  const selected = new Set(ids);
+  const normalized = value.map((target) => ({
+    publishedProductId: target.publishedProductId,
+    expectedMutationRevision: target.expectedMutationRevision,
+    targetSourceProductId:
+      typeof target.targetSourceProductId === 'string' ? target.targetSourceProductId.trim() : '',
+  }));
+  const targetIds = new Set(normalized.map((target) => target.publishedProductId));
+  if (
+    normalized.some(
+      (target) =>
+        !/^[1-9]\d{0,31}$/.test(target.targetSourceProductId) ||
+        !Number.isInteger(target.expectedMutationRevision) ||
+        target.expectedMutationRevision < 1,
+    ) ||
+    targetIds.size !== normalized.length ||
+    selected.size !== targetIds.size ||
+    [...selected].some((id) => !targetIds.has(id)) ||
+    [...targetIds].some((id) => !selected.has(id))
+  ) {
+    throw new BadRequestException('逐项目标货源必须有效并与所选商品完全一致');
+  }
+  return normalized.sort((left, right) =>
+    left.publishedProductId.localeCompare(right.publishedProductId),
+  );
+}
+
 function requestFingerprint(
   action: string,
   ids: string[],
   titleTargets: NormalizedTitleTarget[] | null,
   priceRule: NormalizedPriceRule | null,
+  sourceTargets: NormalizedSourceTarget[] | null = null,
 ): string {
   return createHash('sha256')
     .update(
@@ -5323,6 +5965,7 @@ function requestFingerprint(
         publishedProductIds: [...ids].sort(),
         ...(titleTargets ? { titleTargets } : {}),
         ...(priceRule ? { priceRule } : {}),
+        ...(sourceTargets ? { sourceTargets } : {}),
       }),
     )
     .digest('hex');
@@ -5501,6 +6144,62 @@ function inventorySnapshotFromPublishTask(
   return normalizeSkuInventorySnapshot(items as Array<{ sourceSkuId: string; stock: number }>);
 }
 
+function inventorySnapshotForProduct(record: {
+  sourceProductId: bigint;
+  task: { skuSnapshot: Prisma.JsonValue | null };
+  shop: { platform: string };
+  sourceProduct: { skuList: Prisma.JsonValue | null };
+  sourceBindings?: Array<{
+    sourceProductId: bigint;
+    currentSlot: number | null;
+    skuRoutes: Prisma.JsonValue;
+  }>;
+}): ProductBatchInventorySnapshot | null {
+  const bindings = record.sourceBindings ?? [];
+  if (bindings.length === 0) {
+    return inventorySnapshotFromSource(
+      record.task.skuSnapshot,
+      record.shop.platform,
+      record.sourceProduct.skuList,
+    );
+  }
+  if (
+    bindings.length !== 1 ||
+    bindings[0]!.currentSlot !== 1 ||
+    bindings[0]!.sourceProductId !== record.sourceProductId
+  ) {
+    return null;
+  }
+  return inventorySnapshotFromBindingRoutes(bindings[0]!.skuRoutes, record.sourceProduct.skuList);
+}
+
+function inventorySnapshotFromBindingRoutes(
+  routesValue: unknown,
+  sourceSkuListValue: Prisma.JsonValue | null,
+): ProductBatchInventorySnapshot | null {
+  const routes = parseSourceBindingRoutesOrNull(routesValue);
+  if (!routes?.length || !Array.isArray(sourceSkuListValue)) return null;
+  const sourceStocks = new Map<string, number>();
+  for (const value of sourceSkuListValue) {
+    const sku = jsonRecord(value);
+    const sourceSkuId = stringValue(sku?.skuId ?? sku?.id)?.trim();
+    const stock = nonNegativeIntegerOrNull(sku?.stock);
+    if (!sourceSkuId || stock === null || sourceStocks.has(sourceSkuId)) return null;
+    sourceStocks.set(sourceSkuId, stock);
+  }
+  const usedSpecs = new Set<string>();
+  const items = routes.map((route) => {
+    const specId = route.sourceSpecId?.trim();
+    if (!specId || usedSpecs.has(specId)) return null;
+    const stock = sourceStocks.get(specId);
+    if (stock === undefined) return null;
+    usedSpecs.add(specId);
+    return { sourceSkuId: route.platformSkuKey, stock };
+  });
+  if (items.some((item) => !item)) return null;
+  return normalizeSkuInventorySnapshot(items as Array<{ sourceSkuId: string; stock: number }>);
+}
+
 function inventorySnapshotFromSource(
   publishSnapshotValue: Prisma.JsonValue | null,
   platform: string,
@@ -5535,6 +6234,104 @@ function parseSkuInventorySnapshot(value: unknown): ProductBatchInventorySnapsho
   });
   if (items.some((item) => !item)) return null;
   return normalizeSkuInventorySnapshot(items as Array<{ sourceSkuId: string; stock: number }>);
+}
+
+function parseSourceBindingRoutesOrNull(value: unknown): SourceBindingRoute[] | null {
+  if (value === undefined || value === null) return null;
+  try {
+    return parseSourceBindingRoutes(value);
+  } catch {
+    return null;
+  }
+}
+
+function parseFrozenSourceChangeTarget(value: unknown): FrozenSourceChangeTarget {
+  const record = jsonRecord(value);
+  const sourceProductDatabaseId = positiveIdOrNull(record?.sourceProductDatabaseId);
+  const sourceOfferId = stringValue(record?.sourceProductId)?.trim() ?? '';
+  const sourceTitle = stringValue(record?.sourceTitle)?.trim() ?? '';
+  const sourceSupplierId = stringValue(record?.sourceSupplierId)?.trim() ?? '';
+  const sourceOnePieceDrop = record?.sourceOnePieceDrop;
+  const sourceFingerprint = strictFingerprintOrNull(record?.sourceFingerprint);
+  const inventoryFingerprint = strictFingerprintOrNull(record?.inventoryFingerprint);
+  const inventoryVersion = positiveIntegerOrNull(record?.inventoryVersion);
+  const sourceSyncedAtValue = stringValue(record?.sourceSyncedAt);
+  const sourceSyncedAt = sourceSyncedAtValue ? new Date(sourceSyncedAtValue) : new Date(NaN);
+  const bindingFingerprint = strictFingerprintOrNull(record?.sourceBindingFingerprint);
+  const bindingRevision = positiveIntegerOrNull(record?.sourceBindingRevision);
+  const routesFingerprint = strictFingerprintOrNull(record?.sourceRoutesFingerprint);
+  let skuRoutes: SourceBindingRoute[];
+  try {
+    skuRoutes = parseSourceBindingRoutes(record?.sourceRoutes);
+  } catch (error) {
+    throw new ProductBatchItemError(
+      'SOURCE_CHANGE_PREVIEW_INVALID',
+      error instanceof Error ? error.message : '目标货源 SKU 路由无效',
+      false,
+    );
+  }
+  if (
+    record?.status !== 'offline' ||
+    sourceProductDatabaseId === null ||
+    !/^[1-9]\d{0,31}$/.test(sourceOfferId) ||
+    !sourceTitle ||
+    sourceTitle.length > 255 ||
+    !sourceSupplierId ||
+    sourceSupplierId.length > 32 ||
+    sourceOnePieceDrop !== true ||
+    !sourceFingerprint ||
+    !inventoryFingerprint ||
+    inventoryVersion === null ||
+    !Number.isFinite(sourceSyncedAt.getTime()) ||
+    !bindingFingerprint ||
+    bindingRevision === null ||
+    !routesFingerprint ||
+    !skuRoutes.length ||
+    sourceBindingRoutesFingerprint(skuRoutes) !== routesFingerprint
+  ) {
+    throw new ProductBatchItemError(
+      'SOURCE_CHANGE_PREVIEW_INVALID',
+      '安全换源目标快照无效，请重新生成预览',
+      false,
+    );
+  }
+  const recomputed = sourceBindingFingerprint({
+    sourceProductId: sourceProductDatabaseId,
+    sourceOfferId,
+    sourceSupplierId,
+    sourceOnePieceDrop,
+    sourceFingerprint,
+    inventoryFingerprint,
+    inventoryVersion,
+    skuRoutes,
+  });
+  if (recomputed !== bindingFingerprint) {
+    throw new ProductBatchItemError(
+      'SOURCE_CHANGE_PREVIEW_INVALID',
+      '安全换源绑定指纹不一致，请重新生成预览',
+      false,
+    );
+  }
+  return {
+    sourceProductDatabaseId,
+    sourceOfferId,
+    sourceTitle,
+    sourceSupplierId,
+    sourceOnePieceDrop,
+    sourceFingerprint,
+    inventoryFingerprint,
+    inventoryVersion,
+    sourceSyncedAt,
+    skuRoutes,
+    bindingFingerprint,
+    bindingRevision,
+  };
+}
+
+function sourceRouteCostRange(routes: SourceBindingRoute[]): [number, number] | null {
+  if (!routes.length) return null;
+  const costs = routes.map((route) => route.sourceUnitCost);
+  return [Math.min(...costs), Math.max(...costs)];
 }
 
 function parseCleanupEvidence(value: unknown): ProductBatchCleanupEvidence | null {
@@ -5672,6 +6469,115 @@ function pendingInventoryItems(
 
 function inventoryTotalStock(snapshot: ProductBatchInventorySnapshot): number {
   return snapshot.items.reduce((total, item) => total + item.stock, 0);
+}
+
+function sourceBindingRouteCountForCandidate(
+  bindings: Array<{ skuRoutes: Prisma.JsonValue }> | undefined,
+): number {
+  if (bindings?.length !== 1) return 0;
+  try {
+    return parseSourceBindingRoutes(bindings[0]!.skuRoutes).length;
+  } catch (error) {
+    if (error instanceof SourceBindingValidationError) return 0;
+    throw error;
+  }
+}
+
+function sourceChangeUnavailableReason(
+  record: {
+    platformProductId: string | null;
+    status: string;
+    platformStatusRaw: number | null;
+    platformCheckStatusRaw: number | null;
+    sourceProductId: bigint;
+    inventorySyncStatus: string;
+    shop: { platform: string; platformShopId: string };
+    sourceProduct: { productId1688: string };
+    sourceBindings?: Array<{
+      sourceProductId: bigint;
+      revision: number;
+      currentSlot: number | null;
+      sourceOfferId: string;
+      bindingFingerprint: string;
+      skuRoutes: Prisma.JsonValue;
+    }>;
+  },
+  blockedByUnresolvedMutation: boolean,
+  orderSyncReason: string | null,
+): string | null {
+  if (!record.platformProductId) return '商品缺少平台商品 ID';
+  if (isRawDeletedProduct(record)) return '平台商品已删除，不能换源，请重新铺货';
+  if (record.status !== 'offline') return '必须先安全下架商品，才能切换采购货源';
+  if (!isDemoShop(record.shop) && record.shop.platform !== 'douyin') {
+    return '当前仅支持抖店商品离线安全换源';
+  }
+  if (blockedByUnresolvedMutation) return '商品存在结果待核验的平台写入，请先完成核验';
+  if (record.inventorySyncStatus === 'syncing') return '商品库存正在同步，请稍后再换源';
+  if (orderSyncReason) return orderSyncReason;
+  const bindings = record.sourceBindings ?? [];
+  if (bindings.length !== 1) return '商品当前货源绑定缺失或重复，不能安全换源';
+  const binding = bindings[0]!;
+  if (
+    binding.currentSlot !== 1 ||
+    binding.sourceProductId !== record.sourceProductId ||
+    binding.sourceOfferId !== record.sourceProduct.productId1688 ||
+    !Number.isInteger(binding.revision) ||
+    binding.revision < 1 ||
+    !/^[a-f0-9]{64}$/.test(binding.bindingFingerprint)
+  ) {
+    return '商品当前货源绑定与商品指针不一致，不能安全换源';
+  }
+  try {
+    if (parseSourceBindingRoutes(binding.skuRoutes).length === 0) {
+      return '商品当前货源缺少 SKU 路由，不能安全换源';
+    }
+  } catch (error) {
+    if (error instanceof SourceBindingValidationError) {
+      return `商品当前货源 SKU 路由无效：${error.message}`;
+    }
+    throw error;
+  }
+  return null;
+}
+
+function buildSourceChangeRoutes(
+  currentRoutesValue: unknown,
+  targetSuggestion: SkuSuggestion,
+  targetSkuList: unknown,
+): SourceBindingRoute[] {
+  const currentRoutes = parseSourceBindingRoutes(currentRoutesValue);
+  if (!currentRoutes.length) throw new BadRequestException('商品当前货源缺少 SKU 路由');
+  if (
+    targetSuggestion.warnings.some((warning) =>
+      /(格式无效|重复|超过|缺少规格值|已不存在)/.test(warning),
+    )
+  ) {
+    throw new BadRequestException('目标 1688 货源 SKU 数据不完整，请重新采集后再换源');
+  }
+  if (targetSuggestion.skus.length !== currentRoutes.length) {
+    throw new BadRequestException('目标货源 SKU 数量与平台商品不一致，不能安全换源');
+  }
+  const targetByValues = new Map<string, SkuSuggestion['skus'][number]>();
+  for (const sku of targetSuggestion.skus) {
+    const key = JSON.stringify(sku.values);
+    if (targetByValues.has(key)) {
+      throw new BadRequestException('目标货源包含重复的 SKU 规格组合，不能安全换源');
+    }
+    targetByValues.set(key, sku);
+  }
+  const hasSourceSpecs = Array.isArray(targetSkuList) && targetSkuList.length > 0;
+  const routes = currentRoutes.map((current) => {
+    const target = targetByValues.get(JSON.stringify(current.values));
+    if (!target) throw new BadRequestException('目标货源 SKU 规格与平台商品不能一一对应');
+    return {
+      platformSkuKey: current.platformSkuKey,
+      sourceSpecId: hasSourceSpecs ? target.sourceSkuId : null,
+      sourceSpecRequired: hasSourceSpecs,
+      sourceUnitCost: target.costPrice,
+      values: current.values,
+    };
+  });
+  return parseSourceBindingRoutes(routes);
 }
 
 function inventorySyncUnavailableReason(
@@ -5818,6 +6724,24 @@ function nonNegativeIntegerOrNull(value: unknown): number | null {
 
 function positiveIntegerOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function positiveIdOrNull(value: unknown): bigint | null {
+  if (typeof value !== 'string' || !/^[1-9]\d{0,18}$/.test(value)) return null;
+  try {
+    const id = BigInt(value);
+    return id <= 9_223_372_036_854_775_807n ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+function strictFingerprintOrNull(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const fingerprint = value.trim();
+  return fingerprint.length > 0 && fingerprint.length <= 64 && /^[a-zA-Z0-9:_-]+$/.test(fingerprint)
+    ? fingerprint
+    : null;
 }
 
 function onlineBaseMutationRevision(
@@ -6062,6 +6986,11 @@ function isPlatformMutationResultUnknown(error: unknown): boolean {
 
 function isUniqueConstraintError(error: unknown): boolean {
   return (error as { code?: unknown } | null)?.code === 'P2002';
+}
+
+function isSerializationConflict(error: unknown): boolean {
+  const value = error as { code?: unknown; meta?: { code?: unknown } } | null;
+  return value?.code === 'P2034' || value?.meta?.code === '40001';
 }
 
 function jsonRecord(value: unknown): Record<string, unknown> | null {

@@ -851,6 +851,10 @@ function groupPurchaseItems(order: PurchasingOrder): Map<string, GroupedPurchase
   }
   const groups = new Map<string, GroupedPurchaseItem[]>();
   for (const item of orderItems) {
+    const versionedBinding =
+      (item.sourceBindingId !== null && item.sourceBindingId !== undefined) ||
+      (item.sourceUnitCost !== null && item.sourceUnitCost !== undefined) ||
+      (item.sourceOnePieceDrop !== null && item.sourceOnePieceDrop !== undefined);
     const supplierKey = item.sourceSupplierId?.trim();
     const offerId = item.sourceOfferId?.trim();
     const specId = item.sourceSpecId?.trim() || null;
@@ -860,24 +864,43 @@ function groupPurchaseItems(order: PurchasingOrder): Map<string, GroupedPurchase
     if (item.sourceSpecRequired && !specId) {
       throw new ServiceUnavailableException('订单项缺少必需的 1688 规格绑定');
     }
-    if (!item.publishedProduct?.sourceProduct.isOnePieceDrop) {
+    if (
+      versionedBinding
+        ? item.sourceOnePieceDrop !== true
+        : !item.publishedProduct?.sourceProduct.isOnePieceDrop
+    ) {
       throw new ServiceUnavailableException('订单项货源未确认支持 1688 一件代发');
     }
     if (!Number.isSafeInteger(item.quantity) || item.quantity <= 0) {
       throw new ServiceUnavailableException('订单项采购数量无效');
     }
     const values = groups.get(supplierKey) ?? [];
+    const unitCost = versionedBinding
+      ? bindingUnitCost(item.sourceUnitCost)
+      : item.publishedProduct?.costPrice === null || item.publishedProduct?.costPrice === undefined
+        ? null
+        : Number(item.publishedProduct.costPrice);
     values.push({
       id: item.id,
       offerId,
       specId,
       quantity: item.quantity,
-      unitCost:
-        item.publishedProduct.costPrice === null ? null : Number(item.publishedProduct.costPrice),
+      unitCost,
     });
     groups.set(supplierKey, values);
   }
   return groups;
+}
+
+function bindingUnitCost(value: PurchasingOrder['items'][number]['sourceUnitCost']): number {
+  if (value === null || value === undefined) {
+    throw new ServiceUnavailableException('订单项缺少版本化货源单价快照');
+  }
+  const cost = Number(value);
+  if (!Number.isFinite(cost) || cost <= 0 || cost > 99_999_999.99) {
+    throw new ServiceUnavailableException('订单项版本化货源单价快照无效');
+  }
+  return cost;
 }
 
 function assertPurchaseItemsMatch(

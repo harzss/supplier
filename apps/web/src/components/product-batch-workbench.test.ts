@@ -4,6 +4,7 @@ import {
   candidateUnavailableReason,
   isCandidateSelectable,
   normalizeTargetPrice,
+  normalizeTargetSource,
   normalizeTargetTitle,
   productBatchPreviewFingerprint,
   requiresProductBatchOfflineVerification,
@@ -53,6 +54,18 @@ describe('product batch price inputs', () => {
     expect(normalizeTargetPrice('0.01')).toEqual({ value: '0.01', error: '' });
     expect(normalizeTargetPrice('0')).toMatchObject({ value: null });
     expect(normalizeTargetPrice('1000000.01')).toMatchObject({ value: null });
+  });
+
+  it('accepts only non-zero numeric 1688 offer IDs', () => {
+    expect(normalizeTargetSource(' 673201001001 ')).toEqual({
+      value: '673201001001',
+      error: '',
+    });
+    expect(normalizeTargetSource('')).toMatchObject({ value: null });
+    expect(normalizeTargetSource('0')).toMatchObject({ value: null });
+    expect(normalizeTargetSource('0123')).toMatchObject({ value: null });
+    expect(normalizeTargetSource('offer-123')).toMatchObject({ value: null });
+    expect(normalizeTargetSource('1'.repeat(33))).toMatchObject({ value: null });
   });
 
   it('normalizes target titles using the platform 16 to 60 character-unit rule', () => {
@@ -266,6 +279,60 @@ describe('product batch price inputs', () => {
     ).not.toBe(left);
   });
 
+  it('includes ordered source targets and frozen revisions in source-change fingerprints', () => {
+    const sourceTargets = [
+      {
+        publishedProductId: '2',
+        expectedMutationRevision: 4,
+        targetSourceProductId: '673201001002',
+      },
+      {
+        publishedProductId: '1',
+        expectedMutationRevision: 3,
+        targetSourceProductId: '673201001001',
+      },
+    ];
+    const left = productBatchPreviewFingerprint({
+      action: 'change_source',
+      publishedProductIds: ['2', '1'],
+      sourceTargets,
+    });
+    const request = {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'change_source' as const,
+      publishedProductIds: ['1', '2'],
+      sourceTargets: [...sourceTargets].reverse(),
+    };
+
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        request,
+      ),
+    ).toBe(true);
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        {
+          ...request,
+          sourceTargets: request.sourceTargets.map((target, index) =>
+            index === 0 ? { ...target, targetSourceProductId: '673201009999' } : target,
+          ),
+        },
+      ),
+    ).toBe(false);
+    expect(
+      productBatchPreviewFingerprint({
+        action: 'change_source',
+        publishedProductIds: request.publishedProductIds,
+        sourceTargets: request.sourceTargets.map((target) => ({
+          ...target,
+          expectedMutationRevision: target.expectedMutationRevision + 1,
+        })),
+      }),
+    ).not.toBe(left);
+  });
+
   it('selects only inventory-sync eligible products and surfaces the server reason', () => {
     const eligible = candidate('11', '可同步商品');
     const blocked = {
@@ -375,6 +442,43 @@ describe('product batch price inputs', () => {
     );
   });
 
+  it('selects only offline server-approved source-change candidates', () => {
+    const eligible = {
+      ...candidate('11', '可换源商品'),
+      status: 'offline',
+      sourceChangeEligible: true,
+      sourceChangeReason: null,
+      currentSourceRouteCount: 2,
+    };
+    const blocked = {
+      ...candidate('12', '不可换源商品'),
+      status: 'offline',
+      sourceChangeEligible: false,
+      sourceChangeReason: '商品当前货源绑定缺失或重复，不能安全换源',
+    };
+    const inconsistent = {
+      ...eligible,
+      status: 'online',
+    } as ProductBatchCandidate;
+    const missingRoutes = {
+      ...eligible,
+      currentSourceRouteCount: 0,
+    } as ProductBatchCandidate;
+
+    expect(isCandidateSelectable(eligible, 'change_source')).toBe(true);
+    expect(candidateUnavailableReason(eligible, 'change_source')).toBeNull();
+    expect(isCandidateSelectable(blocked, 'change_source')).toBe(false);
+    expect(candidateUnavailableReason(blocked, 'change_source')).toBe(blocked.sourceChangeReason);
+    expect(isCandidateSelectable(inconsistent, 'change_source')).toBe(false);
+    expect(candidateUnavailableReason(inconsistent, 'change_source')).toBe(
+      '商品换源安全状态异常，请刷新商品后再操作',
+    );
+    expect(isCandidateSelectable(missingRoutes, 'change_source')).toBe(false);
+    expect(candidateUnavailableReason(missingRoutes, 'change_source')).toBe(
+      '商品换源安全状态异常，请刷新商品后再操作',
+    );
+  });
+
   it('blocks every product mutation while an offline result awaits verification', () => {
     const fenced = {
       ...candidate('11', '待核验下架商品'),
@@ -390,6 +494,7 @@ describe('product batch price inputs', () => {
       'edit_title',
       'edit_price',
       'sync_inventory',
+      'change_source',
       'cleanup',
     ] as const) {
       expect(isCandidateSelectable(fenced, action)).toBe(false);
@@ -459,6 +564,7 @@ describe('product batch workbench session recovery', () => {
       percentageInput: '12.34',
       targetInputs: { '11': '39.90', '88': '58' },
       titleInputs: {},
+      sourceTargetInputs: {},
       bulkTargetInput: '39.90',
       targetPage: 2,
       selected: [candidate('11', '第一页商品'), candidate('88', '第三页商品')],
@@ -552,6 +658,93 @@ describe('product batch workbench session recovery', () => {
     expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(cleanupSession);
   });
 
+  it('restores an offline source-change draft with frozen eligibility and numeric offer inputs', () => {
+    const storage = new MemoryStorage();
+    const selected = {
+      ...candidate('11', '待换源商品'),
+      status: 'offline',
+      cleanupEligible: false,
+      cleanupReason: '只有在线商品可以进入滞销安全下架',
+      sourceChangeEligible: true,
+      sourceChangeReason: null,
+      currentSourceRouteCount: 2,
+    };
+    const sourceChangeSession: ProductBatchWorkbenchSession = {
+      ...session,
+      draft: {
+        ...session.draft,
+        status: 'offline',
+        action: 'change_source',
+        targetInputs: {},
+        sourceTargetInputs: { '11': '673201001001' },
+        selected: [selected],
+      },
+    };
+
+    expect(writeProductBatchWorkbenchSession(scope, sourceChangeSession, storage)).toBe(true);
+    expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(sourceChangeSession);
+  });
+
+  it('fails closed for malformed or incomplete source-change recovery state', () => {
+    const storage = new MemoryStorage();
+    const key = productBatchWorkbenchStorageKey(scope);
+    const eligible = {
+      ...candidate('11', '待换源商品'),
+      status: 'offline',
+      cleanupEligible: false,
+      cleanupReason: '只有在线商品可以进入滞销安全下架',
+      sourceChangeEligible: true,
+      sourceChangeReason: null,
+      currentSourceRouteCount: 2,
+    };
+    const drafts = [
+      {
+        ...session.draft,
+        status: 'offline',
+        action: 'change_source',
+        sourceTargetInputs: undefined,
+        selected: [eligible],
+      },
+      {
+        ...session.draft,
+        status: 'online',
+        action: 'change_source',
+        sourceTargetInputs: { '11': '673201001001' },
+        selected: [eligible],
+      },
+      {
+        ...session.draft,
+        status: 'offline',
+        action: 'change_source',
+        sourceTargetInputs: { '11': 'offer-673201001001' },
+        selected: [eligible],
+      },
+      {
+        ...session.draft,
+        status: 'offline',
+        action: 'change_source',
+        sourceTargetInputs: { '11': '673201001001' },
+        selected: [{ ...eligible, sourceChangeReason: '资格字段冲突' }],
+      },
+      {
+        ...session.draft,
+        status: 'offline',
+        action: 'change_source',
+        sourceTargetInputs: { '11': '673201001001' },
+        selected: [{ ...eligible, currentSourceRouteCount: 0 }],
+      },
+    ];
+
+    for (const draft of drafts) {
+      storage.setItem(
+        key,
+        JSON.stringify({ version: 1, ...scope, draft, preview: session.preview }),
+      );
+      expect(readProductBatchWorkbenchSession(scope, storage)).toBeNull();
+      expect(storage.getItem(key)).toBeNull();
+    }
+  });
+
   it('migrates a legacy v1 edit_price draft without losing its preview identity', () => {
     const storage = new MemoryStorage();
     const key = productBatchWorkbenchStorageKey(scope);
@@ -592,6 +785,9 @@ describe('product batch workbench session recovery', () => {
         cleanupEligible: false,
         cleanupReason: '旧版会话缺少滞销清理证据，请刷新商品后再操作',
         cleanupEvidence: null,
+        sourceChangeEligible: false,
+        sourceChangeReason: '旧版会话缺少安全换源状态，请刷新商品后再操作',
+        currentSourceRouteCount: 0,
       },
     ]);
     expect(isCandidateSelectable(restored!.draft.selected[0]!, 'sync_inventory')).toBe(false);
@@ -697,6 +893,7 @@ describe('product batch workbench session recovery', () => {
       'edit_title',
       'edit_price',
       'sync_inventory',
+      'change_source',
       'cleanup',
     ] as const) {
       storage.setItem(
@@ -1007,6 +1204,9 @@ function candidate(publishedProductId: string, title: string) {
     cleanupEligible: true,
     cleanupReason: null,
     cleanupEvidence: cleanupEvidence(),
+    sourceChangeEligible: false,
+    sourceChangeReason: '只有已下架商品可以安全换源',
+    currentSourceRouteCount: 0,
     mutationRevision: 2,
     publishedAt: '2026-08-04T00:00:00.000Z',
   };
@@ -1034,6 +1234,9 @@ function legacyCandidate(publishedProductId: string, title: string): Record<stri
     'cleanupEligible',
     'cleanupReason',
     'cleanupEvidence',
+    'sourceChangeEligible',
+    'sourceChangeReason',
+    'currentSourceRouteCount',
   ]) {
     delete legacy[field];
   }

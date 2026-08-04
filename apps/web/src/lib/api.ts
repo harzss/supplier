@@ -509,6 +509,9 @@ export interface ProductBatchCandidate {
   cleanupEligible: boolean;
   cleanupReason: string | null;
   cleanupEvidence: ProductBatchCleanupEvidence | null;
+  sourceChangeEligible: boolean;
+  sourceChangeReason: string | null;
+  currentSourceRouteCount: number;
   mutationRevision: number;
   publishedAt: string;
 }
@@ -519,6 +522,7 @@ export type ProductBatchAction =
   | 'edit_title'
   | 'edit_price'
   | 'sync_inventory'
+  | 'change_source'
   | 'cleanup';
 
 export type ProductBatchPriceRule =
@@ -563,6 +567,16 @@ export type ProductBatchPreviewRequest =
       clientRequestId: string;
       action: 'sync_inventory';
       publishedProductIds: string[];
+    }
+  | {
+      clientRequestId: string;
+      action: 'change_source';
+      publishedProductIds: string[];
+      sourceTargets: Array<{
+        publishedProductId: string;
+        expectedMutationRevision: number;
+        targetSourceProductId: string;
+      }>;
     }
   | {
       clientRequestId: string;
@@ -622,6 +636,13 @@ export interface ProductBatchItem {
   beforeInventoryVersion: number | null;
   desiredInventoryVersion: number | null;
   cleanupEvidence: ProductBatchCleanupEvidence | null;
+  beforeSourceProductId: string | null;
+  desiredSourceProductId: string | null;
+  actualSourceProductId: string | null;
+  beforeSourceTitle: string | null;
+  desiredSourceTitle: string | null;
+  sourceRouteCount: number | null;
+  sourceCostRange: [number, number] | null;
   retryable: boolean;
   status: string;
   attempts: number;

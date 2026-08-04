@@ -55,6 +55,12 @@ import {
 import { pricingSourceFingerprint } from './pricing-source-fingerprint';
 import { PublishDraftService } from './publish-draft.service';
 import {
+  buildSourceBindingRoutes,
+  sourceBindingFingerprint,
+  SourceBindingValidationError,
+  type SourceBindingRoute,
+} from './source-binding';
+import {
   buildSkuSuggestion,
   materializeConfirmedSkus,
   parseConfirmedSkuMapping,
@@ -1210,10 +1216,22 @@ export class PublishService {
     await assertPublishExecutionOwned(lease);
     const currentProduct = await this.prisma.sourceProduct.findUnique({
       where: { id: product.id },
-      select: { price: true, skuList: true },
+      select: {
+        productId1688: true,
+        supplierId: true,
+        isOnePieceDrop: true,
+        availability: true,
+        totalStock: true,
+        price: true,
+        skuList: true,
+        inventoryFingerprint: true,
+        inventoryVersion: true,
+      },
     });
     await assertPublishExecutionOwned(lease);
     if (!currentProduct) throw new NotFoundException('货源不存在');
+    assertSourceAvailable(currentProduct);
+    const sourceSupplierId = currentProduct.supplierId!.trim();
     const costPrice = Number(currentProduct.price);
     assertPreviewPricingUnchanged(task.pricingStrategy ?? undefined, currentProduct);
     const pricing = calculatePricing(costPrice, dto.pricingStrategy);
@@ -1228,6 +1246,48 @@ export class PublishService {
       ),
       currentProduct.skuList,
     );
+    const sourceFingerprint = buildSkuSuggestion(
+      currentProduct.skuList,
+      costPrice,
+    ).sourceFingerprint;
+    const sourceBindingByPlatform = new Map<
+      string,
+      { routes: SourceBindingRoute[]; fingerprint: string }
+    >();
+    for (const platform of new Set(shops.map((shop) => shop.platform))) {
+      const platformSnapshot = skuSnapshot[platform];
+      if (!platformSnapshot) {
+        throw new ConflictException(`${platform} 缺少发布 SKU 快照，无法建立货源绑定`);
+      }
+      try {
+        const routes = buildSourceBindingRoutes(
+          platformSnapshot.skus.map((sku) => ({
+            platformSkuKey: sku.sourceSkuId ?? '',
+            values: platformSnapshot.dimensions.map((dimension) => sku.attributes[dimension] ?? ''),
+          })),
+          currentProduct.skuList,
+          costPrice,
+        );
+        sourceBindingByPlatform.set(platform, {
+          routes,
+          fingerprint: sourceBindingFingerprint({
+            sourceProductId: product.id,
+            sourceOfferId: currentProduct.productId1688,
+            sourceSupplierId,
+            sourceOnePieceDrop: currentProduct.isOnePieceDrop,
+            sourceFingerprint,
+            inventoryFingerprint: currentProduct.inventoryFingerprint,
+            inventoryVersion: currentProduct.inventoryVersion,
+            skuRoutes: routes,
+          }),
+        });
+      } catch (error) {
+        if (error instanceof SourceBindingValidationError) {
+          throw new ConflictException(`货源 SKU 路由无法安全绑定：${error.message}`);
+        }
+        throw error;
+      }
+    }
     const mockCategoryId = `mock-cat-${product.categoryL1 ?? 'general'}`;
     const detailImages = jsonStringArray(product.detailImages);
     const publishDetail = [detailImageUrl, ...detailImages].filter(Boolean).join('|');
@@ -1313,6 +1373,10 @@ export class PublishService {
         if (!latestSourceInventory) {
           throw new ConflictException('1688 货源已不存在，暂不保存发布结果');
         }
+        const sourceBinding = sourceBindingByPlatform.get(shop.platform);
+        if (!sourceBinding) {
+          throw new ConflictException(`${shop.platform} 缺少发布 SKU 路由，暂不保存发布结果`);
+        }
         const platformInventoryMatchesRequest = samePublishedSkuInventory(
           publishedInventorySnapshot,
           requestedInventorySnapshot,
@@ -1380,37 +1444,76 @@ export class PublishService {
           mainImage: publishMainImage,
         };
         await assertPublishExecutionOwned(lease);
-        await this.prisma.publishedProduct.upsert({
-          where: { uk_publish_task_shop: { taskId: task.id, shopId: shop.id } },
-          create: publishedData,
-          update: {
-            taskId: task.id,
-            shopId: shop.id,
-            sourceProductId: product.id,
-            platformProductId: pub.platformProductId,
-            title: optimizedTitle,
-            salePrice,
-            costPrice,
-            ...(publishedPriceSnapshot
-              ? {
-                  skuPriceSnapshot: publishedPriceSnapshot as unknown as Prisma.InputJsonValue,
-                  priceSyncedAt,
-                }
-              : {}),
-            ...publishedInventoryData,
-            status: publishedStatus,
-            ...(publishedInventoryState
-              ? {
-                  platformStatusRaw: publishedInventoryState.status,
-                  platformCheckStatusRaw: publishedInventoryState.checkStatus,
-                  platformStatusSyncedAt: inventoryCheckedAt,
-                  platformStatusError: null,
-                }
-              : {}),
-            categoryId,
-            mainImage: publishMainImage,
-            mutationRevision: { increment: 1 },
-          },
+        await this.prisma.$transaction(async (tx) => {
+          const publishedProduct = await tx.publishedProduct.upsert({
+            where: { uk_publish_task_shop: { taskId: task.id, shopId: shop.id } },
+            create: publishedData,
+            update: {
+              taskId: task.id,
+              shopId: shop.id,
+              sourceProductId: product.id,
+              platformProductId: pub.platformProductId,
+              title: optimizedTitle,
+              salePrice,
+              costPrice,
+              ...(publishedPriceSnapshot
+                ? {
+                    skuPriceSnapshot: publishedPriceSnapshot as unknown as Prisma.InputJsonValue,
+                    priceSyncedAt,
+                  }
+                : {}),
+              ...publishedInventoryData,
+              status: publishedStatus,
+              ...(publishedInventoryState
+                ? {
+                    platformStatusRaw: publishedInventoryState.status,
+                    platformCheckStatusRaw: publishedInventoryState.checkStatus,
+                    platformStatusSyncedAt: inventoryCheckedAt,
+                    platformStatusError: null,
+                  }
+                : {}),
+              categoryId,
+              mainImage: publishMainImage,
+              mutationRevision: { increment: 1 },
+            },
+          });
+          const existingInitialBinding = await tx.publishedProductSourceBinding.findUnique({
+            where: {
+              uk_published_product_source_binding_revision: {
+                publishedProductId: publishedProduct.id,
+                revision: 1,
+              },
+            },
+            select: { bindingFingerprint: true, currentSlot: true, effectiveTo: true },
+          });
+          if (existingInitialBinding) {
+            if (
+              existingInitialBinding.bindingFingerprint === sourceBinding.fingerprint &&
+              existingInitialBinding.currentSlot === 1 &&
+              existingInitialBinding.effectiveTo === null
+            ) {
+              return;
+            }
+            throw new ConflictException('已发布商品的首版货源绑定与本次发布结果冲突');
+          }
+          await tx.publishedProductSourceBinding.create({
+            data: {
+              publishedProductId: publishedProduct.id,
+              sourceProductId: product.id,
+              revision: 1,
+              currentSlot: 1,
+              effectiveFrom: task.createdAt,
+              effectiveTo: null,
+              sourceOfferId: currentProduct.productId1688,
+              sourceSupplierId,
+              sourceOnePieceDrop: currentProduct.isOnePieceDrop,
+              sourceFingerprint,
+              inventoryFingerprint: currentProduct.inventoryFingerprint,
+              inventoryVersion: currentProduct.inventoryVersion,
+              skuRoutes: sourceBinding.routes as unknown as Prisma.InputJsonValue,
+              bindingFingerprint: sourceBinding.fingerprint,
+            },
+          });
         });
         await assertPublishExecutionOwned(lease);
         const sourceAfterPublishPersist = await this.prisma.sourceProduct.findUnique({
@@ -1636,6 +1739,7 @@ export class PublishService {
     });
     if (!record) throw new NotFoundException('已发布商品不存在或目标店铺不可用');
     if (!record.platformProductId) throw new BadRequestException('平台商品 ID 不存在');
+    assertPublishedProductUsesOriginalSource(record.sourceProductId, record.task.sourceProductId);
     const unresolvedPlatformMutation = await this.prisma.productBatchItem.findFirst({
       where: {
         publishedProductId: record.id,
@@ -1785,11 +1889,19 @@ export class PublishService {
         },
         select: {
           shopId: true,
+          sourceProductId: true,
           platformProductId: true,
           status: true,
           mutationRevision: true,
+          task: { select: { sourceProductId: true } },
         },
       });
+      if (currentProduct) {
+        assertPublishedProductUsesOriginalSource(
+          currentProduct.sourceProductId,
+          currentProduct.task.sourceProductId,
+        );
+      }
       if (
         !currentProduct ||
         currentProduct.shopId !== record.shopId ||
@@ -2567,6 +2679,14 @@ function assertFullProductEditState(state: PlatformProductState): void {
   throw new ConflictException(`平台商品当前状态为 ${state.state}，不能执行完整编辑`);
 }
 
+function assertPublishedProductUsesOriginalSource(
+  sourceProductId: bigint,
+  publishTaskSourceProductId: bigint,
+): void {
+  if (sourceProductId === publishTaskSourceProductId) return;
+  throw new ConflictException('商品已完成换源，不能执行完整编辑；请使用原子标题、价格或库存操作');
+}
+
 function parseCategoryPropertyMap(value: unknown): CategoryPropertyMap | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as CategoryPropertyMap)
@@ -2756,16 +2876,26 @@ function toSummary(task: TaskWithRelations): PublishTaskSummary {
 }
 
 function assertSourceAvailable(
-  product: Pick<SourceProductForPublish, 'availability' | 'totalStock'>,
+  product: Pick<
+    SourceProductForPublish,
+    'availability' | 'totalStock' | 'supplierId' | 'isOnePieceDrop'
+  >,
 ): void {
-  if (!product.availability || product.availability === 'available') return;
-  const message =
-    product.availability === 'offline'
-      ? '1688 货源已下架，不能继续铺货'
-      : product.availability === 'out_of_stock'
-        ? '1688 货源已缺货，不能继续铺货'
-        : '1688 货源库存不可验证，不能继续铺货';
-  throw new BadRequestException(message);
+  if (product.availability && product.availability !== 'available') {
+    const message =
+      product.availability === 'offline'
+        ? '1688 货源已下架，不能继续铺货'
+        : product.availability === 'out_of_stock'
+          ? '1688 货源已缺货，不能继续铺货'
+          : '1688 货源库存不可验证，不能继续铺货';
+    throw new BadRequestException(message);
+  }
+  if (!product.supplierId?.trim()) {
+    throw new BadRequestException('1688 货源缺少供应商标识，不能安全采购');
+  }
+  if (!product.isOnePieceDrop) {
+    throw new BadRequestException('1688 货源未确认支持一件代发，不能继续铺货');
+  }
 }
 
 function storedPricingQuote(task: TaskWithRelations): PricingQuote | null {

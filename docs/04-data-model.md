@@ -191,7 +191,7 @@ erDiagram
 
 ## 3. 当前批量商品操作契约
 
-`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `online`（批量安全上架）、`offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）、`sync_inventory`（同步并核验 1688 库存）与 `cleanup`（基于订单证据的滞销安全下架）；SKU 编辑和换源仍未实现。
+`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `online`（批量安全上架）、`offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）、`sync_inventory`（同步并核验 1688 库存）、`cleanup`（基于订单证据的滞销安全下架）与 `change_source`（抖店离线安全换源）。`change_source` 只切换版本化采购绑定，不修改平台 SKU、售价或上下架状态；任意平台 SKU 编辑仍未实现。
 
 ### 3.1 `product_batch_tasks`
 
@@ -246,6 +246,18 @@ erDiagram
 - 真实环境只有在运营方验证价格、库存等详情不随买家账号变化并显式配置 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 后才允许启用；否则启动与运行时均 fail-closed。若验证结果为账号范围数据，必须新增用户级快照模型，不能继续写全局缓存。
 
 三张新表均启用 RLS，并撤销 `anon` / `authenticated` 对表和 sequence 的直接权限。权威定义见 `SourceImportTask`、`SourceImportItem`、`UserSourceProduct` 与 migration `20260804210000_add_source_imports`；该 migration 尚未应用到 staging。
+
+### 3.7 已发布商品版本化货源绑定
+
+`published_product_source_bindings` 保存已发布商品随时间变化的采购货源和稳定平台 SKU 路由。`published_products.source_product_id` 仍指向当前货源；绑定表保留历史 revision，`current_slot=1` 表示唯一当前绑定，历史记录把该列置空并写入 `effective_to`。
+
+- `published_product_id + revision` 唯一，`published_product_id + current_slot` 保证每个商品至多一个当前绑定；`effective_from / effective_to` 使用左闭右开区间匹配订单付款时间。
+- 每个 revision 固化 1688 offer、供应商、一件代发标记、源/库存指纹与版本、绑定指纹，以及 `{ platformSkuKey, sourceSpecId, sourceUnitCost, values }` 路由。`platformSkuKey` 始终是平台侧稳定 key，换源只替换其采购 spec 和成本。
+- 初次铺货与发布恢复原子创建或复用 revision 1；安全换源在 Serializable 事务内关闭旧区间、创建下一 revision，并同步更新商品当前货源、成本和库存目标。平台 SKU、售价和离线状态不在该事务中修改。
+- `order_items.source_binding_id / source_unit_cost / source_one_piece_drop` 与已有 offer/supplier/spec 字段共同构成付款时采购快照。订单同步按 `paid_at` 唯一匹配绑定；采购必须读取订单项快照，不能读取后来可能已切换的商品当前货源。
+- 库存 worker 以当前 binding 的 revision、货源和指纹做 CAS，再把稳定平台 SKU key 映射到当前 1688 spec 库存。目标货源可以包含未发布 SKU，但所有已发布路由必须非空、唯一且存在；不得用商品总库存推导未知 spec。
+
+第 40 个 migration `20260805010000_add_published_source_bindings` 会为历史已发布商品回填 revision 1，并为已有订单项回填可用的绑定/成本/一件代发快照；新表启用 RLS，`anon` / `authenticated` 对表和 sequence 均无直接权限。该 migration 尚未应用到 staging，当前账面仍为 33/40。
 
 ## 4. 核心表 Schema（历史 MySQL 设计草案）
 

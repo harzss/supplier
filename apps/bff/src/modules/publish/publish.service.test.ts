@@ -22,6 +22,8 @@ import type { PublishDraftService } from './publish-draft.service';
 
 const USER: CurrentUser = { userId: 1n, plan: 'pro' };
 const CLIENT_REQUEST_ID = '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1';
+const SOURCE_OFFER_ID = '554456348334';
+const TASK_CREATED_AT = new Date('2026-08-04T07:00:00.000Z');
 const SHOP = {
   id: 9n,
   userId: 1n,
@@ -41,7 +43,7 @@ describe('PublishService', () => {
     });
 
     const result = await fixture.service.preflight(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'preview-token',
       aiOptions: { titleOverride: '用户确认的纯棉T恤' },
@@ -73,7 +75,7 @@ describe('PublishService', () => {
     });
 
     const result = await fixture.service.preflight(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'preview-token',
       pricingStrategy: { mode: 'competitor_anchor' },
@@ -97,7 +99,7 @@ describe('PublishService', () => {
   it('runs a complete publish preflight without writes, AI or platform adapters', async () => {
     const fixture = createFixture({ authMode: 'supabase' });
     const dto = {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'preview-token',
       aiOptions: { titleOverride: '用户确认的纯棉T恤' },
@@ -145,6 +147,28 @@ describe('PublishService', () => {
     expect(fixture.publishProduct).not.toHaveBeenCalled();
   });
 
+  it('blocks publish preflight when the source cannot identify a purchasing supplier', async () => {
+    const fixture = createFixture({ supplierId: null });
+
+    const result = await fixture.service.preflight(USER, {
+      sourceProductId: SOURCE_OFFER_ID,
+      targetShopIds: ['9'],
+      pricingPreviewToken: 'preview-token',
+      aiOptions: { titleOverride: '用户确认的纯棉T恤' },
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({
+        id: 'source.availability',
+        severity: 'blocker',
+        message: '1688 货源缺少供应商标识，不能安全采购',
+      }),
+    );
+    expect(fixture.prisma.publishTask.create).not.toHaveBeenCalled();
+    expect(fixture.publishProduct).not.toHaveBeenCalled();
+  });
+
   it('aggregates independent publish blockers in one preflight response', async () => {
     const skuList = [
       { skuId: 'sku-1', specName: '白色', price: 10, stock: 10, attributes: { 颜色: '白色' } },
@@ -162,7 +186,7 @@ describe('PublishService', () => {
     });
 
     const result = await fixture.service.preflight(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'invalid-preview',
       aiOptions: { titleOverride: '全网最便宜纯棉T恤', rewriteDetail: true },
@@ -190,7 +214,7 @@ describe('PublishService', () => {
     );
 
     const result = await fixture.service.preflight(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'preview-token',
       aiOptions: { titleOverride: '用户确认的纯棉T恤' },
@@ -211,7 +235,7 @@ describe('PublishService', () => {
     );
 
     const result = await fixture.service.preflight(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'preview-token',
       aiOptions: { titleOverride: '用户确认的纯棉T恤' },
@@ -242,7 +266,7 @@ describe('PublishService', () => {
     });
 
     const result = await fixture.service.preflight(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'preview-token',
       aiOptions: { titleOverride: '用户确认的纯棉T恤' },
@@ -265,7 +289,7 @@ describe('PublishService', () => {
     fixture.prisma.sourceProduct.findUnique.mockRejectedValue(new Error('db unavailable'));
 
     const result = await fixture.service.preflight(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'preview-token',
     });
@@ -296,7 +320,7 @@ describe('PublishService', () => {
   it('revalidates authoritative checks on submit after a successful preflight', async () => {
     const fixture = createFixture();
     const dto = {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingPreviewToken: 'preview-token',
       aiOptions: { titleOverride: '用户确认的纯棉T恤' },
@@ -407,7 +431,7 @@ describe('PublishService', () => {
 
     await expect(
       fixture.service.enqueue(USER, {
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).rejects.toThrow('db unavailable');
@@ -436,7 +460,7 @@ describe('PublishService', () => {
     await expect(
       fixture.service.enqueue(USER, {
         clientRequestId: CLIENT_REQUEST_ID,
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9', '10'],
         pricingStrategy: { markupRatio: 0.6, mode: 'fixed_markup' },
         aiOptions: { rewriteTitle: true },
@@ -457,7 +481,7 @@ describe('PublishService', () => {
     await expect(
       fixture.service.enqueue(USER, {
         clientRequestId: CLIENT_REQUEST_ID,
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).rejects.toThrow('任务不存在');
@@ -485,7 +509,7 @@ describe('PublishService', () => {
     await expect(
       fixture.service.enqueue(USER, {
         clientRequestId: CLIENT_REQUEST_ID,
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
         pricingStrategy: { mode: 'fixed_markup', markupRatio: 0.6 },
         aiOptions: { rewriteTitle: true },
@@ -512,7 +536,7 @@ describe('PublishService', () => {
     await expect(
       fixture.service.enqueue(USER, {
         clientRequestId: CLIENT_REQUEST_ID,
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).resolves.toEqual({ taskId: '17', status: 'pending', queued: true, reused: true });
@@ -535,7 +559,7 @@ describe('PublishService', () => {
     await expect(
       fixture.service.enqueue(USER, {
         clientRequestId: CLIENT_REQUEST_ID,
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
         pricingStrategy: { mode: 'fixed_markup', markupRatio: 0.7 },
       }),
@@ -566,7 +590,7 @@ describe('PublishService', () => {
     await expect(
       fixture.service.create(USER, {
         clientRequestId: CLIENT_REQUEST_ID,
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).resolves.toEqual({ taskId: '17', status: 'success', queued: false, reused: true });
@@ -582,7 +606,7 @@ describe('PublishService', () => {
     await expect(
       fixture.service.enqueue(USER, {
         pricingPreviewToken: 'preview-token',
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).resolves.toEqual({ taskId: '3', status: 'pending', queued: true });
@@ -602,7 +626,7 @@ describe('PublishService', () => {
     });
     expect(fixture.pricingPreviewReceipts.assertValid).toHaveBeenCalledWith('preview-token', {
       userId: 1n,
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       pricingStrategy: undefined,
       costPrice: 10,
       sourcePricingFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -618,7 +642,7 @@ describe('PublishService', () => {
         clientRequestId: CLIENT_REQUEST_ID,
         draftRevision: 4,
         pricingPreviewToken: 'preview-token',
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).resolves.toEqual({ taskId: '3', status: 'pending', queued: true });
@@ -645,7 +669,7 @@ describe('PublishService', () => {
         clientRequestId: CLIENT_REQUEST_ID,
         draftRevision: 4,
         pricingPreviewToken: 'preview-token',
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).rejects.toThrow('draft changed');
@@ -658,7 +682,7 @@ describe('PublishService', () => {
     const pricingStrategy = { mode: 'fixed_markup' as const, markupRatio: 0.6 };
 
     await expect(
-      fixture.service.previewPricing(USER, { sourceProductId: '1688-1', pricingStrategy }),
+      fixture.service.previewPricing(USER, { sourceProductId: SOURCE_OFFER_ID, pricingStrategy }),
     ).resolves.toMatchObject({
       suggestedPrice: 16,
       pricingPreviewToken: 'preview-token',
@@ -667,7 +691,7 @@ describe('PublishService', () => {
     });
     expect(fixture.pricingPreviewReceipts.issue).toHaveBeenCalledWith({
       userId: 1n,
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       pricingStrategy,
       costPrice: 10,
       sourcePricingFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -678,7 +702,7 @@ describe('PublishService', () => {
     const fixture = createFixture();
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       aiOptions: { rewriteDetail: true },
     });
@@ -735,11 +759,118 @@ describe('PublishService', () => {
     expect(result.mainImageRequested).toBe(false);
   });
 
+  it('atomically creates and idempotently reuses the initial source binding', async () => {
+    const fixture = createFixture();
+    let activeTransaction = false;
+    fixture.prisma.$transaction.mockImplementation(
+      async (callback: (tx: typeof fixture.prisma) => Promise<unknown>) => {
+        activeTransaction = true;
+        try {
+          return await callback(fixture.prisma);
+        } finally {
+          activeTransaction = false;
+        }
+      },
+    );
+    fixture.prisma.publishedProduct.upsert.mockImplementation(async () => {
+      expect(activeTransaction).toBe(true);
+      return { id: 7n, publishedAt: new Date('2026-08-04T08:00:00.000Z') };
+    });
+    fixture.prisma.publishedProductSourceBinding.findUnique.mockImplementation(async () => {
+      expect(activeTransaction).toBe(true);
+      return null;
+    });
+    fixture.prisma.publishedProductSourceBinding.create.mockImplementation(async () => {
+      expect(activeTransaction).toBe(true);
+      return { id: 81n };
+    });
+
+    await expect(
+      fixture.service.create(USER, {
+        sourceProductId: SOURCE_OFFER_ID,
+        targetShopIds: ['9'],
+      }),
+    ).resolves.toMatchObject({ status: 'success' });
+
+    expect(fixture.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function));
+    expect(fixture.prisma.publishedProductSourceBinding.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        publishedProductId: 7n,
+        sourceProductId: 2n,
+        revision: 1,
+        currentSlot: 1,
+        effectiveFrom: TASK_CREATED_AT,
+        effectiveTo: null,
+        sourceOfferId: SOURCE_OFFER_ID,
+        sourceSupplierId: 'supplier-1',
+        sourceOnePieceDrop: true,
+        inventoryFingerprint: 'f'.repeat(64),
+        inventoryVersion: 4,
+        skuRoutes: [
+          {
+            platformSkuKey: 'default',
+            sourceSpecId: null,
+            sourceSpecRequired: false,
+            sourceUnitCost: 10,
+            values: [],
+          },
+        ],
+        sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        bindingFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    });
+
+    const createdBinding =
+      fixture.prisma.publishedProductSourceBinding.create.mock.calls[0]![0].data;
+    fixture.prisma.publishedProductSourceBinding.findUnique.mockResolvedValue({
+      bindingFingerprint: createdBinding.bindingFingerprint,
+      currentSlot: 1,
+      effectiveTo: null,
+    });
+
+    await expect(
+      fixture.service.create(USER, {
+        sourceProductId: SOURCE_OFFER_ID,
+        targetShopIds: ['9'],
+      }),
+    ).resolves.toMatchObject({ status: 'success' });
+    expect(fixture.prisma.publishedProductSourceBinding.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      'has a different fingerprint',
+      { bindingFingerprint: '0'.repeat(64), currentSlot: 1, effectiveTo: null },
+    ],
+    [
+      'has already become historical',
+      {
+        bindingFingerprint: '0'.repeat(64),
+        currentSlot: null,
+        effectiveTo: new Date('2026-08-04T09:00:00.000Z'),
+      },
+    ],
+  ])('rolls back a publish retry when revision 1 %s', async (_label, existingBinding) => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProductSourceBinding.findUnique.mockResolvedValue(existingBinding);
+
+    await expect(
+      fixture.service.create(USER, {
+        sourceProductId: SOURCE_OFFER_ID,
+        targetShopIds: ['9'],
+      }),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      results: [expect.objectContaining({ error: '已发布商品的首版货源绑定与本次发布结果冲突' })],
+    });
+    expect(fixture.prisma.publishedProductSourceBinding.create).not.toHaveBeenCalled();
+  });
+
   it('publishes the title explicitly selected by the user without regenerating it', async () => {
     const fixture = createFixture();
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       aiOptions: { titleOverride: '用户选择的纯棉T恤', rewriteTitle: true },
     });
@@ -767,7 +898,7 @@ describe('PublishService', () => {
     });
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
     });
 
@@ -813,7 +944,7 @@ describe('PublishService', () => {
 
     await expect(
       fixture.service.create(USER, {
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).resolves.toMatchObject({ status: 'success' });
@@ -847,7 +978,7 @@ describe('PublishService', () => {
     });
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
     });
 
@@ -861,7 +992,7 @@ describe('PublishService', () => {
 
     await expect(
       fixture.service.enqueue(USER, {
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
         aiOptions: { titleOverride: '全网最便宜纯棉T恤' },
       }),
@@ -874,7 +1005,7 @@ describe('PublishService', () => {
 
     await expect(
       fixture.service.enqueue(USER, {
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).rejects.toThrow('部分目标店铺不可用或不是销售店铺');
@@ -886,7 +1017,7 @@ describe('PublishService', () => {
 
     await expect(
       fixture.service.enqueue(USER, {
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).rejects.toThrow('部分目标店铺不可用或不是销售店铺');
@@ -909,7 +1040,7 @@ describe('PublishService', () => {
     });
 
     await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
     });
 
@@ -925,7 +1056,7 @@ describe('PublishService', () => {
     fixture.adapters.create.mockReturnValue({ publishProduct: fixture.publishProduct });
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
     });
 
@@ -938,7 +1069,7 @@ describe('PublishService', () => {
     const fixture = createFixture({ mainImage: 'https://img.example/main.jpg' });
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       aiOptions: {
         removeWatermark: true,
@@ -1000,7 +1131,7 @@ describe('PublishService', () => {
     });
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       aiOptions: { removeWatermark: true },
     });
@@ -1019,7 +1150,7 @@ describe('PublishService', () => {
     const fixture = createFixture();
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingStrategy: {
         mode: 'profit_target',
@@ -1082,7 +1213,8 @@ describe('PublishService', () => {
     });
     const sourceProduct = {
       id: 2n,
-      productId1688: '1688-1',
+      productId1688: SOURCE_OFFER_ID,
+      supplierId: 'supplier-1',
       title: '夏季轻薄纯棉短袖上衣',
       price: 10,
       categoryPath: '女装/T恤',
@@ -1099,14 +1231,12 @@ describe('PublishService', () => {
       score: null,
     };
     fixture.prisma.sourceProduct.findUnique.mockResolvedValueOnce(sourceProduct).mockResolvedValue({
-      price: 10,
+      ...sourceProduct,
       skuList: skuList.map((sku, index) => ({ ...sku, stock: index === 0 ? 7 : 3 })),
-      inventoryFingerprint: 'f'.repeat(64),
-      inventoryVersion: 4,
     });
 
     const result = await fixture.service.create(USER, {
-      sourceProductId: '1688-1',
+      sourceProductId: SOURCE_OFFER_ID,
       targetShopIds: ['9'],
       pricingStrategy: {
         mode: 'fixed_markup',
@@ -1157,6 +1287,26 @@ describe('PublishService', () => {
         }),
       }),
     );
+    expect(fixture.prisma.publishedProductSourceBinding.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        skuRoutes: [
+          {
+            platformSkuKey: 'sku-1',
+            sourceSpecId: 'sku-1',
+            sourceSpecRequired: true,
+            sourceUnitCost: 10,
+            values: ['奶白', 'M'],
+          },
+          {
+            platformSkuKey: 'sku-2',
+            sourceSpecId: 'sku-2',
+            sourceSpecRequired: true,
+            sourceUnitCost: 12,
+            values: ['黑色', 'L'],
+          },
+        ],
+      }),
+    });
     expect(result.skuCount).toBe(2);
     expect(result.skuDimensions).toEqual(['颜色', '尺码']);
   });
@@ -1183,7 +1333,7 @@ describe('PublishService', () => {
 
     await expect(
       fixture.service.enqueue(USER, {
-        sourceProductId: '1688-1',
+        sourceProductId: SOURCE_OFFER_ID,
         targetShopIds: ['9'],
       }),
     ).rejects.toThrow('请先确认 douyin SKU 规格映射');
@@ -1212,7 +1362,8 @@ describe('PublishService', () => {
       user: { id: 1n, plan: 'pro' },
       sourceProduct: {
         id: 2n,
-        productId1688: '1688-1',
+        productId1688: SOURCE_OFFER_ID,
+        supplierId: 'supplier-1',
         title: '夏季轻薄纯棉短袖上衣',
         price: 10,
         categoryPath: '女装/T恤',
@@ -1262,7 +1413,8 @@ describe('PublishService', () => {
       user: { id: 1n, plan: 'pro' },
       sourceProduct: {
         id: 2n,
-        productId1688: '1688-1',
+        productId1688: SOURCE_OFFER_ID,
+        supplierId: 'supplier-1',
         title: '夏季轻薄纯棉短袖上衣',
         price: 10,
         categoryPath: '女装/T恤',
@@ -1373,7 +1525,12 @@ describe('PublishService', () => {
     fixture.prisma.publishTask.findUnique.mockResolvedValue(
       queuedTaskRecord({ aiOptions: { rewriteTitle: false } }),
     );
-    fixture.prisma.sourceProduct.findUnique.mockResolvedValue({ price: 12 });
+    fixture.prisma.sourceProduct.findUnique.mockResolvedValue({
+      price: 12,
+      supplierId: 'supplier-1',
+      isOnePieceDrop: true,
+      availability: 'available',
+    });
 
     await expect(fixture.service.executeQueued(3n)).rejects.toMatchObject({ status: 409 });
 
@@ -1492,7 +1649,8 @@ describe('PublishService', () => {
       user: { id: 1n, plan: 'pro' },
       sourceProduct: {
         id: 2n,
-        productId1688: '1688-1',
+        productId1688: SOURCE_OFFER_ID,
+        supplierId: 'supplier-1',
         title: '夏季轻薄纯棉短袖上衣',
         price: 10,
         categoryPath: '女装/T恤',
@@ -1638,6 +1796,43 @@ describe('PublishService', () => {
         }),
       }),
     );
+  });
+
+  it('blocks a full product edit after the published product has changed source', async () => {
+    const fixture = createFixture();
+    const record = publishedProductRecord();
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue({
+      ...record,
+      sourceProductId: 3n,
+      sourceProduct: { ...record.sourceProduct, id: 3n },
+    });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '换源后完整编辑商品' }),
+    ).rejects.toThrow('请使用原子标题、价格或库存操作');
+
+    expect(fixture.prisma.productBatchItem.findFirst).not.toHaveBeenCalled();
+    expect(fixture.platformProductLocks.acquire).not.toHaveBeenCalled();
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the original publish source after taking the product lock', async () => {
+    const fixture = createFixture();
+    const initial = publishedProductRecord();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValueOnce(initial).mockResolvedValueOnce({
+      ...initial,
+      sourceProductId: 3n,
+      sourceProduct: { ...initial.sourceProduct, id: 3n },
+    });
+
+    await expect(
+      fixture.service.updatePublishedProduct(USER, '7', { title: '等待商品锁时已换源' }),
+    ).rejects.toThrow('请使用原子标题、价格或库存操作');
+
+    expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);
+    expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
+    expect(fixture.updateProduct).not.toHaveBeenCalled();
   });
 
   it('rechecks unresolved title mutations after taking the product lock', async () => {
@@ -2105,7 +2300,7 @@ function idempotentTaskRecord(overrides: Record<string, unknown> = {}) {
     status: 'pending',
     aiOptions: null,
     pricingStrategy: null,
-    sourceProduct: { productId1688: '1688-1', price: 10 },
+    sourceProduct: { productId1688: SOURCE_OFFER_ID, price: 10 },
     job: null,
     ...overrides,
   };
@@ -2114,7 +2309,8 @@ function idempotentTaskRecord(overrides: Record<string, unknown> = {}) {
 function queuedTaskRecord(overrides: Record<string, unknown> = {}) {
   const sourceProduct = {
     id: 2n,
-    productId1688: '1688-1',
+    productId1688: SOURCE_OFFER_ID,
+    supplierId: 'supplier-1',
     title: '夏季轻薄纯棉短袖上衣',
     price: 10,
     categoryPath: '女装/T恤',
@@ -2200,6 +2396,7 @@ function publishedProductRecord() {
     mainImage: 'https://img.example/main.jpg',
     shop: SHOP,
     task: {
+      sourceProductId: 2n,
       pricingStrategy: { mode: 'fixed_markup', markupRatio: 0.5 },
       skuSnapshot: {
         douyin: {
@@ -2219,7 +2416,8 @@ function publishedProductRecord() {
     },
     sourceProduct: {
       id: 2n,
-      productId1688: '1688-1',
+      productId1688: SOURCE_OFFER_ID,
+      supplierId: 'supplier-1',
       title: '夏季轻薄纯棉短袖上衣',
       price: 10,
       categoryPath: '女装/T恤',
@@ -2248,6 +2446,7 @@ function createFixture(
     attributes?: unknown;
     shops?: unknown[];
     authMode?: 'demo' | 'supabase';
+    supplierId?: string | null;
   } = {},
 ) {
   const prisma = {
@@ -2255,7 +2454,8 @@ function createFixture(
     sourceProduct: {
       findUnique: vi.fn().mockResolvedValue({
         id: 2n,
-        productId1688: '1688-1',
+        productId1688: SOURCE_OFFER_ID,
+        supplierId: options.supplierId === undefined ? 'supplier-1' : options.supplierId,
         title: '夏季轻薄纯棉短袖上衣',
         price: 10,
         categoryPath: '女装/T恤',
@@ -2287,7 +2487,11 @@ function createFixture(
       update: vi.fn().mockResolvedValue({}),
     },
     publishTask: {
-      create: vi.fn().mockImplementation(({ data }) => Promise.resolve({ id: 3n, ...data })),
+      create: vi
+        .fn()
+        .mockImplementation(({ data }) =>
+          Promise.resolve({ id: 3n, createdAt: TASK_CREATED_AT, ...data }),
+        ),
       count: vi.fn().mockResolvedValue(0),
       findFirst: vi.fn().mockResolvedValue(null),
       findMany: vi.fn().mockResolvedValue([]),
@@ -2298,10 +2502,17 @@ function createFixture(
       create: vi.fn().mockResolvedValue({ id: 7n }),
     },
     publishedProduct: {
-      upsert: vi.fn().mockResolvedValue({}),
+      upsert: vi.fn().mockResolvedValue({
+        id: 7n,
+        publishedAt: new Date('2026-08-04T08:00:00.000Z'),
+      }),
       findFirst: vi.fn().mockResolvedValue(null),
       update: vi.fn().mockResolvedValue({}),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    publishedProductSourceBinding: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      create: vi.fn().mockResolvedValue({ id: 81n }),
     },
     productBatchItem: {
       findFirst: vi.fn().mockResolvedValue(null),

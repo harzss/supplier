@@ -25,6 +25,7 @@ export const PRODUCT_BATCH_ACTIONS = [
   'edit_title',
   'edit_price',
   'sync_inventory',
+  'change_source',
   'cleanup',
 ] as const;
 export type SupportedProductBatchAction = (typeof PRODUCT_BATCH_ACTIONS)[number];
@@ -57,6 +58,21 @@ export class ProductBatchPriceTargetDto {
   @MaxLength(16)
   @Matches(/^\d{1,7}(?:\.\d{1,2})?$/)
   targetStartPrice!: string;
+}
+
+export class ProductBatchSourceTargetDto {
+  @IsString()
+  @IsPositiveInt64String()
+  publishedProductId!: string;
+
+  @IsInt()
+  @Min(1)
+  expectedMutationRevision!: number;
+
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^[1-9]\d{0,31}$/)
+  targetSourceProductId!: string;
 }
 
 export class ProductBatchPriceRuleDto {
@@ -117,6 +133,16 @@ export class CreateProductBatchPreviewDto {
   @ValidateNested()
   @Type(() => ProductBatchPriceRuleDto)
   priceRule?: ProductBatchPriceRuleDto;
+
+  @ValidateIf((value: CreateProductBatchPreviewDto) => value.action === 'change_source')
+  @IsDefined()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(PRODUCT_BATCH_MAX_ITEMS)
+  @ArrayUnique((target: ProductBatchSourceTargetDto) => target.publishedProductId)
+  @ValidateNested({ each: true })
+  @Type(() => ProductBatchSourceTargetDto)
+  sourceTargets?: ProductBatchSourceTargetDto[];
 }
 
 export class ExecuteProductBatchDto {

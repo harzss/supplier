@@ -33,6 +33,9 @@ function orderItem(id: bigint, supplier: string, offerId: string, platformItemId
     sourceOfferId: offerId,
     sourceSpecId: `spec-${id}`,
     sourceSpecRequired: true,
+    sourceBindingId: null,
+    sourceUnitCost: null,
+    sourceOnePieceDrop: null,
     quantity: 1,
     platformOrderItemId: platformItemId,
     afterSaleStatusRaw: null,
@@ -107,6 +110,16 @@ describe('Alibaba1688PurchaseService', () => {
       orderItem(11n, 'supplier-a', '111111', 'sku-order-1'),
       orderItem(12n, 'supplier-b', '222222', 'sku-order-2'),
     ];
+    Object.assign(items[0]!, {
+      // The FK may be cleared only after a historical binding is removed; frozen facts must remain authoritative.
+      sourceBindingId: null,
+      sourceUnitCost: 7.25,
+      sourceOnePieceDrop: true,
+      publishedProduct: {
+        costPrice: 99,
+        sourceProduct: { isOnePieceDrop: false },
+      },
+    });
     const purchaseOrderUpsert = vi.fn(async ({ create }) => ({
       ...create,
       id: create.supplierKey === 'supplier-a' ? 101n : 102n,
@@ -193,6 +206,11 @@ describe('Alibaba1688PurchaseService', () => {
       expect(body.get('outOrderId')).toMatch(/^supplier-5-supplier-[ab]$/);
     }
     expect(purchaseOrderItemUpsert).toHaveBeenCalledTimes(2);
+    expect(purchaseOrderItemUpsert).toHaveBeenCalledWith({
+      where: { orderItemId: 11n },
+      create: expect.objectContaining({ orderItemId: 11n, unitCost: 7.25 }),
+      update: expect.objectContaining({ unitCost: 7.25 }),
+    });
     expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
       where: { id: 101n, OR: [{ orderId1688: null }, { orderId1688: '900001' }] },
       data: expect.objectContaining({ orderId1688: '900001', status: 'awaiting_payment' }),

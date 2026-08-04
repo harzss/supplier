@@ -5,10 +5,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
 import type { EntitlementService } from '../entitlement/entitlement.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
+import { buildSkuSuggestion } from '../sku/sku-normalizer';
 import type { PlatformAdapterFactory } from '../shop/platform-adapter.factory';
 import type { ShopTokenService } from '../shop/shop-token.service';
 import type { PlatformProductLockService } from './platform-product-lock.service';
 import { ProductBatchService, type ProductBatchExecutionRecord } from './product-batch.service';
+import { sourceBindingFingerprint, sourceBindingRoutesFingerprint } from './source-binding';
 
 const NOW = new Date('2026-08-04T08:00:00.000Z');
 const CLIENT_REQUEST_ID = '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1';
@@ -103,6 +105,168 @@ describe('ProductBatchService', () => {
         },
       ],
     });
+  });
+
+  it('exposes source-change eligibility only for a safely offline product with one current binding', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(2);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({ status: 'offline', shop: cleanupShop(), task: { skuSnapshot: null } }),
+      publishedProduct({
+        id: 12n,
+        status: 'offline',
+        shop: cleanupShop(),
+        task: { skuSnapshot: null },
+        sourceBindings: [],
+      }),
+    ]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'offline' }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          publishedProductId: '11',
+          sourceChangeEligible: true,
+          sourceChangeReason: null,
+          currentSourceRouteCount: 2,
+        },
+        {
+          publishedProductId: '12',
+          sourceChangeEligible: false,
+          sourceChangeReason: '商品当前货源绑定缺失或重复，不能安全换源',
+          currentSourceRouteCount: 0,
+        },
+      ],
+    });
+  });
+
+  it('builds an offline source-change preview with stable platform SKU routes', async () => {
+    const fixture = createFixture();
+    const product = publishedProduct({ status: 'offline', shop: cleanupShop() });
+    const target = targetSourceProduct();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([product]);
+    fixture.prisma.sourceProduct.findMany.mockResolvedValue([target]);
+    fixture.prisma.productBatchTask.create.mockImplementation(async ({ data }: any) =>
+      taskRecord({
+        action: 'change_source',
+        requestFingerprint: data.requestFingerprint,
+        items: data.items.create.map((item: any) =>
+          taskItem({ ...item, publishedProduct: product }),
+        ),
+      }),
+    );
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'change_source',
+        publishedProductIds: ['11'],
+        sourceTargets: [
+          {
+            publishedProductId: '11',
+            expectedMutationRevision: 1,
+            targetSourceProductId: '16880002',
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({
+      action: 'change_source',
+      items: [
+        {
+          status: 'pending',
+          beforeStatus: 'offline',
+          desiredStatus: 'offline',
+          beforeSourceProductId: '16880001',
+          desiredSourceProductId: '16880002',
+          beforeSourceTitle: '旧 1688 货源',
+          desiredSourceTitle: '新 1688 货源',
+          sourceRouteCount: 2,
+          sourceCostRange: [11, 13],
+        },
+      ],
+    });
+
+    const desired =
+      fixture.prisma.productBatchTask.create.mock.calls[0]![0].data.items.create[0].desiredSnapshot;
+    expect(desired.sourceRoutes).toEqual([
+      expect.objectContaining({ platformSkuKey: 'sku-a', sourceSpecId: 'new-white' }),
+      expect.objectContaining({ platformSkuKey: 'sku-b', sourceSpecId: 'new-black' }),
+    ]);
+  });
+
+  it('rejects source change when target SKU values cannot map one-to-one', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({ status: 'offline', shop: cleanupShop() }),
+    ]);
+    fixture.prisma.sourceProduct.findMany.mockResolvedValue([
+      targetSourceProduct({
+        skuList: [
+          {
+            skuId: 'new-red',
+            specName: '颜色：红色',
+            price: 11,
+            stock: 8,
+            attributes: { 颜色: '红色' },
+          },
+          {
+            skuId: 'new-black',
+            specName: '颜色：黑色',
+            price: 13,
+            stock: 12,
+            attributes: { 颜色: '黑色' },
+          },
+        ],
+      }),
+    ]);
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'change_source',
+        publishedProductIds: ['11'],
+        sourceTargets: [
+          {
+            publishedProductId: '11',
+            expectedMutationRevision: 1,
+            targetSourceProductId: '16880002',
+          },
+        ],
+      }),
+    ).rejects.toThrow('目标货源 SKU 规格与平台商品不能一一对应');
+
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a source-change preview when the target has no supplier identifier', async () => {
+    const fixture = createFixture();
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({ status: 'offline', shop: cleanupShop() }),
+    ]);
+    fixture.prisma.sourceProduct.findMany.mockResolvedValue([
+      targetSourceProduct({ supplierId: null }),
+    ]);
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'change_source',
+        publishedProductIds: ['11'],
+        sourceTargets: [
+          {
+            publishedProductId: '11',
+            expectedMutationRevision: 1,
+            targetSourceProductId: '16880002',
+          },
+        ],
+      }),
+    ).rejects.toThrow('目标 1688 货源缺少供应商标识，不能安全采购');
+
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
   });
 
   it('fails closed every candidate action when the raw platform status says deleted', async () => {
@@ -216,6 +380,68 @@ describe('ProductBatchService', () => {
           onlineReason: '存在结果待核验的上架操作，请先在原批量任务核验',
           onlineVerificationTaskId: '42',
           onlineVerificationItemId: '52',
+        },
+      ],
+    });
+  });
+
+  it('keeps stable platform SKU keys when preparing inventory after a source change', async () => {
+    const fixture = createFixture();
+    const target = targetSourceProduct();
+    fixture.prisma.publishedProduct.count.mockResolvedValue(1);
+    fixture.prisma.publishedProduct.findMany.mockResolvedValue([
+      publishedProduct({
+        status: 'offline',
+        sourceProductId: 32n,
+        sourceProduct: target,
+        sourceBindings: [
+          currentSourceBinding({
+            id: 72n,
+            sourceProductId: 32n,
+            revision: 2,
+            sourceOfferId: '16880002',
+            skuRoutes: [
+              {
+                platformSkuKey: 'sku-a',
+                sourceSpecId: 'new-white',
+                sourceSpecRequired: true,
+                sourceUnitCost: 11,
+                values: ['白色'],
+              },
+              {
+                platformSkuKey: 'sku-b',
+                sourceSpecId: 'new-black',
+                sourceSpecRequired: true,
+                sourceUnitCost: 13,
+                values: ['黑色'],
+              },
+            ],
+            bindingFingerprint: 'd'.repeat(64),
+          }),
+        ],
+        task: {
+          skuSnapshot: {
+            douyin: {
+              skus: [
+                { sourceSkuId: 'sku-a', stock: 5 },
+                { sourceSkuId: 'sku-b', stock: 8 },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+
+    await expect(
+      fixture.service.listCandidates(USER, { page: 1, pageSize: 50, status: 'offline' }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          onlineEligible: true,
+          onlineReason: null,
+          sourceTotalStock: 20,
+          sourceSkuCount: 2,
+          sourceInventoryVersion: 8,
         },
       ],
     });
@@ -392,6 +618,47 @@ describe('ProductBatchService', () => {
         clientRequestId: CLIENT_REQUEST_ID,
         action: 'offline',
         publishedProductIds: ['12'],
+      }),
+    ).rejects.toThrow('该请求标识已用于不同的批量操作');
+  });
+
+  it('binds source-change replay identity to the exact target offer and product revision', async () => {
+    const fixture = createFixture();
+    const sourceTargets = [
+      {
+        publishedProductId: '11',
+        expectedMutationRevision: 3,
+        targetSourceProductId: '16880002',
+      },
+    ];
+    fixture.prisma.productBatchTask.findUnique.mockResolvedValue(
+      taskRecord({
+        action: 'change_source',
+        requestFingerprint: fingerprint(
+          'change_source',
+          ['11'],
+          undefined,
+          undefined,
+          sourceTargets,
+        ),
+        items: [],
+      }),
+    );
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'change_source',
+        publishedProductIds: ['11'],
+        sourceTargets,
+      }),
+    ).resolves.toMatchObject({ action: 'change_source' });
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'change_source',
+        publishedProductIds: ['11'],
+        sourceTargets: [{ ...sourceTargets[0]!, targetSourceProductId: '16880003' }],
       }),
     ).rejects.toThrow('该请求标识已用于不同的批量操作');
   });
@@ -4280,6 +4547,120 @@ describe('ProductBatchService', () => {
     expect(syncInventory).not.toHaveBeenCalled();
   });
 
+  it('switches only the local versioned source binding after two stable offline reads', async () => {
+    const fixture = createFixture();
+    const item = sourceChangeExecutionRecord();
+    const target = targetSourceProduct();
+    fixture.prepareExecution(item);
+    fixture.prisma.sourceProduct.findFirst.mockResolvedValue(target);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(2);
+    expect(fixture.adapter.onlineProduct).not.toHaveBeenCalled();
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
+    expect(fixture.adapter.updateProductTitle).not.toHaveBeenCalled();
+    expect(fixture.adapter.updateProductPrice).not.toHaveBeenCalled();
+    expect(fixture.adapter.syncInventory).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProductSourceBinding.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 71n, revision: 1, currentSlot: 1 }),
+        data: expect.objectContaining({ currentSlot: null, effectiveTo: expect.any(Date) }),
+      }),
+    );
+    expect(fixture.prisma.publishedProductSourceBinding.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          publishedProductId: 11n,
+          sourceProductId: 32n,
+          revision: 2,
+          currentSlot: 1,
+          sourceOfferId: '16880002',
+        }),
+      }),
+    );
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 11n,
+          status: 'offline',
+          sourceProductId: 31n,
+          mutationRevision: 1,
+        }),
+        data: expect.objectContaining({
+          sourceProductId: 32n,
+          costPrice: 11,
+          mutationRevision: { increment: 1 },
+          inventorySyncStatus: 'pending',
+          inventoryTargetFingerprint: 'e'.repeat(64),
+          inventoryTargetVersion: 8,
+        }),
+      }),
+    );
+  });
+
+  it('does not change the source when the platform is not stably offline', async () => {
+    const fixture = createFixture();
+    const item = sourceChangeExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('online'));
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '平台未连续确认商品处于下架状态',
+    );
+
+    expect(fixture.prisma.publishedProductSourceBinding.updateMany).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProductSourceBinding.create).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does not switch the binding when the target loses its supplier identifier', async () => {
+    const fixture = createFixture();
+    const item = sourceChangeExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.prisma.sourceProduct.findFirst.mockResolvedValue(
+      targetSourceProduct({ supplierId: null }),
+    );
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'));
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '目标 1688 货源缺少供应商标识，不能安全采购',
+    );
+
+    expect(fixture.prisma.publishedProductSourceBinding.updateMany).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProductSourceBinding.create).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('reconfirms two stable offline reads before retrying a serialization conflict', async () => {
+    const fixture = createFixture();
+    const item = sourceChangeExecutionRecord();
+    fixture.prepareExecution(item);
+    fixture.prisma.sourceProduct.findFirst.mockResolvedValue(targetSourceProduct());
+    fixture.prisma.$transaction.mockRejectedValueOnce({ code: 'P2034' });
+    fixture.adapter.getProductState
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('offline'))
+      .mockResolvedValueOnce(platformState('online'));
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '并发重试前平台未连续确认商品下架',
+    );
+
+    expect(fixture.adapter.getProductState).toHaveBeenCalledTimes(4);
+    expect(fixture.prisma.$transaction).toHaveBeenCalledOnce();
+    expect(fixture.prisma.publishedProductSourceBinding.updateMany).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProductSourceBinding.create).not.toHaveBeenCalled();
+  });
+
   it('stops before calling the platform when the product revision changed after preview', async () => {
     const fixture = createFixture();
     const claimed = executionRecord();
@@ -4340,7 +4721,17 @@ function createFixture(configOverrides: Record<string, string> = {}) {
       findUnique: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    publishedProductSourceBinding: {
+      create: vi.fn().mockResolvedValue({
+        id: 72n,
+        revision: 2,
+        bindingFingerprint: 'd'.repeat(64),
+      }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     sourceProduct: {
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn().mockResolvedValue({
         inventoryFingerprint: 'b'.repeat(64),
         inventoryVersion: 4,
@@ -4633,6 +5024,79 @@ function onlineExecutionRecord(overrides: Record<string, unknown> = {}) {
   } as unknown as ProductBatchExecutionRecord;
 }
 
+function sourceChangeExecutionRecord(overrides: Record<string, unknown> = {}) {
+  const record = executionRecord();
+  const target = targetSourceProduct();
+  const targetSuggestion = buildSkuSuggestion(target.skuList, Number(target.price));
+  const targetRoutes = [
+    {
+      platformSkuKey: 'sku-a',
+      sourceSpecId: 'new-white',
+      sourceSpecRequired: true,
+      sourceUnitCost: 11,
+      values: ['白色'],
+    },
+    {
+      platformSkuKey: 'sku-b',
+      sourceSpecId: 'new-black',
+      sourceSpecRequired: true,
+      sourceUnitCost: 13,
+      values: ['黑色'],
+    },
+  ];
+  const bindingFingerprint = sourceBindingFingerprint({
+    sourceProductId: target.id,
+    sourceOfferId: target.productId1688,
+    sourceSupplierId: target.supplierId,
+    sourceOnePieceDrop: target.isOnePieceDrop,
+    sourceFingerprint: targetSuggestion.sourceFingerprint,
+    inventoryFingerprint: target.inventoryFingerprint,
+    inventoryVersion: target.inventoryVersion,
+    skuRoutes: targetRoutes,
+  });
+  const product = publishedProduct({
+    status: 'offline',
+    shop: cleanupShop(),
+    task: { userId: 1n, skuSnapshot: null },
+  });
+  return {
+    ...record,
+    beforeSnapshot: {
+      status: 'offline',
+      platformProductId: '998877',
+      shopId: '21',
+      mutationRevision: 1,
+      sourceProductDatabaseId: '31',
+      sourceProductId: '16880001',
+      sourceTitle: '旧 1688 货源',
+      sourceBindingId: '71',
+      sourceBindingRevision: 1,
+      sourceBindingFingerprint: 'c'.repeat(64),
+      sourceRoutesFingerprint: sourceBindingRoutesFingerprint(currentSourceRoutes()),
+      sourceRoutes: currentSourceRoutes(),
+    },
+    desiredSnapshot: {
+      status: 'offline',
+      sourceProductDatabaseId: '32',
+      sourceProductId: '16880002',
+      sourceTitle: '新 1688 货源',
+      sourceSupplierId: 'supplier-new',
+      sourceOnePieceDrop: true,
+      sourceFingerprint: targetSuggestion.sourceFingerprint,
+      inventoryFingerprint: 'e'.repeat(64),
+      inventoryVersion: 8,
+      sourceSyncedAt: NOW.toISOString(),
+      sourceBindingRevision: 2,
+      sourceBindingFingerprint: bindingFingerprint,
+      sourceRoutesFingerprint: sourceBindingRoutesFingerprint(targetRoutes),
+      sourceRoutes: targetRoutes,
+    },
+    task: { ...record.task, action: 'change_source' },
+    publishedProduct: product,
+    ...overrides,
+  } as unknown as ProductBatchExecutionRecord;
+}
+
 function unknownOnlineExecutionRecord(
   onlineWriteStartedAt: string,
   overrides: Record<string, unknown> = {},
@@ -4797,6 +5261,91 @@ function platformTitle(
   };
 }
 
+function currentSourceRoutes() {
+  return [
+    {
+      platformSkuKey: 'sku-a',
+      sourceSpecId: 'sku-a',
+      sourceSpecRequired: true,
+      sourceUnitCost: 10,
+      values: ['白色'],
+    },
+    {
+      platformSkuKey: 'sku-b',
+      sourceSpecId: 'sku-b',
+      sourceSpecRequired: true,
+      sourceUnitCost: 12,
+      values: ['黑色'],
+    },
+  ];
+}
+
+function currentSourceBinding(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 71n,
+    publishedProductId: 11n,
+    sourceProductId: 31n,
+    revision: 1,
+    currentSlot: 1,
+    effectiveFrom: NOW,
+    effectiveTo: null,
+    sourceOfferId: '16880001',
+    sourceSupplierId: 'supplier-old',
+    sourceOnePieceDrop: true,
+    sourceFingerprint: 'a'.repeat(64),
+    inventoryFingerprint: 'b'.repeat(64),
+    inventoryVersion: 4,
+    skuRoutes: currentSourceRoutes(),
+    bindingFingerprint: 'c'.repeat(64),
+    createdAt: NOW,
+    ...overrides,
+  };
+}
+
+function targetSourceProduct(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 32n,
+    productId1688: '16880002',
+    supplierId: 'supplier-new',
+    title: '新 1688 货源',
+    price: 11,
+    priceMin: 11,
+    priceMax: 13,
+    mainImage: null,
+    detailImages: null,
+    categoryPath: null,
+    categoryL1: null,
+    categoryL2: null,
+    skuList: [
+      {
+        skuId: 'new-white',
+        specName: '颜色：白色',
+        price: 11,
+        stock: 8,
+        attributes: { 颜色: '白色' },
+      },
+      {
+        skuId: 'new-black',
+        specName: '颜色：黑色',
+        price: 13,
+        stock: 12,
+        attributes: { 颜色: '黑色' },
+      },
+    ],
+    attributes: null,
+    monthlySold: 0,
+    isCrossBorder: false,
+    isOnePieceDrop: true,
+    availability: 'available',
+    totalStock: 20,
+    inventoryFingerprint: 'e'.repeat(64),
+    inventoryVersion: 8,
+    availabilityChangedAt: NOW,
+    syncedAt: NOW,
+    ...overrides,
+  };
+}
+
 function publishedProduct(overrides: Record<string, unknown> = {}) {
   return {
     id: 11n,
@@ -4838,16 +5387,34 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
     sourceProduct: {
       id: 31n,
       productId1688: '16880001',
+      supplierId: 'supplier-old',
+      title: '旧 1688 货源',
+      price: 10,
       availability: 'available',
+      isOnePieceDrop: true,
       mainImage: null,
       totalStock: 20,
       inventoryFingerprint: 'b'.repeat(64),
       inventoryVersion: 4,
       skuList: [
-        { skuId: 'sku-a', stock: 7 },
-        { skuId: 'sku-b', stock: 13 },
+        {
+          skuId: 'sku-a',
+          specName: '颜色：白色',
+          price: 10,
+          stock: 7,
+          attributes: { 颜色: '白色' },
+        },
+        {
+          skuId: 'sku-b',
+          specName: '颜色：黑色',
+          price: 12,
+          stock: 13,
+          attributes: { 颜色: '黑色' },
+        },
       ],
+      syncedAt: NOW,
     },
+    sourceBindings: [currentSourceBinding()],
     ...overrides,
   };
 }
@@ -4901,6 +5468,11 @@ function fingerprint(
     expectedMutationRevision: number;
     targetTitle: string;
   }>,
+  sourceTargets?: Array<{
+    publishedProductId: string;
+    expectedMutationRevision: number;
+    targetSourceProductId: string;
+  }>,
 ): string {
   return createHash('sha256')
     .update(
@@ -4915,6 +5487,13 @@ function fingerprint(
             }
           : {}),
         ...(priceRule ? { priceRule } : {}),
+        ...(sourceTargets
+          ? {
+              sourceTargets: [...sourceTargets].sort((left, right) =>
+                left.publishedProductId.localeCompare(right.publishedProductId),
+              ),
+            }
+          : {}),
       }),
     )
     .digest('hex');

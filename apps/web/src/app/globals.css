@@ -2311,6 +2311,15 @@ button:not(:disabled),
   background: var(--danger-soft);
 }
 
+.batch-source-target-field,
+.batch-source-target-field input {
+  min-height: 2.75rem;
+}
+
+.batch-mobile-field-label {
+  display: none;
+}
+
 .batch-field-error {
   display: block;
   margin-top: 0.24rem;
@@ -3354,6 +3363,71 @@ button:not(:disabled),
   .batch-inline-action {
     min-height: 2.75rem;
     font-size: 0.75rem;
+  }
+
+  .batch-source-target-table {
+    min-width: 0;
+    table-layout: auto;
+  }
+
+  .batch-source-target-table thead {
+    display: none;
+  }
+
+  .batch-source-target-table tbody {
+    display: grid;
+    gap: 0.75rem;
+    padding: 0.75rem;
+  }
+
+  .batch-source-target-table tbody tr {
+    display: grid;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 0.75rem;
+    background: var(--surface-strong);
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .batch-source-target-table tbody td {
+    display: block;
+    width: auto !important;
+    border-bottom: 0;
+    padding: 0.5rem 0.75rem 0.75rem;
+  }
+
+  .batch-source-target-table tbody td:last-child {
+    grid-row: 1;
+    grid-column: 1 / -1;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    padding-top: 0.75rem;
+  }
+
+  .batch-source-target-table tbody td:first-child {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    padding-top: 0.75rem;
+  }
+
+  .batch-source-target-table tbody td:nth-child(2) {
+    grid-row: 3;
+    grid-column: 1;
+  }
+
+  .batch-source-target-table tbody td:nth-child(3) {
+    grid-row: 3;
+    grid-column: 2;
+    text-align: right;
+  }
+
+  .batch-mobile-field-label {
+    display: block;
+    margin-bottom: 0.28rem;
+    color: var(--muted-light);
+    font-family: var(--font-sans);
+    font-size: 0.58rem;
+    font-weight: 640;
   }
 
   .source-import-buyer-row {

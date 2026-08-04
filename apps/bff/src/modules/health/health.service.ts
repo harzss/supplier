@@ -7,7 +7,7 @@ import { AlertService } from '../observability/alert.service';
 
 type DependencyStatus = { status: 'up' } | { status: 'down' };
 
-export const LATEST_REQUIRED_MIGRATION = '20260804210000_add_source_imports';
+export const LATEST_REQUIRED_MIGRATION = '20260805010000_add_published_source_bindings';
 
 export interface ReadinessResult {
   status: 'ready' | 'unavailable';

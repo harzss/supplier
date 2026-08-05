@@ -106,14 +106,14 @@ docker build --target web -t <registry>/supplier-web:<git-sha> \
 
 ### 4.3 migration-once
 
-每次发布只由一个受控 Job 执行迁移：
+每次发布只由一个受控 Job 执行迁移。`DATABASE_URL` 和 `DIRECT_URL` 必须先由 CI 或 Secret Manager 安全导出到 Job 环境，不得把含凭据、query 或 `&` 的完整连接串直接拼入 shell 命令：
 
 当前候选的最新必需 migration 为第 43 条 `20260805040000_harden_workflow_check_null_semantics`。第 36 条 `20260804050000_add_product_batch_operations` 新增 `published_products.mutation_revision`、`product_batch_tasks`、`product_batch_items` 和 `(shop_id, platform_product_id)` 唯一索引；第 37 条新增 `published_products.sku_price_snapshot` 与 `price_synced_at`，第 38 条新增 `sku_inventory_snapshot`；第 39 条新增 `source_import_tasks`、`source_import_items` 和 `user_source_products`；第 40 条新增 `published_product_source_bindings`，并为 `order_items` 增加绑定、单位成本和一件代发快照；第 41 条新增 `purchase_orders.exception_code`、`exception_cases` 与 `exception_case_events`；第 42 条新增 `after_sale_cases`、`after_sale_case_items`、`after_sale_purchase_links` 与 `after_sale_case_events`；第 43 条不修改既有 checksum，在事务内以严格布尔 CHECK 阻断异常事件、售后采购结果和售后事件的 NULL/UNKNOWN 绕过。隔离预检必须先确认所有非空 `platform_product_id` 在同一店铺内没有重复；第 36 个 migration 自身也会在建索引前 fail-closed。迁移后必须确认十二张新增任务/归属/绑定/异常/售后表均启用 RLS，`anon` / `authenticated` 对表和 sequence 都没有直接权限，直接核对价格与库存快照列类型分别为 `jsonb`、timestamp 和 `jsonb`，确认第 39 条 migration 的用户、买家店铺、货源商品、采集任务和用户货源外键及其删除策略，确认第 40 条为每个历史已发布商品生成且仅生成一个 revision 1 当前绑定、订单项快照外键/成本/一件代发字段与 migration 定义一致，并确认第 41 条旧采购异常回填仅依据持久状态。第 42/43 条还必须核对一单一工单唯一约束、工单/子单/采购关联的复合租户与订单外键、状态与事件迁移 CHECK、UUID 命令唯一键、三个 NULL 负向探针，以及四张售后表和四个 sequence 的 RLS/ACL。上述空库门禁，以及使用当前 staging 真实数据备份完成的隔离 33→43 恢复升级、schema diff、数据量、RLS/ACL、约束和升级数据断言均已通过；实际 staging migration 仍必须等待维护窗口停写授权，并在执行后复核同一组断言。
 
 ```bash
 docker run --rm \
-  -e DATABASE_URL=<runtime-database-url> \
-  -e DIRECT_URL=<direct-database-url> \
+  -e DATABASE_URL \
+  -e DIRECT_URL \
   <registry>/supplier-migrate:<git-sha>
 ```
 

@@ -69,18 +69,23 @@ node --env-file=packages/db/.env.staging.local \
 
 5. 只有出现 pending migration 时，才进入受控迁移流程：
    1. 停止 BFF、队列和全部 worker 写入，记录 Git SHA、审计输出和维护窗口。
-   2. 确认 Supabase 当前套餐的快照/PITR 能力；如果不能恢复，使用 PostgreSQL 17 `pg_dump --format=custom --schema=public --no-owner --no-privileges` 创建强制 TLS 的一致性备份。
-   3. 使用 `pg_restore --list` 校验归档，并先恢复到隔离 PostgreSQL 17 数据库完成恢复演练。
-   4. 为隔离库创建不入 Git 的 `packages/db/.env.restore.local`，只填写指向隔离库的 `DATABASE_URL` 和 `DIRECT_URL`，并用单引号包住完整 URL，使文件可被 Node 与 shell 安全加载。在隔离恢复库实际执行待发布 migration，再验证 migration status、schema diff、关键数据量和数据回填；只有全部通过，才允许对 staging 执行一次 `migrate deploy`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～43 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表、`source_import_tasks`、`source_import_items`、`user_source_products`、`published_product_source_bindings`、两张 `exception_*` 表和四张 `after_sale_*` 表的唯一索引、复合租户/订单外键、生命周期与事件 CHECK、RLS 及表/sequence 权限。隔离库必须证明 43/43、schema diff 为空，一单一工单、工单/子单/采购同订单及 UUID 命令唯一键均生效，并通过第 43 个 migration 对三个 NULL/UNKNOWN 绕过的回滚式负向探针。
+   2. 确认 Supabase 当前套餐的快照/PITR 能力；如果不能恢复，在停写后使用下方 `staging-libpq.mjs backup` 通过强制 TLS 的 `DIRECT_URL` 创建 PostgreSQL 17 custom format、仅 public schema、不包含 owner/privileges 的最终一致性备份。
+   3. `staging-libpq.mjs backup` 会先用 PostgreSQL 17 `pg_restore --list` 校验 TOC、关键 schema/data 对象、文件权限和 SHA256；该结果仍不能替代恢复，必须再把归档恢复到隔离 PostgreSQL 17 数据库完成演练。
+   4. 先在本机 loopback PostgreSQL 17 中创建名称以 `supplier_restore_` 开头的专用空数据库，再创建不入 Git 的 `packages/db/.env.restore.local`；`DATABASE_URL` 和 `DIRECT_URL` 必须指向同一个 loopback 目标，完整 URL 使用单引号包住并仅由 Node `--env-file` 读取。`restore-rehearsal.mjs` 拒绝 Supabase 或任何远程主机，同时要求两个 URL 的数据库名与 `--confirm-database` 完全一致。在隔离恢复库实际执行待发布 migration，再验证 migration status、schema diff、关键数据量和数据回填；只有全部通过，才允许对 staging 执行一次 `migrate deploy`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～43 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表、`source_import_tasks`、`source_import_items`、`user_source_products`、`published_product_source_bindings`、两张 `exception_*` 表和四张 `after_sale_*` 表的唯一索引、复合租户/订单外键、生命周期与事件 CHECK、RLS 及表/sequence 权限。隔离库必须证明 43/43、schema diff 为空，一单一工单、工单/子单/采购同订单及 UUID 命令唯一键均生效，并通过第 43 个 migration 对三个 NULL/UNKNOWN 绕过的回滚式负向探针。
    5. 如果最终只读审计仍报告 `mockSupplierIdBackfillRequired=true`，必须在 migration 前使用专用脚本；默认模式只读检查，写模式要求显式 `--apply`、精确 project ref、33/43、最新第 33 个 migration、binding 表不存在、十个 mock 集合与现有元数据全部匹配。它只更新空白 `supplier_id` 并在同一事务回读；禁止运行通用 `scripts/seed.mjs`。
 
 ```bash
-set -a
-. packages/db/.env.restore.local
-set +a
+# 将绝对路径和 Project Ref 替换为本次维护窗口的实际值。
+node --env-file=packages/db/.env.staging.local \
+  packages/db/scripts/staging-libpq.mjs backup \
+  --output=/absolute/path/to/supplier-staging-pre-migration.dump \
+  --confirm-project=YOUR_20_CHAR_PROJECT_REF
 
-psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
-  -f infra/postgres/init-supabase-roles.sql
+# 先手工创建专用空库 supplier_restore_20260805，并让 restore env 的两个 URL 都指向它。
+node --env-file=packages/db/.env.restore.local \
+  packages/db/scripts/restore-rehearsal.mjs restore \
+  --archive=/absolute/path/to/supplier-staging-pre-migration.dump \
+  --confirm-database=supplier_restore_20260805
 
 node --env-file=packages/db/.env.restore.local \
   packages/db/node_modules/prisma/build/index.js migrate deploy \
@@ -96,17 +101,16 @@ node --env-file=packages/db/.env.restore.local \
   --from-schema-datasource packages/db/prisma/schema.prisma \
   --to-schema-datamodel packages/db/prisma/schema.prisma
 
-psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
-  -f infra/postgres/assert-public-schema-isolation.sql
-
-psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
-  -f infra/postgres/assert-workflow-check-constraints.sql
-
-psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
-  -f infra/postgres/assert-33-to-43-upgrade-data.sql
+node --env-file=packages/db/.env.restore.local \
+  packages/db/scripts/restore-rehearsal.mjs post-upgrade-assert \
+  --confirm-database=supplier_restore_20260805
 ```
 
-角色初始化脚本是幂等的，用于模拟 Supabase 在 application migration 前已存在的 `anon` / `authenticated` 角色；它不能替代权限断言。隔离库还必须用发布前记录的表级行数和关键业务断言核对恢复结果。不要在普通 PostgreSQL 隔离库运行 `audit-staging.mjs`：该脚本刻意只接受同一个 Supabase project 的 pooler/direct host，用于防止把 staging 审计误连到其他数据库。
+`staging-libpq.mjs` 固定使用 Dashboard 提供的公开 `Supabase Root 2021 CA`（仓库路径 `infra/postgres/certs/supabase-prod-ca-2021.crt`）和 `verify-full`，同时校验 CA 与 hostname；证书 SHA256 指纹为 `80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA`，有效期至 2031-04-26。证书轮换必须从 Dashboard 重新下载并同步更新指纹测试，不能回退为只加密但不校验服务端身份的 `sslmode=require`。
+
+`restore-rehearsal.mjs restore` 会在恢复前执行幂等的角色初始化，模拟 Supabase 在 application migration 前已存在的 `anon` / `authenticated` 角色；它不能替代迁移后权限断言。隔离库还必须用发布前记录的表级行数和关键业务断言核对恢复结果。不要在普通 PostgreSQL 隔离库运行 `audit-staging.mjs`：该脚本刻意只接受同一个 Supabase project 的 pooler/direct host，用于防止把 staging 审计误连到其他数据库。
+
+两种 `post-upgrade-assert` 都只允许运行仓库内固定的三条断言：schema isolation 和升级数据断言强制只读；工作流约束负向探针需要创建临时表，因此使用受控 read-write 会话，但脚本只写临时表并以 `ROLLBACK` 结束，不修改业务表。
 
 ```bash
 node --env-file=packages/db/.env.staging.local \
@@ -128,12 +132,9 @@ node --env-file=packages/db/.env.staging.local \
   packages/db/node_modules/prisma/build/index.js migrate deploy \
   --schema packages/db/prisma/schema.prisma
 
-set -a
-. packages/db/.env.staging.local
-set +a
-
-psql "$DIRECT_URL" -v ON_ERROR_STOP=1 \
-  -f infra/postgres/assert-workflow-check-constraints.sql
+node --env-file=packages/db/.env.staging.local \
+  packages/db/scripts/staging-libpq.mjs post-upgrade-assert \
+  --confirm-project=YOUR_20_CHAR_PROJECT_REF
 
 node --env-file=packages/db/.env.staging.local \
   packages/db/scripts/audit-staging.mjs
@@ -153,6 +154,8 @@ pnpm audit:supabase-boundary
 完成标准：仓库 migration 全部 applied，0 unfinished、0 rolled back、checksum 全匹配，live schema diff 为空。BFF/Redis readiness 属于下一节环境 smoke，不作为数据库审计的循环前置条件。
 
 2026-08-03 的旧基线审计确认当时 staging 为 PostgreSQL 17.6、33/33 migration applied、0 unfinished、0 rolled back、checksum 全匹配且 live schema diff 为空；28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。当前候选的实时只读预检现已完成：staging 仍为 33/43，第 34～43 个是连续 pending 尾部，已应用前缀 checksum、unfinished/rolled back、RLS/ACL 与同店铺非空 `platform_product_id` 重复前置条件全部通过；因存在 pending，当前 datamodel schema diff 按规则标记 `deferred`。本次 staging 真实数据一致性备份为 150265 bytes，SHA256 `b4eb1f374c75f5aa6244568443143394628b9a252dfbad3114473ae9d2e6fc54`；归档已在隔离临时 PostgreSQL 17 数据库完成 33→43 恢复升级，43/43、schema diff 无差异、数据量为 10 条货源/0 条铺货/0 条订单/0 条采购、41/41 public 表 RLS，以及 ACL、工作流约束和升级数据断言全部通过。`supplier-assets` 上传、公开读取、删除与关闭公开注册、匿名业务表拒绝仍沿用旧候选证据。第 34～43 个尚未实际应用到 staging；下一步必须取得维护窗口授权，停止 BFF、队列和全部 worker 写入，由单一 migration-once 执行，再复核 43/43、checksum、schema diff、工作流负向约束与 RLS/ACL，随后重部署并完成 smoke。隔离演练不得写成 staging 已迁移。
+
+2026-08-05 又用 `staging-libpq.mjs` 对真实 staging 完成一次只读工具链预检：PostgreSQL 17.10 在 `verify-full` 下通过官方 CA 连接 PostgreSQL 17.6，生成 150239 bytes、权限 `0600`、365 个有效 TOC 条目的 custom archive，SHA256 为 `a325f82ddb2e9d1815de9860bab99c46ce7ba01e1692cb3eae5a95ceec21be98`，且原子发布后无 partial 残留。该文件仅证明备份入口真实可执行，不是维护停写后的最终备份，也未替代上述隔离恢复演练。
 
 ## 4. 部署 Cloudflare staging gateway
 

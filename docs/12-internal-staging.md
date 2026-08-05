@@ -169,6 +169,8 @@ npx wrangler secret put ALERT_WEBHOOK_SECRET
 
 当前固定入口为 `https://supplier-staging-gateway.chenjie.workers.dev`；`BFF_ORIGIN` 与 `ALERT_WEBHOOK_SECRET` 已配置，Worker 测试 7/7 通过。Secret 更新会产生新的部署版本，记录验收时应使用当前远端版本而不是首次部署版本。
 
+Web 与 gateway 的 Wrangler 配置必须固定到同一个 Cloudflare account，避免本机同时登录多个 account 时把 dry-run、Secret 更新或部署发到错误账号。进程守护仍显式要求同一 `CLOUDFLARE_ACCOUNT_ID`，不能依赖交互式账号选择。
+
 ## 5. 启动 Redis 与 BFF
 
 Redis 使用命名卷保留本机重启后的状态：

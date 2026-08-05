@@ -1,9 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
   "name": "supplier-staging-gateway",
+  "account_id": "a4f47bbe82fe04890258469abfc78593",
   "main": "worker.mjs",
   "compatibility_date": "2026-07-27",
   "observability": {
-    "enabled": true
-  }
+    "enabled": true,
+  },
 }

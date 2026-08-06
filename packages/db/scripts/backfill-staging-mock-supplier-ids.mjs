@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import prismaPackage from '@prisma/client';
 
 import { assertMigrationHistory, describeStagingDatasource } from './audit-staging.mjs';
+import { buildStrictSupabasePrismaDatasource } from './staging-libpq.mjs';
 
 const { PrismaClient } = prismaPackage;
 const scriptPath = fileURLToPath(import.meta.url);
@@ -67,8 +68,18 @@ export function readBackfillConfiguration(args, environment) {
   if (options.apply && options.confirmedProjectRef !== datasource.projectRef) {
     throw new Error('--confirm-project must exactly match the validated STAGING_PROJECT_REF.');
   }
+  if (datasource.direct.port !== '5432') {
+    throw new Error('Backfill DIRECT_URL must use the PostgreSQL session port 5432.');
+  }
+  if (datasource.database !== 'postgres') {
+    throw new Error('Backfill must target the postgres database.');
+  }
 
-  return { apply: options.apply, datasource };
+  const prismaDatasourceUrl = buildStrictSupabasePrismaDatasource(
+    new URL(environment.DIRECT_URL),
+    datasource,
+  );
+  return { apply: options.apply, datasource, prismaDatasourceUrl };
 }
 
 export function planMockSupplierIdBackfill(rows) {
@@ -304,7 +315,7 @@ async function main() {
   console.log(`Staging mock supplier_id backfill target: ${formatTarget(configuration)}`);
 
   const localMigrations = await readLocalMigrations();
-  const prisma = new PrismaClient();
+  const prisma = new PrismaClient({ datasourceUrl: configuration.prismaDatasourceUrl });
   try {
     const result = await inspectOrApplyBackfill(prisma, configuration, localMigrations);
     console.log(

@@ -143,7 +143,7 @@ export function readStagingLibpqConfiguration(args, environment) {
     PGSSLROOTCERT: SUPABASE_CA_CERT_PATH,
     PGUSER: username,
   };
-  const prismaDatasourceUrl = formatPrismaDatasource(directUrl, datasource);
+  const prismaDatasourceUrl = buildStrictSupabasePrismaDatasource(directUrl, datasource);
   return {
     ...options,
     datasource,
@@ -434,7 +434,7 @@ function decodeUrlComponent(value, label) {
   }
 }
 
-function formatPrismaDatasource(directUrl, datasource) {
+export function buildStrictSupabasePrismaDatasource(directUrl, datasource) {
   const username = encodeURIComponent(
     decodeUrlComponent(directUrl.username, 'DIRECT_URL username'),
   );

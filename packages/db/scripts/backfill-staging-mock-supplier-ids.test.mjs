@@ -7,15 +7,19 @@ import {
   readBackfillConfiguration,
   readBackfillOptions,
 } from './backfill-staging-mock-supplier-ids.mjs';
+import { SUPABASE_CA_CERT_PATH } from './staging-libpq.mjs';
 
 const PROJECT_REF = 'abcdefghijklmnopqrst';
+const PASSWORD = 'p@ss:word';
 const LATEST_MIGRATION = '20260803173000_secure_supabase_public_schema';
 
 function stagingEnvironment() {
   return {
     STAGING_PROJECT_REF: PROJECT_REF,
     DATABASE_URL: `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`,
-    DIRECT_URL: `postgresql://postgres:secret@db.${PROJECT_REF}.supabase.co:5432/postgres`,
+    DIRECT_URL:
+      `postgresql://postgres:${encodeURIComponent(PASSWORD)}@db.${PROJECT_REF}.supabase.co:5432/postgres` +
+      '?sslmode=disable&options=unsafe',
   };
 }
 
@@ -61,6 +65,10 @@ test('defaults to a read-only check and requires an exact project confirmation f
         runtime: { host: 'aws-0-ap-southeast-1.pooler.supabase.com', port: '6543' },
         direct: { host: `db.${PROJECT_REF}.supabase.co`, port: '5432' },
       },
+      prismaDatasourceUrl:
+        `postgresql://postgres:p%40ss%3Aword@db.${PROJECT_REF}.supabase.co:5432/postgres` +
+        `?sslmode=require&sslcert=${encodeURIComponent(SUPABASE_CA_CERT_PATH)}` +
+        '&sslaccept=strict',
     },
   );
 
@@ -71,6 +79,48 @@ test('defaults to a read-only check and requires an exact project confirmation f
         stagingEnvironment(),
       ),
     /must exactly match/,
+  );
+});
+
+test('rejects unsafe direct targets and malformed credentials before creating a client', () => {
+  const cases = [
+    {
+      environment: {
+        ...stagingEnvironment(),
+        DIRECT_URL: `postgresql://postgres:secret@db.${PROJECT_REF}.supabase.co:6543/postgres`,
+      },
+      pattern: /session port 5432/,
+    },
+    {
+      environment: {
+        ...stagingEnvironment(),
+        DATABASE_URL: `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/other`,
+        DIRECT_URL: `postgresql://postgres:secret@db.${PROJECT_REF}.supabase.co:5432/other`,
+      },
+      pattern: /must target the postgres database/,
+    },
+  ];
+
+  for (const testCase of cases) {
+    assert.throws(
+      () =>
+        readBackfillConfiguration(
+          ['--apply', `--confirm-project=${PROJECT_REF}`],
+          testCase.environment,
+        ),
+      testCase.pattern,
+    );
+  }
+
+  const environment = stagingEnvironment();
+  environment.DIRECT_URL = `postgresql://postgres:secret%00leak@db.${PROJECT_REF}.supabase.co:5432/postgres`;
+  assert.throws(
+    () => readBackfillConfiguration(['--apply', `--confirm-project=${PROJECT_REF}`], environment),
+    (error) => {
+      assert.match(error.message, /without NUL bytes/);
+      assert.doesNotMatch(error.message, /secret|leak/);
+      return true;
+    },
   );
 });
 

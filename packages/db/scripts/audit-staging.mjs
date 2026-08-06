@@ -2,9 +2,11 @@
 
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat as nodeLstat, open as nodeOpen, readdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 
 import prismaPackage from '@prisma/client';
 
@@ -15,13 +17,106 @@ const repositoryRoot = dirname(dirname(packageDir));
 const schemaPath = join(packageDir, 'prisma', 'schema.prisma');
 const migrationsDir = join(packageDir, 'prisma', 'migrations');
 const prismaCliPath = join(packageDir, 'node_modules', 'prisma', 'build', 'index.js');
+export const PRISMA_DOTENV_CANDIDATES = Object.freeze([
+  join(repositoryRoot, '.env'),
+  join(repositoryRoot, 'prisma', '.env'),
+  join(packageDir, '.env'),
+  join(packageDir, 'prisma', '.env'),
+]);
+export const PRISMA_DOTENV_SAFETY_ERROR =
+  'Prisma dotenv safety check failed; candidate files must be regular files containing only DATABASE_URL and DIRECT_URL assignments.';
+const ALLOWED_PRISMA_DOTENV_KEYS = new Set(['DATABASE_URL', 'DIRECT_URL']);
+const PRISMA_DOTENV_ASSIGNMENT = /^\s*(?:export\s+)?(DATABASE_URL|DIRECT_URL)\s*=/;
 
-function requireDatabaseConfig() {
+function requireDatabaseConfig(environment) {
   for (const key of ['STAGING_PROJECT_REF', 'DATABASE_URL', 'DIRECT_URL']) {
-    if (!process.env[key]) {
+    if (!environment[key]) {
       throw new Error(`${key} is required. Load the staging env explicitly with Node --env-file.`);
     }
   }
+}
+
+export async function assertSafePrismaDotenvCandidates({
+  candidates = PRISMA_DOTENV_CANDIDATES,
+  lstatFile = nodeLstat,
+  openFile = nodeOpen,
+} = {}) {
+  for (const candidate of candidates) {
+    let pathStat;
+    try {
+      pathStat = await lstatFile(candidate);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw new Error(PRISMA_DOTENV_SAFETY_ERROR);
+    }
+    if (!pathStat.isFile()) throw new Error(PRISMA_DOTENV_SAFETY_ERROR);
+
+    let handle;
+    let failed = false;
+    try {
+      handle = await openFile(
+        candidate,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      );
+      const openedStat = await handle.stat();
+      if (
+        !openedStat.isFile() ||
+        openedStat.dev !== pathStat.dev ||
+        openedStat.ino !== pathStat.ino
+      ) {
+        failed = true;
+      } else {
+        const contents = await handle.readFile({ encoding: 'utf8' });
+        assertSafePrismaDotenvContents(contents);
+      }
+    } catch {
+      failed = true;
+    }
+    try {
+      await handle?.close();
+    } catch {
+      failed = true;
+    }
+    if (failed) throw new Error(PRISMA_DOTENV_SAFETY_ERROR);
+  }
+}
+
+function assertSafePrismaDotenvContents(contents) {
+  const assignedKeys = new Set();
+  for (const line of contents.split(/\r?\n/)) {
+    if (/^\s*(?:#.*)?$/.test(line)) continue;
+    const assignment = PRISMA_DOTENV_ASSIGNMENT.exec(line);
+    if (!assignment) throw new Error(PRISMA_DOTENV_SAFETY_ERROR);
+    assignedKeys.add(assignment[1]);
+  }
+
+  const parsed = parseEnv(contents);
+  const parsedKeys = Object.keys(parsed);
+  if (
+    parsedKeys.some((key) => !ALLOWED_PRISMA_DOTENV_KEYS.has(key)) ||
+    parsedKeys.length !== assignedKeys.size ||
+    parsedKeys.some((key) => !assignedKeys.has(key))
+  ) {
+    throw new Error(PRISMA_DOTENV_SAFETY_ERROR);
+  }
+}
+
+export function readAuditConfiguration(environment) {
+  requireDatabaseConfig(environment);
+  const datasource = describeStagingDatasource({
+    projectRef: environment.STAGING_PROJECT_REF,
+    databaseUrl: environment.DATABASE_URL,
+    directUrl: environment.DIRECT_URL,
+  });
+  return {
+    datasource,
+    prismaEnvironment: {
+      DATABASE_URL: new URL(environment.DATABASE_URL).toString(),
+      DIRECT_URL: new URL(environment.DIRECT_URL).toString(),
+      LC_ALL: 'C',
+      PRISMA_HIDE_UPDATE_MESSAGE: '1',
+    },
+  };
 }
 
 export function describeStagingDatasource({ projectRef, databaseUrl, directUrl }) {
@@ -155,10 +250,10 @@ function describeDatabaseUrl(value, name, expectedProjectRef) {
   };
 }
 
-function spawnPrisma(args) {
-  const result = spawnSync(process.execPath, [prismaCliPath, ...args], {
+export function spawnPrisma(args, prismaEnvironment, spawnPrismaSync = spawnSync) {
+  const result = spawnPrismaSync(process.execPath, [prismaCliPath, ...args], {
     cwd: repositoryRoot,
-    env: process.env,
+    env: { ...prismaEnvironment },
     encoding: 'utf8',
   });
 
@@ -177,8 +272,8 @@ function spawnPrisma(args) {
   return result;
 }
 
-function runPrisma(args) {
-  const result = spawnPrisma(args);
+function runPrisma(args, prismaEnvironment) {
+  const result = spawnPrisma(args, prismaEnvironment);
   if (result.status !== 0) {
     throw new Error(`Prisma ${args.slice(0, 2).join(' ')} failed.`);
   }
@@ -218,9 +313,9 @@ export function assertExpectedPendingStatus(result, pendingMigrations) {
   }
 }
 
-function runPrismaStatus(pendingMigrations, allowPending) {
+function runPrismaStatus(pendingMigrations, allowPending, prismaEnvironment) {
   const args = ['migrate', 'status', '--schema', schemaPath];
-  const result = spawnPrisma(args);
+  const result = spawnPrisma(args, prismaEnvironment);
   if (result.status === 0) {
     if (pendingMigrations.length > 0) {
       throw new Error('Prisma migrate status no longer matches the read-only migration snapshot.');
@@ -319,19 +414,15 @@ export function assertMigrationHistory(
 
 async function main() {
   const { allowPending } = readAuditOptions(process.argv.slice(2));
-  requireDatabaseConfig();
-  const datasource = describeStagingDatasource({
-    projectRef: process.env.STAGING_PROJECT_REF,
-    databaseUrl: process.env.DATABASE_URL,
-    directUrl: process.env.DIRECT_URL,
-  });
+  const { datasource, prismaEnvironment } = readAuditConfiguration(process.env);
+  await assertSafePrismaDotenvCandidates();
   const localMigrations = await readLocalMigrations();
 
   console.log(
     `Auditing Supabase staging project ${datasource.projectRef} (${datasource.runtime.host}:${datasource.runtime.port}/${datasource.database}; direct ${datasource.direct.host}:${datasource.direct.port})`,
   );
 
-  const prisma = new PrismaClient();
+  const prisma = new PrismaClient({ datasourceUrl: prismaEnvironment.DATABASE_URL });
   try {
     const audit = await prisma.$transaction(async (transaction) => {
       await transaction.$executeRawUnsafe('SET TRANSACTION READ ONLY');
@@ -512,7 +603,8 @@ async function main() {
     );
     assertNoDuplicatePlatformProductIds(audit.duplicatePlatformProductIds.duplicate_groups);
 
-    runPrismaStatus(pendingMigrations, allowPending);
+    await assertSafePrismaDotenvCandidates();
+    runPrismaStatus(pendingMigrations, allowPending, prismaEnvironment);
     const schemaDiff =
       pendingMigrations.length > 0
         ? {
@@ -521,15 +613,19 @@ async function main() {
           }
         : { status: 'matched' };
     if (schemaDiff.status === 'matched') {
-      runPrisma([
-        'migrate',
-        'diff',
-        '--exit-code',
-        '--from-schema-datasource',
-        schemaPath,
-        '--to-schema-datamodel',
-        schemaPath,
-      ]);
+      await assertSafePrismaDotenvCandidates();
+      runPrisma(
+        [
+          'migrate',
+          'diff',
+          '--exit-code',
+          '--from-schema-datasource',
+          schemaPath,
+          '--to-schema-datamodel',
+          schemaPath,
+        ],
+        prismaEnvironment,
+      );
     }
 
     const latestMigration = audit.migrations.at(-1);

@@ -9,15 +9,20 @@ import {
   readdir,
   rm,
   stat,
+  symlink,
   unlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
 
 import {
+  AUDIT_STAGING_PATH,
+  EXPECTED_STAGING_PENDING_MIGRATIONS,
   LIBPQ_BIN_DIR,
+  PRISMA_CLI_PATH,
+  PRISMA_SCHEMA_PATH,
   SUPABASE_CA_CERT_PATH,
   inspectBackupArchiveList,
   readStagingLibpqConfiguration,
@@ -102,7 +107,7 @@ async function temporaryDirectory(context) {
   return directory;
 }
 
-test('accepts only the two closed operations with exact arguments', () => {
+test('accepts only the three closed operations with exact arguments', () => {
   assert.deepEqual(
     readStagingLibpqOptions([
       'backup',
@@ -115,6 +120,10 @@ test('accepts only the two closed operations with exact arguments', () => {
       output: '/private/tmp/final.dump',
     },
   );
+  assert.deepEqual(readStagingLibpqOptions(['migrate-once', `--confirm-project=${PROJECT_REF}`]), {
+    action: 'migrate-once',
+    confirmedProjectRef: PROJECT_REF,
+  });
   assert.deepEqual(
     readStagingLibpqOptions(['post-upgrade-assert', `--confirm-project=${PROJECT_REF}`]),
     { action: 'post-upgrade-assert', confirmedProjectRef: PROJECT_REF },
@@ -122,6 +131,7 @@ test('accepts only the two closed operations with exact arguments', () => {
 
   for (const args of [
     [],
+    ['migrate', `--confirm-project=${PROJECT_REF}`],
     ['psql', `--confirm-project=${PROJECT_REF}`],
     ['backup', '--output=relative.dump', `--confirm-project=${PROJECT_REF}`],
     ['backup', '--output=/private/tmp/final.sql', `--confirm-project=${PROJECT_REF}`],
@@ -132,6 +142,7 @@ test('accepts only the two closed operations with exact arguments', () => {
       `--confirm-project=${PROJECT_REF}`,
       '--no-owner',
     ],
+    ['migrate-once', `--confirm-project=${PROJECT_REF}`, '--schema=/private/tmp/arbitrary.prisma'],
     [
       'post-upgrade-assert',
       `--confirm-project=${PROJECT_REF}`,
@@ -164,16 +175,283 @@ test('builds a minimal fixed libpq environment from the validated direct URL', (
     ...configuration.libpqEnvironment,
     PGOPTIONS: '-c default_transaction_read_only=on',
   });
+  const canonicalDatasource =
+    `postgresql://postgres.${PROJECT_REF}:p%40ss%3Aword@` +
+    'aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres' +
+    `?sslmode=require&sslcert=${encodeURIComponent(SUPABASE_CA_CERT_PATH)}` +
+    '&sslaccept=strict';
+  assert.deepEqual(configuration.auditEnvironment, {
+    DATABASE_URL: canonicalDatasource,
+    DIRECT_URL: canonicalDatasource,
+    LC_ALL: 'C',
+    PRISMA_HIDE_UPDATE_MESSAGE: '1',
+    STAGING_PROJECT_REF: PROJECT_REF,
+  });
+  assert.deepEqual(configuration.prismaEnvironment, {
+    DATABASE_URL: canonicalDatasource,
+    DIRECT_URL: canonicalDatasource,
+    LC_ALL: 'C',
+    PRISMA_HIDE_UPDATE_MESSAGE: '1',
+  });
   assert.equal('PGSERVICE' in configuration.libpqEnvironment, false);
   assert.equal('DATABASE_URL' in configuration.libpqEnvironment, false);
   assert.equal('DIRECT_URL' in configuration.libpqEnvironment, false);
+  assert.equal('PGHOST' in configuration.prismaEnvironment, false);
+  assert.equal('PGOPTIONS' in configuration.prismaEnvironment, false);
+  assert.equal('PGSERVICE' in configuration.prismaEnvironment, false);
+});
+
+test('runs the full read-only audit and exact 34-to-43 status gate before migration', async (context) => {
+  const directory = await temporaryDirectory(context);
+  const safeDotenv = join(directory, '.env');
+  await writeFile(
+    safeDotenv,
+    'DATABASE_URL="postgresql://safe.invalid/database"\nDIRECT_URL="postgresql://safe.invalid/database"\n',
+  );
+  const calls = [];
+  let statusCalls = 0;
+  const spawnSync = (command, args, options) => {
+    calls.push({ command, args, options });
+    if (args[0] === AUDIT_STAGING_PATH) return successfulResult();
+    if (args[1] === 'migrate' && args[2] === 'status') {
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        return successfulResult({
+          status: 1,
+          stdout:
+            '43 migrations found in prisma/migrations\n' +
+            'Following migrations have not yet been applied:\n' +
+            `${EXPECTED_STAGING_PENDING_MIGRATIONS.join('\n')}\n`,
+        });
+      }
+      return successfulResult({ stdout: 'Database schema is up to date!\n' });
+    }
+    if (args[1] === 'migrate' && args[2] === 'deploy') return successfulResult();
+    throw new Error(`Unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  const result = await runStagingLibpq({
+    args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
+    environment: stagingEnvironment(),
+    prismaDotenvCandidates: [safeDotenv],
+    spawnSync,
+  });
+
+  assert.deepEqual(result, {
+    action: 'migrate-once',
+    projectRef: PROJECT_REF,
+    verifiedMigrationCount: 10,
+  });
+  assert.deepEqual(
+    calls.map(({ args }) => args),
+    [
+      [AUDIT_STAGING_PATH, '--allow-pending'],
+      [PRISMA_CLI_PATH, 'migrate', 'status', '--schema', PRISMA_SCHEMA_PATH],
+      [PRISMA_CLI_PATH, 'migrate', 'deploy', '--schema', PRISMA_SCHEMA_PATH],
+      [PRISMA_CLI_PATH, 'migrate', 'status', '--schema', PRISMA_SCHEMA_PATH],
+    ],
+  );
+  const repositoryRoot = dirname(dirname(dirname(dirname(PRISMA_SCHEMA_PATH))));
+  assert.deepEqual(
+    calls.map(({ options }) => options.timeout),
+    [300_000, 60_000, 300_000, 60_000],
+  );
+  for (const [index, call] of calls.entries()) {
+    assert.equal(call.command, process.execPath);
+    assert.equal(call.options.cwd, repositoryRoot);
+    assert.equal(call.options.encoding, 'utf8');
+    assert.equal(call.options.killSignal, 'SIGTERM');
+    assert.equal(call.options.maxBuffer, 4 * 1024 * 1024);
+    assert.deepEqual(call.options.stdio, ['ignore', 'pipe', 'pipe']);
+    const expectedEnvironmentKeys = [
+      'DATABASE_URL',
+      'DIRECT_URL',
+      'LC_ALL',
+      'PRISMA_HIDE_UPDATE_MESSAGE',
+    ];
+    if (index === 0) expectedEnvironmentKeys.push('STAGING_PROJECT_REF');
+    assert.deepEqual(Object.keys(call.options.env).sort(), expectedEnvironmentKeys.sort());
+    assert.equal(call.options.env.STAGING_PROJECT_REF, index === 0 ? PROJECT_REF : undefined);
+    assert.equal(call.args.join(' ').includes(PASSWORD), false);
+  }
+});
+
+test('refuses migration unless the audit and exact pending suffix both pass', async () => {
+  const cases = [
+    {
+      name: 'audit failure',
+      results: [successfulResult({ status: 1, stderr: `must not expose ${PASSWORD}` })],
+      pattern: /staging pre-migration audit failed with status 1/,
+      expectedCalls: 1,
+    },
+    {
+      name: 'unexpected pending suffix',
+      results: [
+        successfulResult(),
+        successfulResult({
+          status: 1,
+          stdout:
+            'Following migration has not yet been applied:\n' +
+            `${EXPECTED_STAGING_PENDING_MIGRATIONS[0]}\n`,
+        }),
+      ],
+      pattern: /did not report the expected pending migration suffix/,
+      expectedCalls: 2,
+    },
+    {
+      name: 'deploy timeout',
+      results: [
+        successfulResult(),
+        successfulResult({
+          status: 1,
+          stdout:
+            'Following migrations have not yet been applied:\n' +
+            `${EXPECTED_STAGING_PENDING_MIGRATIONS.join('\n')}\n`,
+        }),
+        successfulResult({
+          error: Object.assign(new Error(`must not expose ${PASSWORD}`), { code: 'ETIMEDOUT' }),
+          status: null,
+        }),
+      ],
+      pattern: /prisma migrate deploy could not start \(ETIMEDOUT\)/,
+      expectedCalls: 3,
+    },
+  ];
+
+  for (const testCase of cases) {
+    const calls = [];
+    await assert.rejects(
+      runStagingLibpq({
+        args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
+        environment: stagingEnvironment(),
+        spawnSync: (command, args, options) => {
+          calls.push({ command, args, options });
+          return testCase.results[calls.length - 1];
+        },
+      }),
+      (error) => {
+        assert.match(error.message, testCase.pattern, testCase.name);
+        assert.doesNotMatch(error.message, new RegExp(PASSWORD), testCase.name);
+        return true;
+      },
+    );
+    assert.equal(calls.length, testCase.expectedCalls, testCase.name);
+    assert.equal(
+      calls.some(({ args }) => args[2] === 'deploy'),
+      testCase.name === 'deploy timeout',
+      testCase.name,
+    );
+  }
+});
+
+test('rejects unsafe Prisma dotenv candidates before any migration child process', async (context) => {
+  const directory = await temporaryDirectory(context);
+  const secret = 'dotenv-secret-must-not-leak';
+  const maliciousDotenv = join(directory, 'malicious.env');
+  const safeTarget = join(directory, 'safe-target.env');
+  const symlinkedDotenv = join(directory, 'symlink.env');
+  await writeFile(
+    maliciousDotenv,
+    `DATABASE_URL="postgresql://safe.invalid/database"\nNODE_OPTIONS="${secret}"\n`,
+  );
+  await writeFile(safeTarget, 'DATABASE_URL="postgresql://safe.invalid/database"\n');
+  await symlink(safeTarget, symlinkedDotenv);
+
+  for (const candidate of [maliciousDotenv, symlinkedDotenv]) {
+    const calls = [];
+    await assert.rejects(
+      runStagingLibpq({
+        args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
+        environment: stagingEnvironment(),
+        prismaDotenvCandidates: [candidate],
+        spawnSync: (...args) => {
+          calls.push(args);
+          return successfulResult();
+        },
+      }),
+      (error) => {
+        assert.match(error.message, /Prisma dotenv safety check failed/);
+        assert.doesNotMatch(error.message, new RegExp(secret));
+        return true;
+      },
+    );
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('rejects unsafe migration ports and non-default databases before spawning', async () => {
+  const cases = [
+    {
+      name: 'transaction pooler port',
+      directUrl: `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`,
+      databaseUrl: stagingEnvironment().DATABASE_URL,
+      pattern: /session port 5432/,
+    },
+    {
+      name: 'custom port',
+      directUrl: `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6432/postgres`,
+      databaseUrl: stagingEnvironment().DATABASE_URL,
+      pattern: /session port 5432/,
+    },
+    {
+      name: 'non-default database',
+      directUrl: `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:5432/other`,
+      databaseUrl: `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/other`,
+      pattern: /must target the postgres database/,
+    },
+  ];
+
+  for (const testCase of cases) {
+    const calls = [];
+    const environment = {
+      ...stagingEnvironment(),
+      DATABASE_URL: testCase.databaseUrl,
+      DIRECT_URL: testCase.directUrl,
+    };
+    await assert.rejects(
+      runStagingLibpq({
+        args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
+        environment,
+        spawnSync: (...args) => {
+          calls.push(args);
+          return successfulResult();
+        },
+      }),
+      testCase.pattern,
+      testCase.name,
+    );
+    assert.equal(calls.length, 0, testCase.name);
+  }
+});
+
+test('rejects a NUL-bearing direct credential before spawning or exposing it', async () => {
+  const environment = stagingEnvironment();
+  environment.DIRECT_URL = `postgresql://postgres.${PROJECT_REF}:secret%00leak@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres`;
+  const calls = [];
+
+  await assert.rejects(
+    runStagingLibpq({
+      args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
+      environment,
+      spawnSync: (...args) => {
+        calls.push(args);
+        return successfulResult();
+      },
+    }),
+    (error) => {
+      assert.match(error.message, /without NUL bytes/);
+      assert.doesNotMatch(error.message, /secret|leak/);
+      return true;
+    },
+  );
+  assert.equal(calls.length, 0);
 });
 
 test('rejects an unconfirmed target and missing direct credentials before spawning', async () => {
   const fake = createFakeSpawn();
   await assert.rejects(
     runStagingLibpq({
-      args: ['post-upgrade-assert', '--confirm-project=zyxwvutsrqponmlkjihg'],
+      args: ['migrate-once', '--confirm-project=zyxwvutsrqponmlkjihg'],
       environment: stagingEnvironment(),
       spawnSync: fake.spawnSync,
     }),

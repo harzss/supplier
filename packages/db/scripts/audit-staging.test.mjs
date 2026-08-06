@@ -1,13 +1,21 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import {
+  PRISMA_DOTENV_CANDIDATES,
+  PRISMA_DOTENV_SAFETY_ERROR,
   assertExpectedPendingStatus,
   assertMigrationHistory,
   assertNoDuplicatePlatformProductIds,
   assertPublicSchemaIsolation,
+  assertSafePrismaDotenvCandidates,
   describeStagingDatasource,
+  readAuditConfiguration,
   readAuditOptions,
+  spawnPrisma,
   summarizeMockPublishReadiness,
 } from './audit-staging.mjs';
 
@@ -17,6 +25,12 @@ const LOCAL_MIGRATIONS = [
   { name: '20260802000000_second', checksum: 'checksum-second' },
   { name: '20260803000000_third', checksum: 'checksum-third' },
 ];
+
+async function temporaryDirectory(context) {
+  const directory = await mkdtemp(join(tmpdir(), 'supplier-audit-staging-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  return directory;
+}
 
 function appliedMigration(localMigration, overrides = {}) {
   return {
@@ -37,6 +51,89 @@ test('accepts only the explicit allow-pending option', () => {
     () => readAuditOptions(['--allow-pending', '--allow-pending']),
     /Usage: audit-staging/,
   );
+});
+
+test('audits the exact Prisma dotenv candidates and accepts absent or safe regular files', async (context) => {
+  assert.equal(PRISMA_DOTENV_CANDIDATES.length, 4);
+  assert.match(PRISMA_DOTENV_CANDIDATES[0], /supplier\/\.env$/);
+  assert.match(PRISMA_DOTENV_CANDIDATES[1], /supplier\/prisma\/\.env$/);
+  assert.match(PRISMA_DOTENV_CANDIDATES[2], /supplier\/packages\/db\/\.env$/);
+  assert.match(PRISMA_DOTENV_CANDIDATES[3], /supplier\/packages\/db\/prisma\/\.env$/);
+
+  const directory = await temporaryDirectory(context);
+  const missing = join(directory, 'missing.env');
+  const safe = join(directory, 'safe.env');
+  await writeFile(
+    safe,
+    '# Prisma may auto-load this file\nexport DATABASE_URL="postgresql://safe.invalid/db"\nDIRECT_URL="postgresql://safe.invalid/db"\n',
+  );
+
+  await assert.doesNotReject(assertSafePrismaDotenvCandidates({ candidates: [missing, safe] }));
+});
+
+test('rejects malicious, unparsable, symlinked, and non-regular Prisma dotenv candidates generically', async (context) => {
+  const directory = await temporaryDirectory(context);
+  const secret = 'dotenv-value-must-not-leak';
+  const malicious = join(directory, 'malicious.env');
+  const unparsable = join(directory, 'unparsable.env');
+  const safeTarget = join(directory, 'safe-target.env');
+  const symlinked = join(directory, 'symlink.env');
+  await writeFile(
+    malicious,
+    `DATABASE_URL="postgresql://safe.invalid/db"\nPRISMA_QUERY_ENGINE_BINARY="${secret}"\n`,
+  );
+  await writeFile(
+    unparsable,
+    `DATABASE_URL="postgresql://safe.invalid/db"\nnot-an-assignment ${secret}\n`,
+  );
+  await writeFile(safeTarget, 'DIRECT_URL="postgresql://safe.invalid/db"\n');
+  await symlink(safeTarget, symlinked);
+
+  for (const candidate of [malicious, unparsable, symlinked, directory]) {
+    await assert.rejects(assertSafePrismaDotenvCandidates({ candidates: [candidate] }), (error) => {
+      assert.equal(error.message, PRISMA_DOTENV_SAFETY_ERROR);
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      return true;
+    });
+  }
+});
+
+test('rebuilds a minimal nested Prisma environment without ambient Node, DYLD, or Prisma keys', () => {
+  const databaseUrl = `postgresql://postgres.${PROJECT_REF}:runtime@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true`;
+  const directUrl = `postgresql://postgres.${PROJECT_REF}:direct@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres`;
+  const { datasource, prismaEnvironment } = readAuditConfiguration({
+    STAGING_PROJECT_REF: PROJECT_REF,
+    DATABASE_URL: databaseUrl,
+    DIRECT_URL: directUrl,
+    NODE_OPTIONS: '--import=/tmp/attacker.mjs',
+    DYLD_INSERT_LIBRARIES: '/tmp/attacker.dylib',
+    PRISMA_QUERY_ENGINE_BINARY: '/tmp/attacker-engine',
+    PGHOST: 'attacker.invalid',
+  });
+
+  assert.equal(datasource.projectRef, PROJECT_REF);
+  assert.deepEqual(prismaEnvironment, {
+    DATABASE_URL: databaseUrl,
+    DIRECT_URL: directUrl,
+    LC_ALL: 'C',
+    PRISMA_HIDE_UPDATE_MESSAGE: '1',
+  });
+
+  const calls = [];
+  const result = spawnPrisma(['migrate', 'status'], prismaEnvironment, (command, args, options) => {
+    calls.push({ command, args, options });
+    return { error: undefined, signal: null, status: 0, stderr: '', stdout: '' };
+  });
+  assert.equal(result.status, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, process.execPath);
+  assert.deepEqual(calls[0].args.slice(-2), ['migrate', 'status']);
+  assert.equal(calls[0].options.cwd, dirname(PRISMA_DOTENV_CANDIDATES[0]));
+  assert.deepEqual(calls[0].options.env, prismaEnvironment);
+  assert.equal('NODE_OPTIONS' in calls[0].options.env, false);
+  assert.equal('DYLD_INSERT_LIBRARIES' in calls[0].options.env, false);
+  assert.equal('PRISMA_QUERY_ENGINE_BINARY' in calls[0].options.env, false);
+  assert.equal('PGHOST' in calls[0].options.env, false);
 });
 
 test('strict migration history requires every local migration to be applied in order', () => {

@@ -71,44 +71,114 @@ node --env-file=packages/db/.env.staging.local \
    1. 停止 BFF、队列和全部 worker 写入，记录 Git SHA、审计输出和维护窗口。
    2. 确认 Supabase 当前套餐的快照/PITR 能力；如果不能恢复，在停写后使用下方 `staging-libpq.mjs backup` 通过强制 TLS 的 `DIRECT_URL` 创建 PostgreSQL 17 custom format、仅 public schema、不包含 owner/privileges 的最终一致性备份。
    3. `staging-libpq.mjs backup` 会先用 PostgreSQL 17 `pg_restore --list` 校验 TOC、关键 schema/data 对象、文件权限和 SHA256；该结果仍不能替代恢复，必须再把归档恢复到隔离 PostgreSQL 17 数据库完成演练。
-   4. 先在本机 loopback PostgreSQL 17 中创建名称以 `supplier_restore_` 开头的专用空数据库，再创建不入 Git 的 `packages/db/.env.restore.local`；`DATABASE_URL` 和 `DIRECT_URL` 必须指向同一个 loopback 目标，完整 URL 使用单引号包住并仅由 Node `--env-file` 读取。`restore-rehearsal.mjs` 拒绝 Supabase 或任何远程主机，同时要求两个 URL 的数据库名与 `--confirm-database` 完全一致。在隔离恢复库实际执行待发布 migration，再验证 migration status、schema diff、关键数据量和数据回填；只有全部通过，才允许对 staging 执行一次 `migrate deploy`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～43 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表、`source_import_tasks`、`source_import_items`、`user_source_products`、`published_product_source_bindings`、两张 `exception_*` 表和四张 `after_sale_*` 表的唯一索引、复合租户/订单外键、生命周期与事件 CHECK、RLS 及表/sequence 权限。隔离库必须证明 43/43、schema diff 为空，一单一工单、工单/子单/采购同订单及 UUID 命令唯一键均生效，并通过第 43 个 migration 对三个 NULL/UNKNOWN 绕过的回滚式负向探针。
+   4. 使用下方固定的本机 Docker 路径创建名称以 `supplier_restore_` 开头的专用空数据库，再创建不入 Git 且权限恰为 `0600` 的 `packages/db/.env.restore.local`；`DATABASE_URL` 和 `DIRECT_URL` 必须使用同一密码并指向同一个数值 loopback（`127.0.0.1` 或 `::1`）目标，不接受可被名称解析覆盖的 `localhost`，完整 URL 使用单引号包住并仅由 Node `--env-file` 读取。禁止 SSH、socat、kubectl 或其他通用端口转发。`restore-rehearsal.mjs rehearse` 会清空 `DOCKER_HOST` / `DOCKER_CONTEXT` 影响，先固定当前 Docker context 的名称和本机 Unix-socket endpoint，后续每次都按该名称复核 endpoint，并为 image/container inspect 显式传入 `--context`；同时按 `--confirm-container` 核对运行中且 `--rm` 的容器、固定 PostgreSQL 17 image ID、默认 entrypoint、精确数据库标签、唯一数值-loopback 端口映射和无持久 volume 的 tmpfs 数据目录。连接后还会要求服务端确为 PostgreSQL 17、`data_directory` 精确为 `/var/lib/postgresql/data`、数据库名精确匹配且 restore 前没有用户对象。首次检查后固定完整 container ID，随后在同一进程的角色初始化、restore、迁移、status、diff 和每条断言前都按完整 ID 复核，拒绝名称重用。归档会以 `O_NOFOLLOW` 打开并通过 fd 确认为普通文件，再复制到进程私有、权限精确为 `0600` 的临时文件并绑定 SHA256；`pg_restore --list` 和正式 restore 分别使用 fresh fd 与 `/dev/fd/3`，不会再次信任原始路径，退出时删除副本并关闭原始 fd。迁移前必须把恢复库 `_prisma_migrations` 的前 33 条记录按应用顺序逐条与当前仓库 SQL 计算出的名称和 checksum 比较，并要求 `applied_steps_count=1`、finished、未 rollback；本地目录还必须保持精确 33→43 边界和既定第 34～43 个尾部。Prisma 使用仓库内固定 CLI/schema、固定仓库根目录 cwd 和 helper 重建的最小子环境，不继承 ambient `DATABASE_URL` / `DIRECT_URL`、`PG*`、`NODE_*`、`DOCKER_*` 或其他 Prisma 覆盖项。只有整条 `rehearse` 通过，才允许对 staging 执行一次受控 `migrate-once`。第 36 个 migration 还必须预查同一 `shop_id` 下非空 `platform_product_id` 没有重复；应用第 36～43 个后核对 `published_products.mutation_revision`、`sku_price_snapshot`、`price_synced_at`、`sku_inventory_snapshot`、`product_batch_tasks.state_revision`、两张 `product_batch_*` 表、`source_import_tasks`、`source_import_items`、`user_source_products`、`published_product_source_bindings`、两张 `exception_*` 表和四张 `after_sale_*` 表的唯一索引、复合租户/订单外键、生命周期与事件 CHECK、RLS 及表/sequence 权限。隔离库必须证明 43/43、schema diff 为空，一单一工单、工单/子单/采购同订单及 UUID 命令唯一键均生效，并通过第 43 个 migration 对三个 NULL/UNKNOWN 绕过的回滚式负向探针。
    5. 如果最终只读审计仍报告 `mockSupplierIdBackfillRequired=true`，必须在 migration 前使用专用脚本；默认模式只读检查，写模式要求显式 `--apply`、精确 project ref、33/43、最新第 33 个 migration、binding 表不存在、十个 mock 集合与现有元数据全部匹配。它只更新空白 `supplier_id` 并在同一事务回读；禁止运行通用 `scripts/seed.mjs`。
 
 ```bash
 # 将绝对路径和 Project Ref 替换为本次维护窗口的实际值。
+(
+set -euo pipefail
+
 node --env-file=packages/db/.env.staging.local \
   packages/db/scripts/staging-libpq.mjs backup \
   --output=/absolute/path/to/supplier-staging-pre-migration.dump \
   --confirm-project=YOUR_20_CHAR_PROJECT_REF
 
-# 先手工创建专用空库 supplier_restore_20260805，并让 restore env 的两个 URL 都指向它。
+# 创建不入 Git 的 packages/db/.env.restore.container.local，内容仅为：
+# POSTGRES_PASSWORD=<本次一次性随机密码>
+# POSTGRES_DB=supplier_restore_20260806
+# packages/db/.env.restore.local 的两个 URL 使用同一密码，并都指向
+# 127.0.0.1:55432/supplier_restore_20260806。
+chmod 600 packages/db/.env.restore.container.local packages/db/.env.restore.local
+
+# 清除可覆盖目标的 Docker 环境变量，固定当前 context，并先验证其为本机 Unix socket。
+restore_docker_context="$(
+  env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    /opt/homebrew/bin/docker context show
+)"
+restore_docker_endpoint="$(
+  env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    /opt/homebrew/bin/docker context inspect "$restore_docker_context" \
+    --format '{{.Endpoints.docker.Host}}'
+)"
+case "$restore_docker_endpoint" in
+  unix:///*) ;;
+  *) echo 'Refusing non-Unix Docker context.' >&2; exit 1 ;;
+esac
+
+env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+  /opt/homebrew/bin/docker --context "$restore_docker_context" \
+  image inspect postgres:17-alpine --format '{{.Id}}'
+# 必须得到：sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+
+if env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+  /opt/homebrew/bin/docker --context "$restore_docker_context" \
+  container inspect supplier-restore-rehearsal-pg17 >/dev/null 2>&1; then
+  echo 'Refusing to replace an existing restore container.' >&2
+  exit 1
+fi
+
+restore_container_started=0
+restore_cleanup() {
+  if [[ "$restore_container_started" == 1 ]]; then
+    if env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+      /opt/homebrew/bin/docker --context "$restore_docker_context" \
+      stop --timeout 10 supplier-restore-rehearsal-pg17 >/dev/null 2>&1; then
+      restore_container_started=0
+    fi
+  fi
+}
+trap restore_cleanup EXIT
+trap 'exit 130' INT TERM
+
+env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+  /opt/homebrew/bin/docker --context "$restore_docker_context" run --rm -d \
+  --name supplier-restore-rehearsal-pg17 \
+  --label com.supplier.restore-database=supplier_restore_20260806 \
+  -p 127.0.0.1:55432:5432 \
+  --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=256m \
+  --env-file packages/db/.env.restore.container.local \
+  postgres:17-alpine
+restore_container_started=1
+
+restore_ready=0
+for restore_attempt in {1..30}; do
+  if env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    /opt/homebrew/bin/docker --context "$restore_docker_context" \
+    exec supplier-restore-rehearsal-pg17 \
+    pg_isready -U postgres -d supplier_restore_20260806 >/dev/null 2>&1; then
+    restore_ready=1
+    break
+  fi
+  sleep 1
+done
+[[ "$restore_ready" == 1 ]] || { echo 'PostgreSQL 17 did not become ready.' >&2; exit 1; }
+
 node --env-file=packages/db/.env.restore.local \
-  packages/db/scripts/restore-rehearsal.mjs restore \
+  packages/db/scripts/restore-rehearsal.mjs rehearse \
   --archive=/absolute/path/to/supplier-staging-pre-migration.dump \
-  --confirm-database=supplier_restore_20260805
+  --confirm-database=supplier_restore_20260806 \
+  --confirm-container=supplier-restore-rehearsal-pg17
 
-node --env-file=packages/db/.env.restore.local \
-  packages/db/node_modules/prisma/build/index.js migrate deploy \
-  --schema packages/db/prisma/schema.prisma
-
-node --env-file=packages/db/.env.restore.local \
-  packages/db/node_modules/prisma/build/index.js migrate status \
-  --schema packages/db/prisma/schema.prisma
-
-node --env-file=packages/db/.env.restore.local \
-  packages/db/node_modules/prisma/build/index.js migrate diff \
-  --exit-code \
-  --from-schema-datasource packages/db/prisma/schema.prisma \
-  --to-schema-datamodel packages/db/prisma/schema.prisma
-
-node --env-file=packages/db/.env.restore.local \
-  packages/db/scripts/restore-rehearsal.mjs post-upgrade-assert \
-  --confirm-database=supplier_restore_20260805
+restore_cleanup
+restore_removed=0
+for restore_attempt in {1..30}; do
+  if ! env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    /opt/homebrew/bin/docker --context "$restore_docker_context" \
+    container inspect supplier-restore-rehearsal-pg17 >/dev/null 2>&1; then
+    restore_removed=1
+    break
+  fi
+  sleep 1
+done
+[[ "$restore_removed" == 1 ]] || { echo 'Restore container removal was not confirmed.' >&2; exit 1; }
+trap - EXIT INT TERM
+)
 ```
 
-`staging-libpq.mjs` 固定使用 Dashboard 提供的公开 `Supabase Root 2021 CA`（仓库路径 `infra/postgres/certs/supabase-prod-ca-2021.crt`）和 `verify-full`，同时校验 CA 与 hostname；证书 SHA256 指纹为 `80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA`，有效期至 2031-04-26。证书轮换必须从 Dashboard 重新下载并同步更新指纹测试，不能回退为只加密但不校验服务端身份的 `sslmode=require`。
+`staging-libpq.mjs` 的 libpq 子命令固定使用 Dashboard 提供的公开 `Supabase Root 2021 CA`（仓库路径 `infra/postgres/certs/supabase-prod-ca-2021.crt`）和 `verify-full`，同时校验 CA 与 hostname；证书 SHA256 指纹为 `80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA`，有效期至 2031-04-26。Prisma 5.22 的受控 datasource 使用同一 CA 文件，并固定为 Quaint 支持的 `sslmode=require`、`sslcert=<CA>`、`sslaccept=strict` 组合；缺少 `sslaccept=strict` 会退化为接受无效服务端证书。证书轮换必须从 Dashboard 重新下载并同步更新指纹测试，不能去掉 CA 校验或退回原始 URL 中可能存在的弱 TLS 参数。
 
-`restore-rehearsal.mjs restore` 会在恢复前执行幂等的角色初始化，模拟 Supabase 在 application migration 前已存在的 `anon` / `authenticated` 角色；它不能替代迁移后权限断言。隔离库还必须用发布前记录的表级行数和关键业务断言核对恢复结果。不要在普通 PostgreSQL 隔离库运行 `audit-staging.mjs`：该脚本刻意只接受同一个 Supabase project 的 pooler/direct host，用于防止把 staging 审计误连到其他数据库。
+`restore-rehearsal.mjs rehearse` 会在恢复前执行幂等的角色初始化，模拟 Supabase 在 application migration 前已存在的 `anon` / `authenticated` 角色，并在同一进程内完成固定的 Prisma 迁移、status、diff 和三条升级后断言；任何一步失败都不得拼接其他容器或数据库的结果。隔离库还必须用发布前记录的表级行数和关键业务断言核对恢复结果。不要在普通 PostgreSQL 隔离库运行 `audit-staging.mjs`：该脚本刻意只接受同一个 Supabase project 的 pooler/direct host，用于防止把 staging 审计误连到其他数据库。
 
 两种 `post-upgrade-assert` 都只允许运行仓库内固定的三条断言：schema isolation 和升级数据断言强制只读；工作流约束负向探针需要创建临时表，因此使用受控 read-write 会话，但脚本只写临时表并以 `ROLLBACK` 结束，不修改业务表。
 
@@ -129,8 +199,8 @@ node --env-file=packages/db/.env.staging.local \
   packages/db/scripts/audit-staging.mjs --allow-pending
 
 node --env-file=packages/db/.env.staging.local \
-  packages/db/node_modules/prisma/build/index.js migrate deploy \
-  --schema packages/db/prisma/schema.prisma
+  packages/db/scripts/staging-libpq.mjs migrate-once \
+  --confirm-project=YOUR_20_CHAR_PROJECT_REF
 
 node --env-file=packages/db/.env.staging.local \
   packages/db/scripts/staging-libpq.mjs post-upgrade-assert \
@@ -139,6 +209,8 @@ node --env-file=packages/db/.env.staging.local \
 node --env-file=packages/db/.env.staging.local \
   packages/db/scripts/audit-staging.mjs
 ```
+
+`migrate-once` 不继承 shell 中的数据库或 libpq 环境，只接受指向 `postgres` 数据库且使用 5432 session 端口的 `DIRECT_URL`，并从已经通过 Project Ref 与 Supabase host 校验的值重建唯一的严格 TLS datasource。每次 Prisma 子进程启动前，它都会 fail-closed 检查 Prisma 可能自动加载的仓库根 `.env`、仓库根 `prisma/.env`、`packages/db/.env`、`packages/db/prisma/.env`：文件不存在可以接受；存在时必须是非 symlink 的普通文件且只能赋值 `DATABASE_URL` / `DIRECT_URL`。随后脚本在最小子进程环境中执行完整只读审计，要求 Prisma status 精确报告第 34～43 个 migration，再用固定 Prisma CLI、schema、argv 和超时执行 deploy，并复核 migration status。审计、status、deploy 是分进程快照，不能消除其间的并发数据库变化；维护窗口必须先停止 BFF、队列和全部 worker，并确保只有这一个 `migrate-once` 执行器，任何门禁失败都不得继续写入或并行重试。
 
 禁止在 staging 使用 `pnpm db:migrate` / `prisma migrate dev`、`prisma migrate reset`，也禁止手工修改 `_prisma_migrations`。已成功但有逻辑问题的 migration 只能通过新的 corrective migration 前向修复；快照恢复必须先恢复到隔离库验证，不能直接覆盖 staging。
 
@@ -156,6 +228,10 @@ pnpm audit:supabase-boundary
 2026-08-03 的旧基线审计确认当时 staging 为 PostgreSQL 17.6、33/33 migration applied、0 unfinished、0 rolled back、checksum 全匹配且 live schema diff 为空；28/28 public 表启用 RLS，anon/authenticated 对表和 26 个 sequence 均无权限。当前候选的实时只读预检现已完成：staging 仍为 33/43，第 34～43 个是连续 pending 尾部，已应用前缀 checksum、unfinished/rolled back、RLS/ACL 与同店铺非空 `platform_product_id` 重复前置条件全部通过；因存在 pending，当前 datamodel schema diff 按规则标记 `deferred`。本次 staging 真实数据一致性备份为 150265 bytes，SHA256 `b4eb1f374c75f5aa6244568443143394628b9a252dfbad3114473ae9d2e6fc54`；归档已在隔离临时 PostgreSQL 17 数据库完成 33→43 恢复升级，43/43、schema diff 无差异、数据量为 10 条货源/0 条铺货/0 条订单/0 条采购、41/41 public 表 RLS，以及 ACL、工作流约束和升级数据断言全部通过。`supplier-assets` 上传、公开读取、删除与关闭公开注册、匿名业务表拒绝仍沿用旧候选证据。第 34～43 个尚未实际应用到 staging；下一步必须取得维护窗口授权，停止 BFF、队列和全部 worker 写入，由单一 migration-once 执行，再复核 43/43、checksum、schema diff、工作流负向约束与 RLS/ACL，随后重部署并完成 smoke。隔离演练不得写成 staging 已迁移。
 
 2026-08-05 又用 `staging-libpq.mjs` 对真实 staging 完成一次只读工具链预检：PostgreSQL 17.10 在 `verify-full` 下通过官方 CA 连接 PostgreSQL 17.6，生成 150239 bytes、权限 `0600`、365 个有效 TOC 条目的 custom archive，SHA256 为 `a325f82ddb2e9d1815de9860bab99c46ce7ba01e1692cb3eae5a95ceec21be98`，且原子发布后无 partial 残留。该文件仅证明备份入口真实可执行，不是维护停写后的最终备份，也未替代上述隔离恢复演练。
+
+2026-08-06 又以该 150239 bytes 预检归档验证当时的分步 `restore-rehearsal.mjs` PostgreSQL 17 Docker 路径：通过宿主机 `127.0.0.1` 端口转发恢复全部 365 个 TOC 条目，顺序应用第 34～43 个 migration 后得到 43/43、`Database schema is up to date!`、`No difference detected.`，三组 post-upgrade assertions 全部通过；一次性容器随后删除。脱敏的输入、镜像 digest、执行顺序、结果和清理证据见 [2026-08-06 本地 PG17 恢复演练](./evidence/2026-08-06-local-pg17-restore-rehearsal.md)。该证据证明真实归档和 Docker 路径可用，但早于当前把恢复、迁移与断言绑定到同一完整 container ID 的单进程 `rehearse`。
+
+同日随后使用当前单进程 `rehearse` 对同一归档重新完成真实本地 PostgreSQL 17 复验：私有 `0600` 归档快照、两次 fresh FD custom-format restore、精确 33 条 migration manifest、固定 Docker context/完整 container ID、deploy/status/diff 与三条断言全部通过，结果为 365 个 TOC、3 个 Prisma checks、3 条 assertions；一次性容器已确认删除。证据见 [2026-08-06 单进程 PG17 恢复演练](./evidence/2026-08-06-integrated-local-pg17-restore-rehearsal.md)。两次本地演练都不是维护停写后的最终备份与最终恢复复验，也没有写入 staging。
 
 ## 4. 部署 Cloudflare staging gateway
 

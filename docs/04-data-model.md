@@ -1,9 +1,11 @@
 # 核心数据模型
 
-> 当前数据层：Supabase / PostgreSQL 15（业务主库 + Auth + Storage）、Redis（缓存与锁）；Milvus 为后续向量规模化选项。
+> 当前数据层：Supabase / PostgreSQL 17.6（业务主库 + Auth + Storage）、Redis（缓存与锁）；Milvus 为后续向量规模化选项。
 > 货源大表（source_products）若达到亿级再考虑 Citus 分区或独立 PG 集群。
 
 > **权威说明**：当前可执行数据库定义以 `packages/db/prisma/schema.prisma` 和 `packages/db/prisma/migrations/` 为准。下方 MySQL DDL 是早期容量设计草案，不能用于当前环境建库、迁移或 schema diff。
+
+> **2026-08-06 staging 状态**：维护窗口已完成十条 mock 货源的定向 `supplierId` backfill、第 34～43 个 migration、43/43 status、live schema diff `No difference detected`，并复核全部 public 表 RLS 与 `anon` / `authenticated` 表、sequence、default ACL；当前 BFF、Cloudflare Gateway 与 Web 候选也已完成部署 smoke。该结果覆盖下文历史里程碑中“staging 仍为 33/43”“migration 尚未应用”或“候选尚未部署”的阶段性表述。真实 Auth 会话以及抖店、1688、LLM、图片服务 E2E 仍未完成，因此不能据此宣称生产可用。
 
 ## 1. 实体关系（ER 概览）
 
@@ -302,7 +304,7 @@ erDiagram
 - 新发布或恢复的商品必须先回读平台库存；请求值与平台值不一致时保存平台事实并进入待同步，不能直接标记 `synced`。完整 `product.editV2` 前后也必须回读并保留当前平台库存，避免标题或详情修改覆盖独立库存变化。
 - 自动库存 worker 与批量库存任务都按回读结果只续跑未达目标 SKU；只有全部 SKU 与 1688 目标一致才更新 `inventoryFingerprint/version` 和成功状态。源版本在平台 I/O 期间变化时，最终条件写入失败并保留新目标。
 
-两张批量表均启用 RLS，并撤销 `anon` / `authenticated` 对表和 sequence 的直接权限。权威定义见 `packages/db/prisma/schema.prisma` 的 `ProductBatchTask`、`ProductBatchItem`、`PublishedProduct.mutationRevision`、`PublishedProduct.skuPriceSnapshot`、`PublishedProduct.skuInventorySnapshot`，以及 migration `20260804050000_add_product_batch_operations`、`20260804120000_add_published_product_price_snapshot` 与 `20260804183000_add_published_product_inventory_snapshot`。三条 migration 均尚未应用到 staging。
+两张批量表均启用 RLS，并撤销 `anon` / `authenticated` 对表和 sequence 的直接权限。权威定义见 `packages/db/prisma/schema.prisma` 的 `ProductBatchTask`、`ProductBatchItem`、`PublishedProduct.mutationRevision`、`PublishedProduct.skuPriceSnapshot`、`PublishedProduct.skuInventorySnapshot`，以及 migration `20260804050000_add_product_batch_operations`、`20260804120000_add_published_product_price_snapshot` 与 `20260804183000_add_published_product_inventory_snapshot`。三条 migration 已于 2026-08-06 应用到 staging，并通过 43/43、schema diff、RLS/ACL 复核。
 
 ### 3.6 持久化批量货源采集
 
@@ -315,7 +317,7 @@ erDiagram
 - `source_products` 仍是全局 offer 缓存。`user_source_products` 以 `user_id + source_product_id` 唯一，只表达“该用户采集过”，记录首次/最近采集时间；它不等同于 `user_favorites`，也不自动触发打分、铺货或换源。
 - 真实环境只有在运营方验证价格、库存等详情不随买家账号变化并显式配置 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 后才允许启用；否则启动与运行时均 fail-closed。若验证结果为账号范围数据，必须新增用户级快照模型，不能继续写全局缓存。
 
-三张新表均启用 RLS，并撤销 `anon` / `authenticated` 对表和 sequence 的直接权限。权威定义见 `SourceImportTask`、`SourceImportItem`、`UserSourceProduct` 与 migration `20260804210000_add_source_imports`；该 migration 尚未应用到 staging。
+三张新表均启用 RLS，并撤销 `anon` / `authenticated` 对表和 sequence 的直接权限。权威定义见 `SourceImportTask`、`SourceImportItem`、`UserSourceProduct` 与 migration `20260804210000_add_source_imports`；该 migration 已于 2026-08-06 应用到 staging，并通过 43/43、schema diff、RLS/ACL 复核。
 
 ### 3.7 已发布商品版本化货源绑定
 
@@ -327,7 +329,7 @@ erDiagram
 - `order_items.source_binding_id / source_unit_cost / source_one_piece_drop` 与已有 offer/supplier/spec 字段共同构成付款时采购快照。订单同步按 `paid_at` 唯一匹配绑定；采购必须读取订单项快照，不能读取后来可能已切换的商品当前货源。
 - 库存 worker 以当前 binding 的 revision、货源和指纹做 CAS，再把稳定平台 SKU key 映射到当前 1688 spec 库存。目标货源可以包含未发布 SKU，但所有已发布路由必须非空、唯一且存在；不得用商品总库存推导未知 spec。
 
-第 40 个 migration `20260805010000_add_published_source_bindings` 会为历史已发布商品回填 revision 1，并为已有订单项回填可用的绑定/成本/一件代发快照；新表启用 RLS，`anon` / `authenticated` 对表和 sequence 均无直接权限。该 migration 与后续第 41～43 个 migration 均尚未应用到 staging，当前账面仍为 33/43。
+第 40 个 migration `20260805010000_add_published_source_bindings` 会为历史已发布商品回填 revision 1，并为已有订单项回填可用的绑定/成本/一件代发快照；新表启用 RLS，`anon` / `authenticated` 对表和 sequence 均无直接权限。该 migration 与后续第 41～43 个 migration 已于 2026-08-06 应用到 staging，当前账面为 43/43，schema diff、RLS/ACL 复核均通过。
 
 ### 3.8 统一异常中心
 
@@ -340,7 +342,7 @@ erDiagram
 - `action_href` 不是外部输入：服务端只能从固定异常目录生成站内相对路径，Web 再按 `/orders`、`/published`、`/settings`、`/sources` 和 `/after-sales` 等明确站内白名单校验。事件 evidence 只返回结构化展示项，生产者上下文会对 token、Cookie、密码和密钥字段脱敏。
 - `purchase_orders.exception_code` 为旧的自由文本 `exception_reason` 增加稳定分类键。第 41 个 migration 只依据销售售后状态、采购重试资格和是否曾发货等持久事实回填旧未解决记录，不解析历史自由文本。
 
-第 41 个 migration `20260805020000_add_exception_center` 新增两张异常表、枚举、复合租户外键、生命周期 CHECK、RLS 和客户端权限回收。它已在一次性 PostgreSQL 15 从空库完成当时的 41/41、schema diff、RLS/ACL 与四类旧采购异常回填验证。第 43 个 migration 会前向收紧事件迁移 CHECK，避免可空 `from_status` / `to_status` 让 PostgreSQL CHECK 的 UNKNOWN 被视为通过；第 41～43 个 migration 均尚未应用到 staging，当前账面仍为 33/43。
+第 41 个 migration `20260805020000_add_exception_center` 新增两张异常表、枚举、复合租户外键、生命周期 CHECK、RLS 和客户端权限回收。它已在一次性 PostgreSQL 15 从空库完成当时的 41/41、schema diff、RLS/ACL 与四类旧采购异常回填验证。第 43 个 migration 会前向收紧事件迁移 CHECK，避免可空 `from_status` / `to_status` 让 PostgreSQL CHECK 的 UNKNOWN 被视为通过；第 41～43 个 migration 已于 2026-08-06 应用到 staging，当前账面为 43/43，schema diff、RLS/ACL 复核均通过。
 
 ### 3.9 售后工单基础闭环
 
@@ -354,7 +356,7 @@ erDiagram
 - 命令事件使用全局唯一 UUID `client_request_id` 与请求指纹支持同参幂等、异参冲突；`case_id + case_revision` 唯一，工单 CAS 更新和事件写入处于同一 Serializable 事务。事件迁移只允许 `opened / source_updated / reopened / claimed / action_started / action_confirmed / verification_failed / closed` 的合法组合。
 - 关闭前必须取得 5 分钟内的销售平台回读，并确认售后不再处理中、部分退款剩余履约决策和实际退款金额有效、当前采购版本的人工动作已确认、采购异常与最终实际成本已核销。任一条件不满足时只追加 `verification_failed` 证据，不写 `closed`。
 
-第 42 个 migration `20260805030000_add_after_sale_cases` 新增四张售后表、生命周期枚举、一单一工单与命令唯一键、复合租户/订单外键、状态和事件 CHECK、RLS 及客户端表/sequence 权限回收。第 43 个 migration `20260805040000_harden_workflow_check_null_semantics` 不修改第 41/42 个 migration 的 checksum，而是在事务内重建异常事件、售后采购关联和售后事件的三个 CHECK，以最外层 `IS TRUE` 拒绝 UNKNOWN。一次性 PostgreSQL 15 已完成 43/43 deploy/status、live schema diff `No difference detected`、三个回滚式负向探针和合法状态正向探针，并复核全部 public 表 RLS 及 anon/authenticated ACL；临时资源已清理。当前实时只读预检确认 staging 仍为 33/43；150265 bytes 的真实数据一致性备份（SHA256 `b4eb1f374c75f5aa6244568443143394628b9a252dfbad3114473ae9d2e6fc54`）已在隔离临时库完成 33→43 恢复升级，43/43、schema diff、10/0/0/0 数据量、41/41 public 表 RLS、ACL、约束与升级数据断言通过。第 34～43 个 migration 尚未实际应用到 staging，也尚未重部署或完成真实平台 E2E，不能视为生产可用。
+第 42 个 migration `20260805030000_add_after_sale_cases` 新增四张售后表、生命周期枚举、一单一工单与命令唯一键、复合租户/订单外键、状态和事件 CHECK、RLS 及客户端表/sequence 权限回收。第 43 个 migration `20260805040000_harden_workflow_check_null_semantics` 不修改第 41/42 个 migration 的 checksum，而是在事务内重建异常事件、售后采购关联和售后事件的三个 CHECK，以最外层 `IS TRUE` 拒绝 UNKNOWN。一次性 PostgreSQL 15 已完成 43/43 deploy/status、live schema diff `No difference detected`、三个回滚式负向探针和合法状态正向探针，并复核全部 public 表 RLS 及 anon/authenticated ACL；临时资源已清理。2026-08-04 的真实数据备份和隔离 33→43 恢复升级是迁移前演练；该阶段性“staging 仍为 33/43”结论已被 2026-08-06 维护覆盖：十条 mock 货源完成定向 `supplierId` backfill，第 34～43 个 migration 已应用，staging 达到 43/43、schema diff 无差异且 RLS/ACL 复核通过，BFF、Cloudflare Gateway 与 Web 候选完成部署 smoke。真实 Auth 与抖店、1688、LLM、图片服务 E2E 仍未完成，系统仍不能视为生产可用。
 
 ## 4. 核心表 Schema（历史 MySQL 设计草案）
 

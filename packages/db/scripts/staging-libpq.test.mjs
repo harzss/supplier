@@ -31,6 +31,7 @@ import {
 } from './staging-libpq.mjs';
 
 const PROJECT_REF = 'abcdefghijklmnopqrst';
+const GIT_SHA = 'a'.repeat(40);
 const PASSWORD = 'p@ss:word';
 const DUMP_CONTENT = Buffer.from('fake PostgreSQL custom archive');
 const EXPECTED_ASSERTION_BASENAMES = Object.freeze([
@@ -49,6 +50,8 @@ const ARCHIVE_LIST = `
 function stagingEnvironment() {
   return {
     STAGING_PROJECT_REF: PROJECT_REF,
+    SUPPLIER_STAGING_MAINTENANCE_GIT_SHA: GIT_SHA,
+    SUPPLIER_STAGING_MAINTENANCE_IMAGE: '1',
     DATABASE_URL: `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1`,
     DIRECT_URL: `postgresql://postgres.${PROJECT_REF}:p%40ss%3Aword@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=disable&options=unsafe`,
     PGHOST: 'attacker.invalid',
@@ -186,6 +189,8 @@ test('builds a minimal fixed libpq environment from the validated direct URL', (
     LC_ALL: 'C',
     PRISMA_HIDE_UPDATE_MESSAGE: '1',
     STAGING_PROJECT_REF: PROJECT_REF,
+    SUPPLIER_STAGING_MAINTENANCE_GIT_SHA: GIT_SHA,
+    SUPPLIER_STAGING_MAINTENANCE_IMAGE: '1',
   });
   assert.deepEqual(configuration.prismaEnvironment, {
     DATABASE_URL: canonicalDatasource,
@@ -233,6 +238,7 @@ test('runs the full read-only audit and exact 34-to-43 status gate before migrat
   const result = await runStagingLibpq({
     args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
     environment: stagingEnvironment(),
+    platform: 'linux',
     prismaDotenvCandidates: [safeDotenv],
     spawnSync,
   });
@@ -269,11 +275,38 @@ test('runs the full read-only audit and exact 34-to-43 status gate before migrat
       'LC_ALL',
       'PRISMA_HIDE_UPDATE_MESSAGE',
     ];
-    if (index === 0) expectedEnvironmentKeys.push('STAGING_PROJECT_REF');
+    if (index === 0) {
+      expectedEnvironmentKeys.push(
+        'STAGING_PROJECT_REF',
+        'SUPPLIER_STAGING_MAINTENANCE_GIT_SHA',
+        'SUPPLIER_STAGING_MAINTENANCE_IMAGE',
+      );
+    }
     assert.deepEqual(Object.keys(call.options.env).sort(), expectedEnvironmentKeys.sort());
     assert.equal(call.options.env.STAGING_PROJECT_REF, index === 0 ? PROJECT_REF : undefined);
+    assert.equal(
+      call.options.env.SUPPLIER_STAGING_MAINTENANCE_GIT_SHA,
+      index === 0 ? GIT_SHA : undefined,
+    );
     assert.equal(call.args.join(' ').includes(PASSWORD), false);
   }
+});
+
+test('refuses migrate-once outside the verified Linux maintenance runtime', async () => {
+  const calls = [];
+  await assert.rejects(
+    runStagingLibpq({
+      args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
+      environment: stagingEnvironment(),
+      platform: 'darwin',
+      spawnSync: (...args) => {
+        calls.push(args);
+        return successfulResult();
+      },
+    }),
+    /verified Linux staging-maintenance image/,
+  );
+  assert.equal(calls.length, 0);
 });
 
 test('refuses migration unless the audit and exact pending suffix both pass', async () => {
@@ -324,6 +357,7 @@ test('refuses migration unless the audit and exact pending suffix both pass', as
       runStagingLibpq({
         args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
         environment: stagingEnvironment(),
+        platform: 'linux',
         spawnSync: (command, args, options) => {
           calls.push({ command, args, options });
           return testCase.results[calls.length - 1];
@@ -363,6 +397,7 @@ test('rejects unsafe Prisma dotenv candidates before any migration child process
       runStagingLibpq({
         args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
         environment: stagingEnvironment(),
+        platform: 'linux',
         prismaDotenvCandidates: [candidate],
         spawnSync: (...args) => {
           calls.push(args);
@@ -412,6 +447,7 @@ test('rejects unsafe migration ports and non-default databases before spawning',
       runStagingLibpq({
         args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
         environment,
+        platform: 'linux',
         spawnSync: (...args) => {
           calls.push(args);
           return successfulResult();
@@ -433,6 +469,7 @@ test('rejects a NUL-bearing direct credential before spawning or exposing it', a
     runStagingLibpq({
       args: ['migrate-once', `--confirm-project=${PROJECT_REF}`],
       environment,
+      platform: 'linux',
       spawnSync: (...args) => {
         calls.push(args);
         return successfulResult();
@@ -453,6 +490,7 @@ test('rejects an unconfirmed target and missing direct credentials before spawni
     runStagingLibpq({
       args: ['migrate-once', '--confirm-project=zyxwvutsrqponmlkjihg'],
       environment: stagingEnvironment(),
+      platform: 'linux',
       spawnSync: fake.spawnSync,
     }),
     /must exactly match/,

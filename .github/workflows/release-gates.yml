@@ -87,6 +87,9 @@ jobs:
         run: |
           docker build --target bff -t supplier-bff:${IMAGE_TAG} .
           docker build --target migrate -t supplier-migrate:${IMAGE_TAG} .
+          docker build --target staging-maintenance \
+            --build-arg SUPPLIER_GIT_SHA=${IMAGE_TAG} \
+            -t supplier-staging-maintenance:${IMAGE_TAG} .
           docker build --target web -t supplier-web:${IMAGE_TAG} \
             --build-arg NEXT_PUBLIC_AUTH_MODE=supabase \
             --build-arg NEXT_PUBLIC_SIGNUP_ENABLED=false \
@@ -183,6 +186,12 @@ jobs:
 
           test "$(docker image inspect supplier-bff:${IMAGE_TAG} --format '{{.Config.User}}')" = node
           test "$(docker image inspect supplier-web:${IMAGE_TAG} --format '{{.Config.User}}')" = node
+          test "$(docker image inspect supplier-staging-maintenance:${IMAGE_TAG} --format '{{.Config.User}}')" = node
+          test "$(docker image inspect supplier-staging-maintenance:${IMAGE_TAG} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = "${IMAGE_TAG}"
+          docker run --rm --read-only --tmpfs /tmp --user node --cap-drop ALL \
+            --security-opt no-new-privileges \
+            supplier-staging-maintenance:${IMAGE_TAG} \
+            -e "require('./packages/db/node_modules/@prisma/client'); require('fs').accessSync('infra/postgres/certs/supabase-prod-ca-2021.crt')"
           docker stop supplier-bff-ci supplier-web-ci
           test "$(docker inspect supplier-bff-ci --format '{{.State.ExitCode}}')" = 0
           test "$(docker inspect supplier-web-ci --format '{{.State.ExitCode}}')" = 0

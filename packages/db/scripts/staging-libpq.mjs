@@ -18,6 +18,14 @@ import {
   assertSafePrismaDotenvCandidates,
   describeStagingDatasource,
 } from './audit-staging.mjs';
+import {
+  SUPABASE_CA_CERT_PATH,
+  assertStagingMaintenanceRuntime,
+  buildStrictSupabasePrismaDatasource,
+  decodeUrlComponent,
+} from './staging-maintenance-runtime.mjs';
+
+export { SUPABASE_CA_CERT_PATH } from './staging-maintenance-runtime.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const packageDir = dirname(dirname(scriptPath));
@@ -27,13 +35,6 @@ export const LIBPQ_BIN_DIR = '/opt/homebrew/opt/libpq@17/bin';
 export const AUDIT_STAGING_PATH = join(packageDir, 'scripts', 'audit-staging.mjs');
 export const PRISMA_CLI_PATH = join(packageDir, 'node_modules', 'prisma', 'build', 'index.js');
 export const PRISMA_SCHEMA_PATH = join(packageDir, 'prisma', 'schema.prisma');
-export const SUPABASE_CA_CERT_PATH = join(
-  repositoryRoot,
-  'infra',
-  'postgres',
-  'certs',
-  'supabase-prod-ca-2021.crt',
-);
 const WORKFLOW_CHECK_ASSERTION_PATH = join(
   repositoryRoot,
   'infra',
@@ -158,6 +159,8 @@ export function readStagingLibpqConfiguration(args, environment) {
       LC_ALL: 'C',
       PRISMA_HIDE_UPDATE_MESSAGE: '1',
       STAGING_PROJECT_REF: datasource.projectRef,
+      SUPPLIER_STAGING_MAINTENANCE_GIT_SHA: environment.SUPPLIER_STAGING_MAINTENANCE_GIT_SHA,
+      SUPPLIER_STAGING_MAINTENANCE_IMAGE: environment.SUPPLIER_STAGING_MAINTENANCE_IMAGE,
     },
     prismaEnvironment: {
       DATABASE_URL: prismaDatasourceUrl,
@@ -194,6 +197,7 @@ export async function runStagingLibpq({
   unlinkFile = nodeUnlink,
   createReadStream = nodeCreateReadStream,
   prismaDotenvCandidates = PRISMA_DOTENV_CANDIDATES,
+  platform = process.platform,
 } = {}) {
   const configuration = readStagingLibpqConfiguration(args, environment);
   if (configuration.action === 'backup') {
@@ -210,6 +214,7 @@ export async function runStagingLibpq({
   }
 
   if (configuration.action === 'migrate-once') {
+    assertStagingMaintenanceRuntime(environment, platform);
     return runMigration(configuration, spawnSync, prismaDotenvCandidates);
   }
 
@@ -422,31 +427,6 @@ async function hashFile(path, createReadStream) {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest('hex');
-}
-
-function decodeUrlComponent(value, label) {
-  try {
-    const decoded = decodeURIComponent(value);
-    if (decoded.includes('\0')) throw new Error('NUL');
-    return decoded;
-  } catch {
-    throw new Error(`${label} must use valid percent encoding without NUL bytes.`);
-  }
-}
-
-export function buildStrictSupabasePrismaDatasource(directUrl, datasource) {
-  const username = encodeURIComponent(
-    decodeUrlComponent(directUrl.username, 'DIRECT_URL username'),
-  );
-  const password = encodeURIComponent(
-    decodeUrlComponent(directUrl.password, 'DIRECT_URL password'),
-  );
-  return (
-    `postgresql://${username}:${password}@${datasource.direct.host}:` +
-    `${datasource.direct.port}/${encodeURIComponent(datasource.database)}` +
-    `?sslmode=require&sslcert=${encodeURIComponent(SUPABASE_CA_CERT_PATH)}` +
-    '&sslaccept=strict'
-  );
 }
 
 async function main() {

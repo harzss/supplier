@@ -10,6 +10,11 @@ import { parseEnv } from 'node:util';
 
 import prismaPackage from '@prisma/client';
 
+import {
+  assertStagingMaintenanceRuntime,
+  buildStrictSupabasePrismaDatasource,
+} from './staging-maintenance-runtime.mjs';
+
 const { PrismaClient } = prismaPackage;
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(scriptDir);
@@ -108,11 +113,21 @@ export function readAuditConfiguration(environment) {
     databaseUrl: environment.DATABASE_URL,
     directUrl: environment.DIRECT_URL,
   });
+  if (datasource.direct.port !== '5432') {
+    throw new Error('Staging audit DIRECT_URL must use the PostgreSQL session port 5432.');
+  }
+  if (datasource.database !== 'postgres') {
+    throw new Error('Staging audit must target the postgres database.');
+  }
+  const prismaDatasourceUrl = buildStrictSupabasePrismaDatasource(
+    new URL(environment.DIRECT_URL),
+    datasource,
+  );
   return {
     datasource,
     prismaEnvironment: {
-      DATABASE_URL: new URL(environment.DATABASE_URL).toString(),
-      DIRECT_URL: new URL(environment.DIRECT_URL).toString(),
+      DATABASE_URL: prismaDatasourceUrl,
+      DIRECT_URL: prismaDatasourceUrl,
       LC_ALL: 'C',
       PRISMA_HIDE_UPDATE_MESSAGE: '1',
     },
@@ -413,6 +428,7 @@ export function assertMigrationHistory(
 }
 
 async function main() {
+  assertStagingMaintenanceRuntime(process.env, process.platform);
   const { allowPending } = readAuditOptions(process.argv.slice(2));
   const { datasource, prismaEnvironment } = readAuditConfiguration(process.env);
   await assertSafePrismaDotenvCandidates();

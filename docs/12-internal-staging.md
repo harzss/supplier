@@ -48,26 +48,30 @@ node --test deploy/cloudflare/staging-gateway/worker.test.mjs
 
 1. 新建 `supplier-staging` 免费项目，优先选择 Singapore 区域。
 2. 保存 Project URL、新式 Publishable Key（`sb_publishable_*`）、新式 Secret Key（`sb_secret_*`）、数据库密码、Pooler URL 和 Direct URL；不要放入 Git、聊天或日志。legacy anon / service-role JWT 只用于迁移期兼容，不能作为新环境默认值。
-3. 从模板创建本地文件 `packages/db/.env.staging.local`，权限设为仅当前用户可读写。
-4. 每次先运行只读审计。脚本会先在只读事务内检查远端 migration、checksum、失败/回滚记录、RLS/ACL 和关键数据前置条件；默认严格模式要求 0 pending，并继续执行 live schema diff：
+3. 从模板创建本地文件 `packages/db/.env.staging.local`，权限设为仅当前用户可读写。该文件必须是当前用户所有、非 symlink、权限精确为 `0600` 的普通文件，且只能包含 `STAGING_PROJECT_REF`、`DATABASE_URL`、`DIRECT_URL` 三个键。
+4. 所有连接 staging 的 Prisma 5.22 操作（audit、backfill、migration status/deploy/status 和 schema diff）只允许通过固定宿主机 runner 进入当前 clean Git SHA 的 Linux `staging-maintenance` 镜像。runner 不把源 `.env` 交给 Docker：它以 `O_NOFOLLOW` 打开固定文件，要求当前用户所有、权限精确 `0600`，并用“恰好三个无引号、无注释、无 CR/控制字符的 ASCII 单行赋值”语法解析，只把三个命名变量加入 Docker CLI 的最小子环境，再通过 `--env KEY` 传入容器。它还会清除 ambient `NODE_OPTIONS`、`DOCKER_*` 与数据库变量影响，固定本机 Unix-socket context，要求 clean worktree，用 `git archive --format=tar HEAD` 作为唯一 build context，核对完整 image ID、OCI revision label 和非 root 用户，最后只按完整 image ID 加 hardening flags 运行。镜像内 runtime marker 只是误用防护，不是镜像身份证明；宿主机 runner 的核对不可省略。
 
 ```bash
-node --env-file=packages/db/.env.staging.local \
-  packages/db/scripts/audit-staging.mjs
+node packages/db/scripts/staging-maintenance-host.mjs build
+```
+
+5. 每次先在上述镜像内运行只读审计。脚本会先在只读事务内检查远端 migration、checksum、失败/回滚记录、RLS/ACL 和关键数据前置条件；默认严格模式要求 0 pending，并继续执行 live schema diff：
+
+```bash
+node packages/db/scripts/staging-maintenance-host.mjs audit
 ```
 
 如果预期存在待发布 migration，迁移前审计必须显式使用 `--allow-pending`：
 
 ```bash
-node --env-file=packages/db/.env.staging.local \
-  packages/db/scripts/audit-staging.mjs --allow-pending
+node packages/db/scripts/staging-maintenance-host.mjs audit --allow-pending
 ```
 
 该模式只接受“远端已应用 migration 严格匹配本地前缀、pending 为连续本地尾部”；unknown、乱序、checksum 不一致、unfinished、rolled back、RLS/ACL 失配或同一店铺非空 `platform_product_id` 重复都会失败。Prisma `migrate status` 只有在精确返回同一 pending 清单时才允许退出 1；输出会列出 `pendingNames`，并将 datamodel schema diff 标为 `deferred`，不能作为 schema 已一致或 migration 已完成的证据。
 
 默认严格审计通过且输出 `Database schema is up to date!`、`No difference detected.` 时，**不要再运行 `migrate deploy`**。
 
-5. 只有出现 pending migration 时，才进入受控迁移流程：
+6. 只有出现 pending migration 时，才进入受控迁移流程：
    1. 停止 BFF、队列和全部 worker 写入，记录 Git SHA、审计输出和维护窗口。
    2. 确认 Supabase 当前套餐的快照/PITR 能力；如果不能恢复，在停写后使用下方 `staging-libpq.mjs backup` 通过强制 TLS 的 `DIRECT_URL` 创建 PostgreSQL 17 custom format、仅 public schema、不包含 owner/privileges 的最终一致性备份。
    3. `staging-libpq.mjs backup` 会先用 PostgreSQL 17 `pg_restore --list` 校验 TOC、关键 schema/data 对象、文件权限和 SHA256；该结果仍不能替代恢复，必须再把归档恢复到隔离 PostgreSQL 17 数据库完成演练。
@@ -176,46 +180,42 @@ trap - EXIT INT TERM
 )
 ```
 
-`staging-libpq.mjs` 的 libpq 子命令固定使用 Dashboard 提供的公开 `Supabase Root 2021 CA`（仓库路径 `infra/postgres/certs/supabase-prod-ca-2021.crt`）和 `verify-full`，同时校验 CA 与 hostname；证书 SHA256 指纹为 `80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA`，有效期至 2031-04-26。Prisma 5.22 的受控 datasource（包括 `migrate-once` 与 mock `supplier_id` backfill）使用同一 CA 文件，并固定为 Quaint 支持的 `sslmode=require`、`sslcert=<CA>`、`sslaccept=strict` 组合；缺少 `sslaccept=strict` 会退化为接受无效服务端证书。证书轮换必须从 Dashboard 重新下载并同步更新指纹测试，不能去掉 CA 校验或退回原始 URL 中可能存在的弱 TLS 参数。
+`staging-libpq.mjs` 的宿主机 libpq 子命令固定使用 Dashboard 提供的公开 `Supabase Root 2021 CA`（仓库路径 `infra/postgres/certs/supabase-prod-ca-2021.crt`）和 `verify-full`，同时校验 CA 与 hostname；证书 SHA256 指纹为 `80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA`，有效期至 2031-04-26。Prisma 5.22 的受控 datasource（audit、backfill 与 migrate-once）使用同一 CA 文件，并固定为 Quaint 支持的 `sslmode=require`、`sslcert=<CA>`、`sslaccept=strict` 组合；缺少 `sslaccept=strict` 会退化为接受无效服务端证书，明确禁止使用 `accept_invalid_certs`。证书轮换必须从 Dashboard 重新下载并同步更新指纹测试，不能去掉 CA 校验或退回原始 URL 中可能存在的弱 TLS 参数。
+
+2026-08-06 维护前真实只读检查发现 macOS/Darwin Prisma 5.22 native-tls 即使分别固定已验证的 Supabase root、intermediate 或当前 pooler leaf，仍在事务开始前返回 P1011 `The certificate was not trusted`；没有发生写入。同一 pooler 的服务端链与 hostname 已由 OpenSSL 使用仓库 root 验证为 OK，同一 root 和 strict datasource 在 Linux Prisma Client 只读事务及 schema-engine `migrate status` 均成功，后者精确报告第 34～43 个 pending migration。因此 staging Prisma 操作统一进入上述 immutable Linux maintenance image；宿主机 Darwin 直接执行会在联网前 fail-closed，不能通过关闭证书验证绕过。
 
 `restore-rehearsal.mjs rehearse` 会在恢复前执行幂等的角色初始化，模拟 Supabase 在 application migration 前已存在的 `anon` / `authenticated` 角色，并在同一进程内完成固定的 Prisma 迁移、status、diff 和三条升级后断言；任何一步失败都不得拼接其他容器或数据库的结果。隔离库还必须用发布前记录的表级行数和关键业务断言核对恢复结果。不要在普通 PostgreSQL 隔离库运行 `audit-staging.mjs`：该脚本刻意只接受同一个 Supabase project 的 pooler/direct host，用于防止把 staging 审计误连到其他数据库。
 
 两种 `post-upgrade-assert` 都只允许运行仓库内固定的三条断言：schema isolation 和升级数据断言强制只读；工作流约束负向探针需要创建临时表，因此使用受控 read-write 会话，但脚本只写临时表并以 `ROLLBACK` 结束，不修改业务表。
 
 ```bash
-node --env-file=packages/db/.env.staging.local \
-  packages/db/scripts/backfill-staging-mock-supplier-ids.mjs
+node packages/db/scripts/staging-maintenance-host.mjs backfill-check
 
 # 仅在上一步显示 pendingUpdates=10 且本次维护授权明确包含 backfill 时执行；
 # 将 YOUR_20_CHAR_PROJECT_REF 替换为控制台中的实际 Project Ref。
-node --env-file=packages/db/.env.staging.local \
-  packages/db/scripts/backfill-staging-mock-supplier-ids.mjs \
-  --apply --confirm-project=YOUR_20_CHAR_PROJECT_REF
+node packages/db/scripts/staging-maintenance-host.mjs backfill-apply \
+  --confirm-project=YOUR_20_CHAR_PROJECT_REF
 
-node --env-file=packages/db/.env.staging.local \
-  packages/db/scripts/backfill-staging-mock-supplier-ids.mjs
+node packages/db/scripts/staging-maintenance-host.mjs backfill-check
 
-node --env-file=packages/db/.env.staging.local \
-  packages/db/scripts/audit-staging.mjs --allow-pending
+node packages/db/scripts/staging-maintenance-host.mjs audit --allow-pending
 
-node --env-file=packages/db/.env.staging.local \
-  packages/db/scripts/staging-libpq.mjs migrate-once \
+node packages/db/scripts/staging-maintenance-host.mjs migrate-once \
   --confirm-project=YOUR_20_CHAR_PROJECT_REF
 
 node --env-file=packages/db/.env.staging.local \
   packages/db/scripts/staging-libpq.mjs post-upgrade-assert \
   --confirm-project=YOUR_20_CHAR_PROJECT_REF
 
-node --env-file=packages/db/.env.staging.local \
-  packages/db/scripts/audit-staging.mjs
+node packages/db/scripts/staging-maintenance-host.mjs audit
 ```
 
-`migrate-once` 不继承 shell 中的数据库或 libpq 环境，只接受指向 `postgres` 数据库且使用 5432 session 端口的 `DIRECT_URL`，并从已经通过 Project Ref 与 Supabase host 校验的值重建唯一的严格 TLS datasource。每次 Prisma 子进程启动前，它都会 fail-closed 检查 Prisma 可能自动加载的仓库根 `.env`、仓库根 `prisma/.env`、`packages/db/.env`、`packages/db/prisma/.env`：文件不存在可以接受；存在时必须是非 symlink 的普通文件且只能赋值 `DATABASE_URL` / `DIRECT_URL`。随后脚本在最小子进程环境中执行完整只读审计，要求 Prisma status 精确报告第 34～43 个 migration，再用固定 Prisma CLI、schema、argv 和超时执行 deploy，并复核 migration status。审计、status、deploy 是分进程快照，不能消除其间的并发数据库变化；维护窗口必须先停止 BFF、队列和全部 worker，并确保只有这一个 `migrate-once` 执行器，任何门禁失败都不得继续写入或并行重试。
+`migrate-once` 不继承 shell 中的数据库或 libpq 环境，只接受指向 `postgres` 数据库且使用 5432 session 端口的 `DIRECT_URL`，并从已经通过 Project Ref 与 Supabase host 校验的值重建唯一的严格 TLS datasource。audit、backfill 和 migrate-once 都会在联网前验证自己位于带完整 Git SHA marker 的 Linux maintenance runtime；该 marker 仍不能替代宿主机对 clean SHA、完整 image ID、revision label 和用户的核对。每次 Prisma 子进程启动前，migrate-once 还会 fail-closed 检查 Prisma 可能自动加载的仓库根 `.env`、仓库根 `prisma/.env`、`packages/db/.env`、`packages/db/prisma/.env`：镜像中这些文件应不存在；如存在则必须是非 symlink 的普通文件且只能赋值 `DATABASE_URL` / `DIRECT_URL`。随后脚本在最小子进程环境中执行完整只读审计，要求 Prisma status 精确报告第 34～43 个 migration，再用固定 Prisma CLI、schema、argv 和超时执行 deploy，并复核 migration status。审计、status、deploy 是分进程快照，不能消除其间的并发数据库变化；维护窗口必须先停止 BFF、队列和全部 worker，并确保只有这一个 `migrate-once` 执行器，任何门禁失败都不得继续写入或并行重试。
 
 禁止在 staging 使用 `pnpm db:migrate` / `prisma migrate dev`、`prisma migrate reset`，也禁止手工修改 `_prisma_migrations`。已成功但有逻辑问题的 migration 只能通过新的 corrective migration 前向修复；快照恢复必须先恢复到隔离库验证，不能直接覆盖 staging。
 
-6. 在 Storage 创建公开读取的 `supplier-assets` Bucket，并完成上传、公开读取和删除 smoke。
-7. Auth 暂时关闭公开注册；稳定 Web URL 确定后再配置 Site URL、Redirect URLs 并邀请内部测试账号。使用公开 Web 配置重复验证服务端门禁：
+7. 在 Storage 创建公开读取的 `supplier-assets` Bucket，并完成上传、公开读取和删除 smoke。
+8. Auth 暂时关闭公开注册；稳定 Web URL 确定后再配置 Site URL、Redirect URLs 并邀请内部测试账号。使用公开 Web 配置重复验证服务端门禁：
 
 ```bash
 pnpm audit:supabase-boundary

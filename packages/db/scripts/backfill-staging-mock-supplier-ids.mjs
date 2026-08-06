@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url';
 import prismaPackage from '@prisma/client';
 
 import { assertMigrationHistory, describeStagingDatasource } from './audit-staging.mjs';
-import { buildStrictSupabasePrismaDatasource } from './staging-libpq.mjs';
+import {
+  assertStagingMaintenanceRuntime,
+  buildStrictSupabasePrismaDatasource,
+} from './staging-maintenance-runtime.mjs';
 
 const { PrismaClient } = prismaPackage;
 const scriptPath = fileURLToPath(import.meta.url);
@@ -311,6 +314,7 @@ function formatTarget(configuration) {
 }
 
 async function main() {
+  assertStagingMaintenanceRuntime(process.env, process.platform);
   const configuration = readBackfillConfiguration(process.argv.slice(2), process.env);
   console.log(`Staging mock supplier_id backfill target: ${formatTarget(configuration)}`);
 

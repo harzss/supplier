@@ -96,6 +96,27 @@ HEALTHCHECK NONE
 ENTRYPOINT ["node", "node_modules/prisma/build/index.js"]
 CMD ["migrate", "deploy", "--schema", "node_modules/@supplier/db/prisma/schema.prisma"]
 
+FROM source AS staging-maintenance
+
+ARG SUPPLIER_GIT_SHA
+
+RUN node -e "if (!/^[a-f0-9]{40}$/.test(process.argv[1])) process.exit(1)" "$SUPPLIER_GIT_SHA"
+RUN DATABASE_URL=postgresql://build:build@127.0.0.1:5432/build \
+    DIRECT_URL=postgresql://build:build@127.0.0.1:5432/build \
+    pnpm --filter @supplier/db prisma:generate
+
+ENV SUPPLIER_STAGING_MAINTENANCE_IMAGE=1
+ENV SUPPLIER_STAGING_MAINTENANCE_GIT_SHA=$SUPPLIER_GIT_SHA
+
+LABEL org.opencontainers.image.revision=$SUPPLIER_GIT_SHA
+
+USER node
+
+HEALTHCHECK NONE
+
+ENTRYPOINT ["node"]
+CMD ["packages/db/scripts/audit-staging.mjs"]
+
 FROM node:22-bookworm-slim AS web
 
 ENV NODE_ENV=production

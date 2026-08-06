@@ -18,6 +18,7 @@ import {
   spawnPrisma,
   summarizeMockPublishReadiness,
 } from './audit-staging.mjs';
+import { SUPABASE_CA_CERT_PATH } from './staging-maintenance-runtime.mjs';
 
 const PROJECT_REF = 'abcdefghijklmnopqrst';
 const LOCAL_MIGRATIONS = [
@@ -112,9 +113,13 @@ test('rebuilds a minimal nested Prisma environment without ambient Node, DYLD, o
   });
 
   assert.equal(datasource.projectRef, PROJECT_REF);
+  const strictDatasource =
+    `postgresql://postgres.${PROJECT_REF}:direct@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres` +
+    `?sslmode=require&sslcert=${encodeURIComponent(SUPABASE_CA_CERT_PATH)}` +
+    '&sslaccept=strict';
   assert.deepEqual(prismaEnvironment, {
-    DATABASE_URL: databaseUrl,
-    DIRECT_URL: directUrl,
+    DATABASE_URL: strictDatasource,
+    DIRECT_URL: strictDatasource,
     LC_ALL: 'C',
     PRISMA_HIDE_UPDATE_MESSAGE: '1',
   });
@@ -134,6 +139,31 @@ test('rebuilds a minimal nested Prisma environment without ambient Node, DYLD, o
   assert.equal('DYLD_INSERT_LIBRARIES' in calls[0].options.env, false);
   assert.equal('PRISMA_QUERY_ENGINE_BINARY' in calls[0].options.env, false);
   assert.equal('PGHOST' in calls[0].options.env, false);
+});
+
+test('requires the session port and postgres database for strict staging audit TLS', () => {
+  const base = {
+    STAGING_PROJECT_REF: PROJECT_REF,
+    DATABASE_URL: `postgresql://postgres.${PROJECT_REF}:runtime@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`,
+    DIRECT_URL: `postgresql://postgres.${PROJECT_REF}:direct@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres`,
+  };
+  assert.throws(
+    () =>
+      readAuditConfiguration({
+        ...base,
+        DIRECT_URL: `postgresql://postgres.${PROJECT_REF}:direct@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`,
+      }),
+    /session port 5432/,
+  );
+  assert.throws(
+    () =>
+      readAuditConfiguration({
+        ...base,
+        DATABASE_URL: `postgresql://postgres.${PROJECT_REF}:runtime@aws-0-ap-southeast-1.pooler.supabase.com:6543/other`,
+        DIRECT_URL: `postgresql://postgres.${PROJECT_REF}:direct@aws-0-ap-southeast-1.pooler.supabase.com:5432/other`,
+      }),
+    /must target the postgres database/,
+  );
 });
 
 test('strict migration history requires every local migration to be applied in order', () => {

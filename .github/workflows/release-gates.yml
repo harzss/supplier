@@ -187,7 +187,7 @@ jobs:
           test "$(docker image inspect supplier-bff:${IMAGE_TAG} --format '{{.Config.User}}')" = node
           test "$(docker image inspect supplier-web:${IMAGE_TAG} --format '{{.Config.User}}')" = node
           test "$(docker image inspect supplier-staging-maintenance:${IMAGE_TAG} --format '{{.Config.User}}')" = node
-          test "$(docker image inspect supplier-staging-maintenance:${IMAGE_TAG} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = "${IMAGE_TAG}"
+          test "$(docker image inspect supplier-staging-maintenance:${IMAGE_TAG} --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${IMAGE_TAG}"
           docker run --rm --read-only --tmpfs /tmp --user node --cap-drop ALL \
             --security-opt no-new-privileges \
             supplier-staging-maintenance:${IMAGE_TAG} \

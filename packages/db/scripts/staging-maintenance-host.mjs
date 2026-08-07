@@ -28,7 +28,8 @@ const USAGE =
   '   or: staging-maintenance-host.mjs audit [--allow-pending]\n' +
   '   or: staging-maintenance-host.mjs backfill-check\n' +
   '   or: staging-maintenance-host.mjs backfill-apply --confirm-project=<STAGING_PROJECT_REF>\n' +
-  '   or: staging-maintenance-host.mjs migrate-once --confirm-project=<STAGING_PROJECT_REF>';
+  '   or: staging-maintenance-host.mjs migrate-once --confirm-project=<STAGING_PROJECT_REF>\n' +
+  '   or: staging-maintenance-host.mjs migrate-forward-once --confirm-project=<STAGING_PROJECT_REF>';
 
 export function readStagingMaintenanceHostOptions(args) {
   if (args.length === 1 && args[0] === 'build') return { action: 'build' };
@@ -51,27 +52,28 @@ export function readStagingMaintenanceHostOptions(args) {
   }
   if (
     args.length === 2 &&
-    ['backfill-apply', 'migrate-once'].includes(args[0]) &&
+    ['backfill-apply', 'migrate-once', 'migrate-forward-once'].includes(args[0]) &&
     /^--confirm-project=[a-z0-9]{20}$/.test(args[1])
   ) {
     const projectRef = args[1].slice('--confirm-project='.length);
-    return args[0] === 'backfill-apply'
-      ? {
-          action: 'run',
-          operation: 'backfill-apply',
-          projectRef,
-          containerArgs: [
-            'packages/db/scripts/backfill-staging-mock-supplier-ids.mjs',
-            '--apply',
-            args[1],
-          ],
-        }
-      : {
-          action: 'run',
-          operation: 'migrate-once',
-          projectRef,
-          containerArgs: ['packages/db/scripts/staging-libpq.mjs', 'migrate-once', args[1]],
-        };
+    if (args[0] === 'backfill-apply') {
+      return {
+        action: 'run',
+        operation: 'backfill-apply',
+        projectRef,
+        containerArgs: [
+          'packages/db/scripts/backfill-staging-mock-supplier-ids.mjs',
+          '--apply',
+          args[1],
+        ],
+      };
+    }
+    return {
+      action: 'run',
+      operation: args[0],
+      projectRef,
+      containerArgs: ['packages/db/scripts/staging-libpq.mjs', args[0], args[1]],
+    };
   }
   throw new Error(USAGE);
 }

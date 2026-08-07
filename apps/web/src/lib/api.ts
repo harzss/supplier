@@ -66,8 +66,8 @@ export interface SystemReadiness {
   service: 'supplier-bff';
   version: string;
   checks: {
-    database: { status: 'up' };
-    redis: { status: 'up' };
+    database: { status: 'up' | 'down' };
+    runtimeState: { status: 'up' | 'down' };
   };
   timestamp: string;
   durationMs: number;
@@ -530,6 +530,10 @@ export interface ProductBatchCandidate {
   sourceChangeEligible: boolean;
   sourceChangeReason: string | null;
   currentSourceRouteCount: number;
+  skuEditEligible: boolean;
+  skuEditReason: string | null;
+  skuVerificationTaskId: string | null;
+  skuVerificationItemId: string | null;
   mutationRevision: number;
   publishedAt: string;
 }
@@ -539,6 +543,7 @@ export type ProductBatchAction =
   | 'offline'
   | 'edit_title'
   | 'edit_price'
+  | 'edit_sku'
   | 'sync_inventory'
   | 'change_source'
   | 'cleanup';
@@ -553,6 +558,101 @@ export type ProductBatchPriceRule =
       mode: 'targets';
       targets: Array<{ publishedProductId: string; targetStartPrice: string }>;
     };
+
+export interface ProductBatchSkuPropertyValue {
+  propertyId: string;
+  propertyName: string;
+  valueId: string;
+  valueName: string;
+  remark: string | null;
+}
+
+export interface ProductBatchSkuDimension {
+  propertyId: string;
+  propertyName: string;
+  values: Array<{ valueId: string; valueName: string; remark?: string }>;
+}
+
+export interface ProductBatchSkuEditRow {
+  rowId: string;
+  platformSkuId: string | null;
+  platformSkuKey: string | null;
+  sourceSpecId: string | null;
+  properties: ProductBatchSkuPropertyValue[];
+  priceCents: number;
+  stock: number;
+  isNew: boolean;
+  skuPictureUrls: string[];
+}
+
+export interface ProductBatchSkuSourceOption {
+  sourceSpecId: string | null;
+  sourceSpecName: string;
+  costPrice: number;
+  stock: number;
+  usedByPlatformSkuKey: string | null;
+}
+
+export interface ProductBatchSkuEditRules {
+  maxDimensions: number;
+  maxCombinations: number;
+  maxValuesPerDimension: number;
+  supportsDimensionReordering: boolean;
+  supportsCustomDimensions: boolean;
+  allSkuPicturesRequired: boolean;
+  dimensions: Array<{
+    propertyId: string;
+    propertyName: string;
+    required: boolean;
+    supportsCustomValues: boolean;
+    supportsRemark: boolean;
+    requiresPagedValues: boolean;
+    values: Array<{ valueId: string; valueName: string }>;
+    unsupportedReasons: string[];
+  }>;
+  unsupportedReasons: string[];
+}
+
+export interface ProductBatchSkuEditContext {
+  publishedProductId: string;
+  expectedMutationRevision: number;
+  expectedPlatformSkuFingerprint: string;
+  expectedRuleFingerprint: string;
+  editable: boolean;
+  blockers: string[];
+  dimensions: ProductBatchSkuDimension[];
+  rows: ProductBatchSkuEditRow[];
+  sourceSkus: ProductBatchSkuSourceOption[];
+  rules: ProductBatchSkuEditRules;
+}
+
+export interface ProductBatchSkuValueTarget {
+  propertyId: string;
+  propertyName: string;
+  valueId: string;
+  valueName: string;
+  remark?: string;
+}
+
+export interface ProductBatchSkuRowTarget {
+  rowId: string;
+  isNew: boolean;
+  platformSkuId: string | null;
+  platformSkuKey: string | null;
+  sourceSpecId: string | null;
+  properties: ProductBatchSkuValueTarget[];
+  priceCents: number;
+  skuPictureUrls: string[];
+}
+
+export interface ProductBatchSkuTarget {
+  publishedProductId: string;
+  expectedMutationRevision: number;
+  expectedPlatformSkuFingerprint: string;
+  expectedRuleFingerprint: string;
+  dimensions: ProductBatchSkuDimension[];
+  rows: ProductBatchSkuRowTarget[];
+}
 
 export type ProductBatchPreviewRequest =
   | {
@@ -580,6 +680,12 @@ export type ProductBatchPreviewRequest =
       action: 'edit_price';
       publishedProductIds: string[];
       priceRule: ProductBatchPriceRule;
+    }
+  | {
+      clientRequestId: string;
+      action: 'edit_sku';
+      publishedProductIds: string[];
+      skuTargets: ProductBatchSkuTarget[];
     }
   | {
       clientRequestId: string;
@@ -661,6 +767,12 @@ export interface ProductBatchItem {
   desiredSourceTitle: string | null;
   sourceRouteCount: number | null;
   sourceCostRange: [number, number] | null;
+  beforeSkuFingerprint: string | null;
+  desiredSkuFingerprint: string | null;
+  actualSkuFingerprint: string | null;
+  skuAddedCount: number | null;
+  skuChangedCount: number | null;
+  skuDeletedCount: number | null;
   retryable: boolean;
   status: string;
   attempts: number;
@@ -1604,6 +1716,12 @@ export const api = {
     return request(`/product-batches/candidates?${params.toString()}`);
   },
 
+  productBatchSkuEditContext(publishedProductId: string): Promise<ProductBatchSkuEditContext> {
+    return request(
+      `/product-batches/products/${encodeURIComponent(publishedProductId)}/sku-edit-context`,
+    );
+  },
+
   createProductBatchPreview(body: ProductBatchPreviewRequest): Promise<ProductBatchTask> {
     return request('/product-batches/previews', {
       method: 'POST',
@@ -1655,6 +1773,13 @@ export const api = {
   verifyProductBatchOffline(taskId: string, itemId: string): Promise<ProductBatchTask> {
     return request(
       `/product-batches/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/verify-offline`,
+      { method: 'POST' },
+    );
+  },
+
+  verifyProductBatchSkus(taskId: string, itemId: string): Promise<ProductBatchTask> {
+    return request(
+      `/product-batches/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/verify-skus`,
       { method: 'POST' },
     );
   },

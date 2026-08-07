@@ -5,7 +5,7 @@
 > [00-roadmap.md](./00-roadmap.md) 为唯一来源；能否上线以
 > [10-production-readiness.md](./10-production-readiness.md) 的 P0 门禁为准。
 >
-> 本文包含 M1～M86 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
+> 本文包含 M1～M87 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
 
 ## 1. 主流程定义（核心闭环）
 
@@ -22,43 +22,48 @@ flowchart LR
     I --> J[利润与经营复盘]
 ```
 
-## 2. 工程证据快照（截至 2026-08-07）
+## 2. 工程证据快照（截至 2026-08-08）
 
-| 环节                | 状态                            | 说明                                                                                                                                                                                                                          |
-| ------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 采集货源            | 🔄 应用侧已通                   | Mock 与真实 adapter 已接入最多 100 件的持久采集工作台，支持预览、恢复、停止与失败重试；待方案订购、买家 Token、跨账号数据口径和曝光回传验收                                                                                   |
-| AI 打分选品         | ✅ 已通                         | `@supplier/scoring` → `product_scores`，推荐接口按分排序                                                                                                                                                                      |
-| 浏览 / 详情         | ✅ 已通                         | Web「今日推荐」+ 详情页（五维雷达 + 推荐理由）                                                                                                                                                                                |
-| 类目/价格带筛选     | ✅ 已通                         | 真实 facets、类目与采购价组合筛选、URL 状态恢复及自定义价格校验                                                                                                                                                               |
-| 生产运行基座        | ✅ 已通                         | 配置启动校验、真实 readiness、全局限流、Swagger 门禁与优雅退出                                                                                                                                                                |
-| 依赖与 SAST 基座    | 🔄 CI 待验收                    | 2026-08-04 联网生产依赖审计为 0 已知漏洞，发布 audit 门禁已运行，CodeQL + 每周 SCA 已配置；当前 SHA 的项目 audit/CodeQL 门禁待验收                                                                                            |
-| 部署与回滚基座      | ✅ 内部 staging 已通            | 三类非 root 镜像、migration-once、不可变版本与回滚手册已落地；2026-08-06 完成 43/43、BFF、Cloudflare Gateway 与 Web 部署 smoke                                                                                                |
-| 审计与告警基座      | 🔄 应用侧已通                   | 租户审计、失败鉴权、Prometheus、签名 Webhook、稳定投递 ID 与有界重试；待外部联调                                                                                                                                              |
-| 身份与租户隔离      | 🔄 应用侧已通                   | Supabase JWT、内部用户映射、Bearer 门禁与前端登录门禁已完成；待真实邮件账号流验收                                                                                                                                             |
-| AI 标题优化         | ✅ 已通                         | 生成 5 条合规候选，可选中后直连铺货；队列复用所选标题并按实际目标平台再次校验                                                                                                                                                 |
-| 平台类目映射        | 🔄 应用侧已通                   | 官方目录/Top3/人工确认、类目必填属性与 `product_format_new` 发布快照已完成；待真实店验收                                                                                                                                      |
-| 店铺管理            | ✅ 已通（Mock + 抖店 OAuth UI） | 设置页可发起官方授权、展示授权状态和重新授权；Token 刷新仅在明确凭证拒绝或主体不一致时失效，瞬时/未知故障保留账号 active；真实账号待凭证联调                                                                                  |
-| 一键铺货            | ✅ 已通（Mock + 抖店 adapter）  | 演示店走 Mock；OAuth 抖店走 `product.addV2`，真实发布待类目映射与测试店铺联调                                                                                                                                                 |
-| 铺货任务队列        | ✅ 已通                         | PostgreSQL 持久化队列、自动 worker、指数退避、死信、超时恢复与人工重新入队                                                                                                                                                    |
-| 智能定价            | ✅ 已通                         | 固定加价、目标毛利与竞品对标；试算保本价/利润，结果快照随队列任务持久化                                                                                                                                                       |
-| 发布前利润/风险预检 | ✅ 应用侧已通                   | 只读聚合权限、货源、定价凭证、店铺、标题、类目/资质、SKU 与额度；提交时再次权威校验                                                                                                                                           |
-| 首次铺货向导        | 🔄 应用侧进行中                 | 权威四步进度、利润试算/预检、服务端草稿、请求结果恢复和 OAuth 回跳已通；待真实用户验收                                                                                                                                        |
-| 批量商品经营        | 🔄 八个切片应用侧进行中         | M71～M78 覆盖最多 100 件货源/商品的批量采集、上下架、改标题、改价、逐 SKU 库存同步、滞销安全下架与抖店离线安全换源；均有持久预览、item 级进度/停止/失败重试。当前换源不修改平台 SKU，任意平台 SKU 编辑与真实平台 E2E 仍未完成 |
-| 统一异常中心        | 🔄 staging 候选已部署           | M79 将发布、订单、采购、物流、售后和权益异常收敛为风险优先队列；支持稳定去重、来源变化重开、运营确认、权威恢复关闭、append-only 记录和有界后台扫描；数据库与部署 smoke 已通过，待真实六域异常验收                             |
-| SKU 属性映射        | ✅ 已通                         | 1688 多 SKU 归一化、用户确认、源变更失效、逐 SKU 定价与抖店多维规格发布                                                                                                                                                       |
-| 经营数据看板        | ✅ 已通                         | 净 GMV、销售退款核对、采购净成本核销、预计毛利、店铺拆分与热销/滞销动销雷达                                                                                                                                                   |
-| 收藏 / 选款对比     | ✅ 已通                         | 幂等收藏 API、最多 5 款对比、真实 Supabase 与响应式页面验收完成                                                                                                                                                               |
-| 订单同步            | ✅ 应用侧已通                   | 固定时间窗全分页增量同步、持久水位、Redis 锁与后台 worker；敏感字段解密后再加密落库                                                                                                                                           |
-| 售后/退款保护       | ✅ 应用侧已通                   | 子订单售后、剩余子单处置、销售退款与采购成本核销、采购/物流保护、审计告警已闭环                                                                                                                                               |
-| 售后工单            | 🔄 staging 候选已部署           | M80 将权威销售售后快照、销售子单与 1688 采购关联收敛为可认领、有时限、有凭证、可重开和可验证关闭的工单；数据库与部署 smoke 已通过，外部动作仍由运营在平台执行，待双租户与真实平台 E2E                                         |
-| 自动代发            | 🔄 应用侧已通                   | 按供应商创建 `saleproxy` 采购单并持久绑定原 1688 买家账号；恢复与轮询不回退最新账号，人工付款后同步 1688 包裹并幂等回传抖店一单多包；待真实联调                                                                               |
-| 库存联动            | 🔄 应用侧已通                   | 采集库存指纹/版本、持久队列、抖店逐 SKU 全量同步、缺货/下架/SKU 变化自动下架；待真实店验收                                                                                                                                    |
-| AI 详情 / 主图      | 🔄 开发中                       | 详情链路已完成；主图权益、远程 GPU 流水线编排、托管与铺货接入已完成，待真实 worker 联调                                                                                                                                       |
-| 真实平台 OAuth      | 🔄 开发中                       | M3-1～5 已完成；M3-6 已增加联调准备度检查，当前环境 0/6 待配置                                                                                                                                                                |
+| 环节                | 状态                            | 说明                                                                                                                                                                                                                           |
+| ------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 采集货源            | 🔄 应用侧已通                   | Mock 与真实 adapter 已接入最多 100 件的持久采集工作台，支持预览、恢复、停止与失败重试；待方案订购、买家 Token、跨账号数据口径和曝光回传验收                                                                                    |
+| AI 打分选品         | ✅ 已通                         | `@supplier/scoring` → `product_scores`，推荐接口按分排序                                                                                                                                                                       |
+| 浏览 / 详情         | ✅ 已通                         | Web「今日推荐」+ 详情页（五维雷达 + 推荐理由）                                                                                                                                                                                 |
+| 类目/价格带筛选     | ✅ 已通                         | 真实 facets、类目与采购价组合筛选、URL 状态恢复及自定义价格校验                                                                                                                                                                |
+| 生产运行基座        | 🔄 当前候选待部署               | 配置启动校验、全局限流、Swagger 门禁与优雅退出已通；readiness 已改为最新 migration + `database + runtimeState`，但 staging 尚未应用第 44/45 个 migration                                                                       |
+| 短期运行状态        | 🔄 应用侧候选                   | M87 以 Supabase PostgreSQL `runtime_states` 替代 Redis，覆盖 OAuth state/result、Token refresh recovery、订单/商品租约、1688 fixed-window limiter 和 AI 精确缓存；staging / production 无 `REDIS_URL`，当前 SHA 动态验收未完成 |
+| 依赖与 SAST 基座    | 🔄 CI 待验收                    | 2026-08-04 联网生产依赖审计为 0 已知漏洞，发布 audit 门禁已运行，CodeQL + 每周 SCA 已配置；当前 SHA 的项目 audit/CodeQL 门禁待验收                                                                                             |
+| 部署与回滚基座      | 🔄 staging 落后当前候选         | 2026-08-06 的 43/43、BFF、Gateway 与 Web smoke 是旧候选证据；仓库已有 45 个 migration，staging 为 43/45，当前 SHA CI、真实备份恢复、单次前向 migration 与无 Redis 动态 smoke 待完成                                            |
+| 审计与告警基座      | 🔄 应用侧已通                   | 租户审计、失败鉴权、Prometheus、签名 Webhook、稳定投递 ID 与有界重试；待外部联调                                                                                                                                               |
+| 身份与租户隔离      | 🔄 应用侧已通                   | Supabase JWT、内部用户映射、Bearer 门禁与前端登录门禁已完成；待真实邮件账号流验收                                                                                                                                              |
+| AI 标题优化         | ✅ 已通                         | 生成 5 条合规候选，可选中后直连铺货；队列复用所选标题并按实际目标平台再次校验                                                                                                                                                  |
+| 平台类目映射        | 🔄 应用侧已通                   | 官方目录/Top3/人工确认、类目必填属性与 `product_format_new` 发布快照已完成；待真实店验收                                                                                                                                       |
+| 店铺管理            | ✅ 已通（Mock + 抖店 OAuth UI） | 设置页可发起官方授权、展示授权状态和重新授权；Token 刷新仅在明确凭证拒绝或主体不一致时失效，瞬时/未知故障保留账号 active；真实账号待凭证联调                                                                                   |
+| 一键铺货            | ✅ 已通（Mock + 抖店 adapter）  | 演示店走 Mock；OAuth 抖店走 `product.addV2`，真实发布待类目映射与测试店铺联调                                                                                                                                                  |
+| 铺货任务队列        | ✅ 已通                         | PostgreSQL 持久化队列、自动 worker、指数退避、死信、超时恢复与人工重新入队                                                                                                                                                     |
+| 智能定价            | ✅ 已通                         | 固定加价、目标毛利与竞品对标；试算保本价/利润，结果快照随队列任务持久化                                                                                                                                                        |
+| 发布前利润/风险预检 | ✅ 应用侧已通                   | 只读聚合权限、货源、定价凭证、店铺、标题、类目/资质、SKU 与额度；提交时再次权威校验                                                                                                                                            |
+| 首次铺货向导        | 🔄 应用侧进行中                 | 权威四步进度、利润试算/预检、服务端草稿、请求结果恢复和 OAuth 回跳已通；待真实用户验收                                                                                                                                         |
+| 批量商品经营        | 🔄 九个切片应用侧进行中         | M71～M78 加 M87 覆盖最多 100 件货源/商品的批量采集、上下架、改标题、改价、逐 SKU 库存、滞销清理、离线换源与普通 SKU 完整集合编辑。SKU 编辑只允许强回读确认的 `offline/draft` 商品，flag 默认 `false`，migration/E2E 待完成     |
+| 统一异常中心        | 🔄 staging 候选已部署           | M79 将发布、订单、采购、物流、售后和权益异常收敛为风险优先队列；支持稳定去重、来源变化重开、运营确认、权威恢复关闭、append-only 记录和有界后台扫描；数据库与部署 smoke 已通过，待真实六域异常验收                              |
+| SKU 属性映射        | ✅ 已通                         | 1688 多 SKU 归一化、用户确认、源变更失效、逐 SKU 定价与抖店多维规格发布                                                                                                                                                        |
+| 经营数据看板        | ✅ 已通                         | 净 GMV、销售退款核对、采购净成本核销、预计毛利、店铺拆分与热销/滞销动销雷达                                                                                                                                                    |
+| 收藏 / 选款对比     | ✅ 已通                         | 幂等收藏 API、最多 5 款对比、真实 Supabase 与响应式页面验收完成                                                                                                                                                                |
+| 订单同步            | ✅ 应用侧已通                   | 固定时间窗全分页增量同步、持久水位、Supabase PostgreSQL 租约与后台 worker；敏感字段解密后再加密落库                                                                                                                            |
+| 售后/退款保护       | ✅ 应用侧已通                   | 子订单售后、剩余子单处置、销售退款与采购成本核销、采购/物流保护、审计告警已闭环                                                                                                                                                |
+| 售后工单            | 🔄 staging 候选已部署           | M80 将权威销售售后快照、销售子单与 1688 采购关联收敛为可认领、有时限、有凭证、可重开和可验证关闭的工单；数据库与部署 smoke 已通过，外部动作仍由运营在平台执行，待双租户与真实平台 E2E                                          |
+| 自动代发            | 🔄 应用侧已通                   | 按供应商创建 `saleproxy` 采购单并持久绑定原 1688 买家账号；恢复与轮询不回退最新账号，人工付款后同步 1688 包裹并幂等回传抖店一单多包；待真实联调                                                                                |
+| 库存联动            | 🔄 应用侧已通                   | 采集库存指纹/版本、持久队列、抖店逐 SKU 全量同步、缺货/下架/SKU 变化自动下架；待真实店验收                                                                                                                                     |
+| AI 详情 / 主图      | 🔄 开发中                       | 详情链路已完成；主图权益、远程 GPU 流水线编排、托管与铺货接入已完成，待真实 worker 联调                                                                                                                                        |
+| 真实平台 OAuth      | 🔄 开发中                       | M3-1～5 已完成；M3-6 已增加联调准备度检查，当前环境 0/6 待配置                                                                                                                                                                 |
 
-**2026-08-06 当前结论**：内部 staging 维护窗口已完成十条 mock 货源的定向 `supplierId` backfill，并顺序应用第 34～43 个 migration；数据库现为 43/43，live schema diff 返回 `No difference detected`，全部 public 表 RLS 以及 `anon` / `authenticated` 表、sequence、default ACL 复核通过。当前候选已完成 BFF、Cloudflare Gateway 与 Web 部署 smoke，因此此前“staging 仍为 33/43”“migration 尚未应用”或“当前候选尚未部署”的表述不再代表现状。真实 Auth 会话、真实抖店/1688、LLM 与图片服务 E2E 仍未完成，不能据此宣称生产可用或已具备 1688 服务市场上架条件。
+**2026-08-08 当前结论**：2026-08-06 staging 维护完成的 43/43、schema/RLS/ACL 与 18/18 smoke 仍是有效历史证据，但不再代表当前仓库最新候选。M87 新增第 44 个平台 SKU 完整集合编辑 migration 与第 45 个 Supabase PostgreSQL `runtime_states` migration；staging 当前为 **43/45**，两条均未应用。当前实现已移除 BFF 的 Redis 模块、`REDIS_URL` 与 Redis readiness，改用 `database + runtimeState`；本机/staging/production 均不再运行 Redis。SKU 编辑仍只属于应用侧候选，`PRODUCT_BATCH_SKU_EDIT_ENABLED=false`。当前 SHA CI、最新真实备份恢复、43→45 受控迁移、当前 BFF/Gateway 动态 smoke、真实 Auth 与抖店/1688 E2E 均未完成，因此不能宣称 staging 当前候选已部署、生产可用或具备 1688 服务市场上架条件。
 
-> 下方所有标注 2026-08-04 的“当前结论”“当前增量”和后续日期台账均是记录当时的历史快照；其中 33/43、pending migration、backfill 未执行及候选未部署等结论，已被上述 2026-08-06 维护结果覆盖。真实 Auth、抖店/1688、LLM、图片及其他明确写出的真实外部 E2E 缺口仍然有效。
+**2026-08-08 M87 当前增量**：新增 `runtime_states` 的 JSON value、UUID owner lease 与正整数 fixed-window 三种互斥模式，所有一次性消费、租约接管/续租/释放和限流递增均用单条 SQL 完成并兼容 Supabase transaction pooler；过期索引与每次写入后的最多 100 行有界清理避免无界增长。OAuth state/result、加密 Token refresh recovery、订单同步和商品平台写入租约、1688 采集限流、AI L1 精确缓存全部改用该服务；readiness 必需 migration 前移到第 45 个并返回 `database + runtimeState`。普通 SKU 编辑新增权威上下文、完整集合草稿、`product.getProductUpdateRule`、`product.editV2` 替换、SKU ID/key/价格/side fields 保留、稳定新 key、1688 spec 一对一映射、`SKU_WRITE_STARTED/SKU_RESULT_UNKNOWN` fence 和专用核验。当前本地代码门禁的最终计数以本次合并后的最新验证为准；staging 43/45、flag 关闭、当前 SHA CI、真实备份恢复和真实抖店 E2E 尚未完成。
+
+**2026-08-06 历史结论**：内部 staging 维护窗口已完成十条 mock 货源的定向 `supplierId` backfill，并顺序应用第 34～43 个 migration；数据库当时为 43/43，live schema diff 返回 `No difference detected`，全部 public 表 RLS 以及 `anon` / `authenticated` 表、sequence、default ACL 复核通过。当时的 BFF、Cloudflare Gateway 与 Web 完成部署 smoke。该证据现已被上方“仓库 45、staging 43/45”状态覆盖；真实 Auth 会话、真实抖店/1688、LLM 与图片服务 E2E 始终未完成。
+
+> 下方所有标注 2026-08-04 的“当前结论”“当前增量”和后续日期台账均是记录当时的历史快照；其中 33/43、pending migration、backfill 未执行及候选未部署等结论，已被上述 2026-08-06 维护结果覆盖。其 Redis state/锁/限流描述也已由 M87 的 Supabase `runtime_states` 取代。真实 Auth、抖店/1688、LLM、图片及其他明确写出的真实外部 E2E 缺口仍然有效。
 
 **2026-08-04 当前结论**：M80 当前候选新增售后工单基础闭环，把订单同步得到的权威销售售后状态物化为可认领、有责任人和处理时限的租户工单，并关联销售子单、1688 采购、人工平台动作、外部凭证、关闭阻断项和 append-only 事件。M81 审计发现第 41/42 个 migration 的三个 nullable CHECK 可因 PostgreSQL 将 UNKNOWN 视为通过而被 NULL 绕过，已新增第 43 个前向修复，未修改既有 migration checksum；数据库静态测试 22/22，一次性 PostgreSQL 15 已完成 43/43 deploy/status、schema diff、三个回滚式负向探针、合法状态正向探针及 RLS/ACL 复核。M82 修复浏览器门禁种子缺失供应商标识的问题，并把部署验证扩展为 PUT/DELETE CORS 正向及恶意 Origin 负向探针。当前候选代码测试合计 1192/1192（BFF 807/807、DB 22/22），运维测试 59/59，隔离 Chromium 1/1，typecheck 15/15、lint 2/2、BFF build、Prettier 与 diff check 全部通过。[GitHub Release gates #23](https://github.com/harzss/supplier/actions/runs/30910322944) 已在提交 `a48fb43` 上完成 verify、browser、images 三个 job 全绿：verify 覆盖依赖审计、静态检查、全仓测试和构建，browser 覆盖全新库 migration/seed 与 Chromium E2E，images 覆盖当前 SHA 三镜像构建及临时 PostgreSQL/Redis production smoke。当前实时只读预检确认 staging 仍为 33/43，第 34～43 个构成连续 pending 尾部，已应用前缀 checksum、unfinished/rolled back、RLS/ACL 和同店铺平台商品 ID 重复前置条件均通过；存在 pending，因此当前 datamodel schema diff 按规则 deferred。staging 真实数据一致性备份为 150265 bytes，SHA256 `b4eb1f374c75f5aa6244568443143394628b9a252dfbad3114473ae9d2e6fc54`；隔离临时库已完成 33→43 恢复升级，43/43、schema diff、10/0/0/0 数据量、41/41 public 表 RLS、ACL、约束和升级数据断言全部通过。实际 staging migration、镜像发布和 staging 重部署、双租户、真实抖店/1688 售后及关闭重开 E2E 仍未执行。R0-02/R0-03 仍未关闭，只能表述为“旧候选已部署、当前候选已完成迁移前演练但尚未部署”，不能宣称 staging 已完成、可生产使用或已具备 1688 服务市场上架条件。
 
@@ -110,6 +115,8 @@ Web 新增 `/after-sales` 主导航和桌面双栏/移动单页工作台，支�
 
 <details>
 <summary>M1～M78 历史增量台账（其中“当前”均指记录当时，不代表 2026-08-06 状态）</summary>
+
+> 本折叠区出现的 PostgreSQL/Redis 容器、`REDIS_URL`、Redis 锁/恢复记录均是对应里程碑当时的旧候选证据；当前实现已由 M87 / migration 45 的 Supabase PostgreSQL `runtime_states` 取代，不能据此启动本机 Redis 或定义当前 readiness。
 
 **当前结论**：M1～M17 的业务与生产基座保持通过。M18 已完成真实 1688 采购的应用侧闭环。M19 进一步补齐真实订单摄取：抖店订单按固定更新时间窗从第 0 页全分页拉取，以持久成功水位和 5 分钟重叠窗口防漏，跨进程使用 Redis 店铺锁，后台 worker 与设置页手工入口共享同一幂等同步服务；超过安全页数、Redis 不可用或任一页失败时均不推进水位。M20 已补齐真实买家货源采集适配器，M21 已完成库存变化同步与缺货自动下架，M22 已完成发布状态同步与驳回修正，M23 已补齐子订单售后识别、采购/物流保护、人工处置与运维告警，M24 进一步补齐部分退款后的剩余子单决策与安全履约，M25 补齐实际退款金额人工核对、状态失效和经营净额口径，M26 补齐 1688 取消/退款后的最终采购成本核销与售后损失入账，M27 将退款金额和采购成本核对升级为集中待办、指标与主动告警，M28 将普通订单升级为租户隔离的完整分页和店铺/状态筛选，不再静默截断或吞掉数据库错误，M29 补齐店铺主动停用、Token 清除、重新授权配额重验、刷新竞态保护和生产演示边界，M30 进一步把历史演示店从真实执行、查询、经营指标、财务告警和套餐额度中整体隔离，M31 将铺货记录改为完整分页并移除数据库错误降级为空列表，M32 修复选品降级空状态和商品详情数据库错误被误报为 404，M33 将平台 AI 与月度铺货用量统计改为 fail-closed，M34 补齐平台 AI 调用前的原子额度预占、成功后实际成本回填与 stale 告警，M35 修复 BYOK 密钥读取、解密和删除的 fail-open/误报成功。M5 进一步补齐按店铺同步抖店官方类目目录、官方类目预测候选、人工确认、类目必填属性和铺货前目录校验，使真实发布不再依赖手工猜测类目 ID，也不会遗漏 `product_format_new`。此前标准 Dockerfile 三镜像已在全新 PostgreSQL/Redis 中通过完整部署 smoke；告警投递可靠性加固后的 `m20-current` BFF/migrate/Web 也已重新构建并复验 14 个 migration、schema diff、12 项部署门禁、非法重试配置拒绝启动、非 root 和优雅退出。真实 Supabase 已在备份和回滚预演后应用全部 14 个 migration，状态最新且 schema diff 为空；完整 release-check 全绿。当前按功能优先级不继续构建、部署或应用目标库 migration。**当前仍不能宣称生产可用**：真实抖店/1688 凭证、买家授权、人工付款与真实包裹回传尚未端到端验收，同时仍有真实身份项目、生产 Redis/云环境、外部监控告警、恢复演练与法务合规等 P0 门禁，详见 `docs/10-production-readiness.md`。
 
@@ -217,13 +224,13 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 - **M10 热销榜与滞销榜（D-02）** — ✅ 已完成：真实订单速度、7 天成熟期、动销率与热销/滞销风险榜
 - **M11 收藏与选款对比（S-05）** — ✅ 已完成：幂等收藏、最多 5 款对比、真实 Supabase 与响应式页面验收
 - **M12 类目与价格带筛选（S-06）** — ✅ 已完成：真实 facets、组合筛选、自定义价格、URL 状态恢复与响应式页面验收
-- **M13 生产运行基座** — ✅ 已完成：启动配置校验、真实健康探针、全局限流、生产 Swagger 门禁、优雅退出与 CI 可执行 lint
+- **M13 生产运行基座** — ✅ 基座完成：启动配置校验、健康探针、全局限流、生产 Swagger 门禁、优雅退出与 CI lint 已完成；当时的 Redis readiness 已由 M87 `runtimeState` 取代
 - **M14 身份与租户隔离** — 🔄 应用侧完成：Supabase JWT、内部用户映射、Bearer 门禁、前端登录/注册/退出与真实数据库隔离已完成；待真实 Supabase 邮件账号流验收
 - **M15 部署与回滚基座** — ✅ 本地基座完成：BFF/Web/migrate 镜像、CI 门禁、全新数据库 migration、部署 smoke、非 root、SIGTERM 与回滚手册已验证；待目标云环境演练
 - **M16 审计与告警基座** — 🔄 应用侧完成：租户审计、失败鉴权、依赖/队列/错误率/密钥告警、运维端点、Prometheus、签名 Webhook 与 180 天保留策略已完成；待真实接收端和监控平台演练
 - **M17 依赖与 SAST 安全基座** — 🔄 应用侧完成：生产依赖 0 已知漏洞、release audit 门禁、CodeQL 与每周 SCA 已配置；待 GitHub 首次运行和分支保护验收
 - **M18 真实 1688 采购与一单多包闭环** — 🔄 应用侧完成：真实采购、人工付款轮询和多包回传已通；待真实账号小额验收
-- **M19 抖店订单增量摄取** — 🔄 应用侧与部署 smoke 完成：持久水位、全分页、Redis 锁、后台 worker、告警与手工入口已通；待真实测试店
+- **M19 抖店订单增量摄取** — 🔄 应用侧完成：持久水位、全分页、Supabase PostgreSQL 店铺租约、后台 worker、告警与手工入口已通；旧 Redis smoke 仅作历史证据，待当前候选部署与真实测试店
 - **M20 真实 1688 货源采集** — 🔄 应用侧完成：跨境代采关键词搜索、商品详情、分销价、SKU `specId`、图片与错误映射已通；待订购方案、真实买家 Token、配额和曝光回传验收
 - **M21 库存联动（P-05）** — 🔄 应用侧完成：库存变化持久排队、抖店逐 SKU 同步、缺货/下架/SKU 变化安全下架与人工重试已通；待真实店验收
 - **M22 已发布商品修正与状态同步** — 🔄 应用侧完成：平台状态刷新、驳回修正重提与错误保留已通；待真实店验收
@@ -253,16 +260,17 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 - **M56 1688 发货后物流恢复** — ✅ 已完成：发货历史标记、旧包裹归档清理、操作人记录与同单重新校验已通
 - **M57 已履约采购后台巡检** — ✅ 已完成：持久化调度、正常状态更新、路由变化阻断、人工待办、告警重试与配置门禁已通过回归
 - **M58 已发货订单物流修复** — 🔄 应用侧完成：抖店幂等逐包更新、远端回读、本地原子替换、任务唯一性和运营入口已通；待目标 migration 与真实测试店验收
-- **M59 订单同步长任务所有权** — ✅ 已完成：Redis token 续租、失权写入阻断、attempt 条件水位/错误更新与旧 worker 告警抑制已通过回归；CI schema 门禁待首次远端运行
+- **M59 订单同步长任务所有权** — ✅ 逻辑完成：token 租约续租、失权写入阻断、attempt 条件水位/错误更新与旧 worker 告警抑制已通过回归；最初 Redis 实现已由 M87 的 Supabase 租约替代
 - **M60 数据库 schema readiness** — ✅ 已完成：最新 migration 运行时校验、落后 schema 503 与 migration 目录同步测试已通过
 - **M61 抖店订单详情关联校验** — ✅ 已完成：SDK/BFF 双层核对请求订单 ID，串单响应在数据库写入和履约决策前 fail-closed
 - **M62 订单同步/采购快照并发隔离** — ✅ 已完成：双侧 Serializable 事务、最新订单项重读、全供应商快照原子固化与冲突重试已通过回归
-- **M63 Token 轮换结果持久化恢复** — ✅ 已完成：Redis 密文恢复记录、数据库三次重试、后续请求恢复与 revoked/CAS 保护已通过回归
-- **M64 商品平台变更串行化** — ✅ 已完成：修正/状态回读/库存同步共享锁、执行权复核与货源版本保护已通过回归
+- **M63 Token 轮换结果持久化恢复** — ✅ 逻辑完成：加密恢复记录、数据库三次重试、后续请求恢复与 revoked/CAS 保护已通过回归；记录现保存于 Supabase `runtime_states`
+- **M64 商品平台变更串行化** — ✅ 逻辑完成：修正/状态回读/库存/SKU 同步共享租约、执行权复核与货源版本保护已通过回归；租约现保存于 Supabase `runtime_states`
 - **M65 铺货长任务租约** — ✅ 已完成：持续续租、外部副作用前后所有权 guard、失权中止与幂等恢复已通过回归
 - **M66 付费 AI 结果阶段性持久化** — ✅ 已完成：标题/详情/详情图/主图 checkpoint、attempted 标记与接管复用已通过回归
 - **M67 物流修复长任务执行权** — ✅ 已完成：持续续租、逐平台调用 guard、失权停止下一包与本地提交已通过回归
 - **M68 发布前利润与风险预检** — ✅ 应用侧完成：只读聚合阻断/警告、租户与权限边界、输入失效和提交再校验已通过回归；待真实用户与真实抖店验收
+- **M87 SKU 完整集合编辑与 Supabase runtime state** — 🔄 应用侧候选：普通 `offline/draft` 商品 SKU 增删/规格/1688 spec 映射、未知结果专用核验，以及 OAuth/Token/租约/1688 限流/AI 缓存去 Redis 已实现；flag 默认关闭，staging 43/45、当前 SHA CI、真实恢复和真实抖店 E2E 待完成
 
 ## 6. 验收标准（M1）
 
@@ -1407,6 +1415,8 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 
 ## 54. 变更记录
 
+- 2026-08-08：完成 M87 应用侧候选：新增普通平台 SKU 完整集合编辑和 Supabase PostgreSQL runtime state。SKU 编辑只接受连续强回读为 `offline/draft` 的商品，支持 SKU 增删、规格调整、多个自定义规格维度/值和 1688 spec 一对一重映射；既有平台 SKU ID/key、售价与 side fields 保留，新 SKU 使用稳定 key 并显式定价，未知写入通过 `SKU_WRITE_STARTED/SKU_RESULT_UNKNOWN` 阻断其他写入且只能专用核验。第 44 个 migration 新增 SKU 快照/指纹/回读时间。第 45 个 migration 新增 BFF-only `runtime_states`，把 OAuth state/result、加密 Token refresh recovery、订单/商品租约、1688 fixed-window limiter 与 AI 精确缓存从 Redis 迁入 Supabase PostgreSQL；readiness 改为 `database + runtimeState`，staging / production 不再配置 `REDIS_URL`。当前仍是应用侧候选：`PRODUCT_BATCH_SKU_EDIT_ENABLED=false`，staging 为 43/45，当前 SHA CI、最新真实备份恢复、43→45 migration 与真实抖店 E2E 尚未完成。
+
 - 2026-08-07：完成 M86 / R1-03～R1-04 平台凭证、采购账号亲和性与 attempt fence 加固。1688 采购创建时固化 `buyerShopId`，远端创建结果不确定后的 `outOrderId` 恢复、付款状态与物流轮询只使用该原买家账号；已有采购缺少账号/远端单号、同一销售订单绑定多个买家账号、原账号失效或事务内绑定漂移时均 fail-closed。active 轮询以 `buyerShopId + attemptNo + outOrderId + orderId1688 + status + retryEligible + exceptionStatus + syncRevision` 和销售订单售后允许态原子认领，旧 attempt 迟到响应不能查询或覆盖新采购；下单结果已知或未知时若并发进入退款/售后，都会按原 attempt 原子复核，保留远端单号或原 `outOrderId` 并转为 `action_required`，不会误标已停止或覆盖 replacement attempt。抖店与 1688 Token refresh 新增明确拒绝与可重试错误分类：网络、408/425/429/5xx、畸形字段和未知业务错误保留店铺 active 并返回 503；1688 会解析非瞬时 4xx 的精确拒绝码，抖店会拒绝空主体、空白 Token 与越界有效期，只有明确 refresh credential 拒绝或有效且不同的刷新主体才标记 expired。定向验证覆盖 Platform SDK 204/204、1688 采购与 ShopToken 42/42；全仓测试 14/14 个任务共 1,301 项、typecheck 15/15、lint 2/2、build 9/9、运维脚本 92/92、生产依赖审计、Prettier 与 diff check 全部通过；提交 `2712995` 的 [Release Gates #35](https://github.com/harzss/supplier/actions/runs/31166983502) verify/browser/images 与 [Security scans #1](https://github.com/harzss/supplier/actions/runs/31166983544) dependency-audit/CodeQL 全绿。尚未执行真实平台账号切换、真实 Token 失效和小额采购 E2E，因此 R1 与生产门禁状态不变。
 
 - 2026-08-07：完成 M85 / R1-01 双账号租户隔离验收器的代码基座。新增固定读取权限为 `0600` 的 Web staging 配置，并把 Supabase 项目与 BFF 固定到当前公开 staging origin；同账号、非 UUID 身份、非公开 Key、错项目或错 Gateway 都在发送凭证/Token 前失败。验收器在任何写入前要求双方都没有目标收藏，随后对 A、B 依次执行收藏、己方回读、对方不可见、删除和对称验证。只有双方初始为空后才允许补偿删除；PUT 超时、网络错误或非 200 时不重试，最终仍逐账号执行 best-effort DELETE、回读、logout，并要求 refresh token 返回 400/401，但由于迟到提交可能晚于即时回读，这类结果会永久标记为清理未证明而不是误报成功。普通路径任一步无法证明也会失败，且输出不含邮箱、密码、Key、Token、用户 ID、商品编号或响应正文。同时加固单账号 Auth 验收器：password/refresh 的响应在完整性或状态断言前登记任何 access token，grant 超时、无 Token 的 5xx 和注销后 refresh 探针不确定均明确要求人工核对会话，错误目标在发送凭证前失败。定向 Auth/隔离测试 43/43、全体运维脚本 92/92、全仓测试 14/14 个任务共 1,249 项、typecheck 15/15、lint 2/2、build 9/9、Prettier 与 diff check 已通过。真实双账号尚未写入 staging 私有配置，也未执行本 smoke；当前动态证据范围只覆盖两个不同 Supabase 用户的当前 JWT 会话与 Favorites 双向不可见，不能宣称刷新前后内部映射、R1-01、其他业务域租户隔离或生产身份门禁完成。
@@ -1558,12 +1568,12 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 
 - 2026-07-16：完成 M6 PostgreSQL 持久化铺货队列：新增 `publish_jobs`、任务 AI 选项快照和 migration；API 默认返回 queued，由 Nest worker 轮询并通过带旧状态/尝试次数条件的原子更新认领任务；支持指数退避、最大尝试次数、dead 状态、5 分钟 stale lock 恢复和人工重新入队。PublishService 重构为准备/执行两阶段，重试跳过已成功店铺并复用 `ai_optimized`。前端支持 queued 提示、2 秒状态轮询、队列次数/错误展示和重新入队。真实 Supabase 验收：任务 `4` 从 pending 自动转为 success/completed，尝试 1/3，生成平台商品 ID `douyin-1784200356045-absv`；成功任务重试接口返回 400。最终验证：全仓 typecheck 14/14、测试任务 11/11（BFF 88 项、总计 146 项）、BFF/Web production build、migration status up to date 与 `git diff --check` 全部通过。
 
-- 2026-07-16：推进 M5 类目映射数据闭环：新增用户级 `product_category_mappings` 表并安全应用 Supabase migration，避免把用户选择写回全局货源 `attributes`；新增查询、确认和清除接口，抖店叶子类目 ID 仅接受 JavaScript 安全范围内的正整数；商品详情页新增类目确认入口，PublishService 优先读取已确认映射，M3 准备度同步改为识别用户映射并兼容旧 attributes。真实运行验证：`mock-1001` 映射接口连接 Supabase 返回未确认状态，媒体准备度返回 0/2，抖店准备度 0/5 且准确提示从商品页确认类目。修复 BFF `deleteOutDir + incremental` 导致偶发漏发 `dist/main.js` 的启动问题。BFF/Web production build、全仓 typecheck 14/14、测试任务 11/11 与 140 项单测通过。AI Top3 暂不生成，等待真实平台类目目录，避免虚假 ID。
+- 2026-07-16：推进 M5 类目映射数据闭环：新增用户级 `product_category_mappings` 表并安全应用 Supabase migration，避免把用户选择写回全局货源 `attributes`；新增查询、确认和清除接口，抖店叶子类目 ID 仅接受 JavaScript 安全范围内的正整数；商品详情页新增类目确认入口，PublishService 优先读取已确认映射，M3 准备度同步改为识别用户映射并兼容旧 attributes。真实运行验证：`mock-1001` 映射接口连接 Supabase 返回未确认状态，媒体准备度返回 0/2，抖店准备度 0/6 且准确提示从商品页确认类目。修复 BFF `deleteOutDir + incremental` 导致偶发漏发 `dist/main.js` 的启动问题。BFF/Web production build、全仓 typecheck 14/14、测试任务 11/11 与 140 项单测通过。AI Top3 暂不生成，等待真实平台类目目录，避免虚假 ID。
 - 2026-07-16：新增 M4 图片服务准备度：`GET /api/media/readiness` 和设置页展示公开 Storage、GPU worker 两项配置状态，当前环境实测 0/2；接口不返回任何密钥。
 - 2026-07-16：推进 M4 主图处理应用侧闭环：新增主图操作 DTO 校验和专业版权益门禁，铺货面板支持显式选择去水印、重打光与三种背景风格；新增远程 GPU image worker 客户端协议，对 worker 的水印框、处理步骤、模型、成本、输出图和 VLM 合规结果做严格校验，并将合格结果归一化为 1000×1000 PNG；新增主图独立 Storage 路径、AI 用量计量、`ai_optimized` 处理轨迹持久化和平台 adapter 接入。worker、Storage 或审核失败时保留原货源主图且不阻断铺货；外部图片 URL 拒绝 localhost/私网地址，VLM 拒绝结果仍计入实际调用用量。BFF/Web production build、全仓 typecheck 14/14、测试任务 11/11 与 135 项单测通过；真实 YOLO/Flux/SAM2/Qwen-VL 服务仍待配置联调。
 - 2026-07-16：推进 M4 详情图片链路：新增确定性的 750px 长图渲染器，将安全结构化 HTML 转为 PNG；新增 Supabase Storage 上传服务，使用 service role 仅在服务端上传到公开 bucket，并把生成 URL 置于平台详情图片首位；Storage 未配置、渲染或上传失败时保留原货源详情图片且不阻断铺货。前端区分“AI 详情文案已保存”和“AI 详情图已托管”，避免误报真实发布状态。Web production build、全仓 typecheck 14/14、测试任务 11/11 与 128 项单测通过；真实 Storage 和抖店读取仍待外部配置验证。
 - 2026-07-16：完成 M4 第一阶段 AI 详情文案闭环：新增 `/api/ai/detail`，接入 `ai.detail` 套餐门禁、平台额度、BYOK、缓存、模型路由和用量计量；输出解析为至少 3 个安全结构化段落，进行 HTML 转义和夸大/违禁词替换，无 LLM Key 时使用三段式 stub。铺货面板支持显式勾选，结果写入 `publish_tasks.ai_optimized`，铺货记录展示 AI 详情标记；Mock 浏览器验收完成。详情图片渲染/托管和主图处理当时尚未完成。
-- 2026-07-16：推进 M3-6 联调准备工作：新增只读 `GET /api/shops/oauth/douyin/readiness`，并在设置页展示 5 项真实联调准备度，检查抖店应用凭证、OAuth 回调/返回地址/ENCRYPTION_KEY/Redis 实际连接、客服电话、真实授权店铺及带抖店叶子类目映射的测试商品；检查结果不返回任何密钥。当前环境实测 0/5，页面准确列出缺失项且无控制台错误。全仓 typecheck 14/14、测试任务 11/11、119 项单测通过；真实 API 调用仍等待平台凭证与测试店铺。
+- 2026-07-16：推进 M3-6 联调准备工作：新增只读 `GET /api/shops/oauth/douyin/readiness`，并在设置页展示 6 项真实联调准备度，检查抖店应用凭证、OAuth 回调/返回地址/ENCRYPTION_KEY/Redis 实际连接、客服电话、真实授权店铺及带抖店叶子类目映射的测试商品；检查结果不返回任何密钥。当前环境实测 0/6，页面准确列出缺失项且无控制台错误。全仓 typecheck 14/14、测试任务 11/11、119 项单测通过；真实 API 调用仍等待平台凭证与测试店铺。
 - 2026-07-16：完成 M3-5 设置页真实授权体验：新增抖店官方授权入口，真实店与演示店明确分区；店铺列表返回 OAuth/演示连接类型和 Token 到期时间，支持有效、过期、撤销状态展示及重新授权；OAuth 回调成功或失败后由 BFF 以 302 安全跳回设置页，页面展示结果并清理 URL 参数。已完成 Web 生产构建、回调 302 实测和浏览器验收，页面无控制台错误；全仓 typecheck 14/14、测试任务 11/11、117 项单测通过。下一步 M3-6（测试店铺真实商品发布、订单同步、物流回传联调）。
 - 2026-07-16：完成 M3-4 真实抖店 adapter：实现 canonical JSON + HMAC-SHA256 公共请求层，以及 `product.addV2` 商品发布、`order.searchList` 订单拉取、`order.logisticsAdd` 物流回传；新增店铺级 adapter factory，演示店继续走 Mock、OAuth 抖店自动走真实 API；新增 `POST /api/orders/sync/:shopId` 幂等同步订单，手机号和地址继续加密落库；物流回传失败时保留 `purchasing` 并允许仅重试回传，避免重复向 1688 下单。全仓 typecheck 14/14、测试任务 11/11、115 项单测通过。真实发布仍需配置客服电话、抖店叶子类目映射和测试店铺凭证。下一步 M3-5（设置页真实授权入口与重新授权状态）。
 - 2026-07-16：完成 M3-3 Token 安全存储与刷新：OAuth 回调按用户/平台/店铺幂等落库，access/refresh token 使用 AES-256-GCM 加密；新增统一 ShopTokenService，调用时仅在内存解密，过期前 5 分钟通过店铺级 Redis 锁刷新，刷新失败标记店铺 expired 并提示重新授权；铺货与物流回传不再把数据库密文直接传给 adapter。下一步 M3-4（真实抖店 adapter）。

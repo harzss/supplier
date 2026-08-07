@@ -131,6 +131,168 @@ describe('CreateProductBatchPreviewDto', () => {
     await expect(validate(dto)).resolves.toHaveLength(0);
   });
 
+  it('accepts an SKU edit with distinct custom values sharing the platform value ID', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'edit_sku',
+      publishedProductIds: ['1'],
+      skuTargets: [
+        {
+          publishedProductId: '1',
+          expectedMutationRevision: 3,
+          expectedPlatformSkuFingerprint: 'a'.repeat(64),
+          expectedRuleFingerprint: 'b'.repeat(64),
+          dimensions: [
+            {
+              propertyId: 'color',
+              propertyName: '颜色',
+              values: [
+                { valueId: '0', valueName: '自定义', remark: '雾蓝' },
+                { valueId: '0', valueName: '自定义', remark: '月白' },
+              ],
+            },
+          ],
+          rows: [
+            {
+              rowId: 'existing:sku-a',
+              isNew: false,
+              platformSkuId: '1001',
+              platformSkuKey: 'sku-a',
+              sourceSpecId: 'source-a',
+              properties: [
+                {
+                  propertyId: 'color',
+                  propertyName: '颜色',
+                  valueId: '0',
+                  valueName: '自定义',
+                  remark: '雾蓝',
+                },
+              ],
+              priceCents: 2990,
+            },
+            {
+              rowId: 'new:moon-white',
+              isNew: true,
+              sourceSpecId: 'source-b',
+              properties: [
+                {
+                  propertyId: 'color',
+                  propertyName: '颜色',
+                  valueId: '0',
+                  valueName: '自定义',
+                  remark: '月白',
+                },
+              ],
+              priceCents: 3190,
+              skuPictureUrls: ['https://img.example.com/moon-white.jpg'],
+            },
+          ],
+        },
+      ],
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
+  it('accepts two named custom dimensions sharing property ID zero', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'edit_sku',
+      publishedProductIds: ['1'],
+      skuTargets: [
+        {
+          publishedProductId: '1',
+          expectedMutationRevision: 1,
+          expectedPlatformSkuFingerprint: 'a'.repeat(64),
+          expectedRuleFingerprint: 'b'.repeat(64),
+          dimensions: [
+            {
+              propertyId: '0',
+              propertyName: '色号',
+              values: [{ valueId: '0', valueName: '自定义', remark: '雾蓝' }],
+            },
+            {
+              propertyId: '0',
+              propertyName: '纹理',
+              values: [{ valueId: '0', valueName: '自定义', remark: '细纹' }],
+            },
+          ],
+          rows: [
+            {
+              rowId: 'new:custom',
+              isNew: true,
+              sourceSpecId: 'source-a',
+              properties: [
+                {
+                  propertyId: '0',
+                  propertyName: '色号',
+                  valueId: '0',
+                  valueName: '自定义',
+                  remark: '雾蓝',
+                },
+                {
+                  propertyId: '0',
+                  propertyName: '纹理',
+                  valueId: '0',
+                  valueName: '自定义',
+                  remark: '细纹',
+                },
+              ],
+              priceCents: 2990,
+            },
+          ],
+        },
+      ],
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+  });
+
+  it('rejects duplicate custom SKU values with the same ID, name, and remark', async () => {
+    const dto = plainToInstance(CreateProductBatchPreviewDto, {
+      clientRequestId: '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1',
+      action: 'edit_sku',
+      publishedProductIds: ['1'],
+      skuTargets: [
+        {
+          publishedProductId: '1',
+          expectedMutationRevision: 1,
+          expectedPlatformSkuFingerprint: 'a'.repeat(64),
+          expectedRuleFingerprint: 'b'.repeat(64),
+          dimensions: [
+            {
+              propertyId: 'color',
+              propertyName: '颜色',
+              values: [
+                { valueId: '0', valueName: '自定义', remark: '雾蓝' },
+                { valueId: '0', valueName: '自定义', remark: '雾蓝' },
+              ],
+            },
+          ],
+          rows: [
+            {
+              rowId: 'new:mist-blue',
+              isNew: true,
+              sourceSpecId: 'source-a',
+              properties: [
+                {
+                  propertyId: 'color',
+                  propertyName: '颜色',
+                  valueId: '0',
+                  valueName: '自定义',
+                  remark: '雾蓝',
+                },
+              ],
+              priceCents: 2990,
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(await validate(dto)).not.toHaveLength(0);
+  });
+
   it.each([
     ['missing targets', undefined],
     [

@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  Inject,
   HttpException,
   Injectable,
   Logger,
@@ -10,11 +9,10 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { OrderAfterSaleStatus, Prisma, Shop } from '@supplier/db';
 import type { PlatformOrder } from '@supplier/platform-sdk';
-import type Redis from 'ioredis';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
-import { REDIS_CLIENT } from '../../common/redis.module';
+import { RuntimeStateService } from '../../common/runtime-state.service';
 import { AfterSaleService } from '../after-sale/after-sale.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import {
@@ -73,7 +71,7 @@ export class OrderSyncService {
     private readonly shopTokens: ShopTokenService,
     private readonly adapters: PlatformAdapterFactory,
     private readonly config: ConfigService,
-    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly runtimeState: RuntimeStateService,
     private readonly afterSales: AfterSaleService,
   ) {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
@@ -248,50 +246,35 @@ export class OrderSyncService {
   }
 
   private async acquireSyncLock(shopId: bigint): Promise<string | null> {
-    const value = randomUUID();
     try {
-      const stored = await this.redis.set(
-        `orders:sync:${shopId}`,
-        value,
-        'PX',
-        SYNC_LOCK_TTL_MS,
-        'NX',
-      );
-      return stored === 'OK' ? value : null;
+      return await this.runtimeState.acquireLease(`orders:sync:${shopId}`, SYNC_LOCK_TTL_MS);
     } catch {
       this.logger.warn(`店铺 ${shopId} 订单同步锁不可用`);
-      throw new ServiceUnavailableException('订单同步依赖 Redis，不可用时拒绝执行');
+      throw new ServiceUnavailableException('订单同步协调状态不可用，已拒绝执行');
     }
   }
 
   private async releaseSyncLock(shopId: bigint, value: string): Promise<void> {
     try {
-      await this.redis.eval(
-        'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
-        1,
-        `orders:sync:${shopId}`,
-        value,
-      );
+      await this.runtimeState.releaseLease(`orders:sync:${shopId}`, value);
     } catch {
       this.logger.warn(`店铺 ${shopId} 订单同步锁释放失败`);
     }
   }
 
   private async renewSyncLock(shopId: bigint, value: string): Promise<void> {
-    let renewed: unknown;
+    let renewed: boolean;
     try {
-      renewed = await this.redis.eval(
-        'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pexpire", KEYS[1], ARGV[2]) else return 0 end',
-        1,
+      renewed = await this.runtimeState.renewLease(
         `orders:sync:${shopId}`,
         value,
-        String(SYNC_LOCK_TTL_MS),
+        SYNC_LOCK_TTL_MS,
       );
     } catch {
       this.logger.warn(`店铺 ${shopId} 订单同步锁续租失败`);
-      throw new ServiceUnavailableException('订单同步依赖 Redis，不可用时拒绝执行');
+      throw new ServiceUnavailableException('订单同步协调状态不可用，已拒绝执行');
     }
-    if (renewed !== 1) {
+    if (!renewed) {
       throw new ServiceUnavailableException('订单同步执行权已失效，请由当前任务继续');
     }
   }

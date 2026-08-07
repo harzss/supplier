@@ -1,6 +1,8 @@
 # 技术架构与选型
 
-> 本文同时记录当前 MVP 与目标架构。当前可部署形态是 Next.js Web + NestJS BFF 模块化单体、Supabase/PostgreSQL、Redis 和 PostgreSQL 持久队列；Go 微服务、Kafka、Temporal、Milvus、ClickHouse 与 K8s 属于后续演进，不能当作当前已上线能力。
+> 本文同时记录当前 MVP 与目标架构。当前候选形态是 Next.js Web + NestJS BFF 模块化单体、Supabase（PostgreSQL / Auth / Storage）、PostgreSQL 持久队列与 `runtime_states` 短期协调状态；staging / production 不再配置 `REDIS_URL`，本机也不运行 Redis。Go 微服务、Kafka、Temporal、Milvus、ClickHouse 与 K8s 属于后续演进，不能当作当前已上线能力。
+>
+> **状态边界（2026-08-08）**：上述 Supabase-only runtime state 已进入应用候选与第 45 个 migration，但 staging 仍为 43/45，第 44、45 个 migration 尚未应用；当前 SHA CI、真实备份恢复和真实抖店/1688 E2E 仍未完成，因此不能表述为生产可用。
 
 ## 1. 整体架构
 
@@ -15,7 +17,7 @@ flowchart TB
     subgraph Edge["接入层"]
         CDN["CDN / WAF"]
         BFF["BFF<br/>NestJS"]
-        Auth["鉴权 / 限流<br/>Redis + JWT"]
+        Auth["鉴权 / 限流<br/>Supabase JWT + PostgreSQL"]
     end
 
     subgraph Service["业务服务层"]
@@ -34,9 +36,9 @@ flowchart TB
     end
 
     subgraph Data["数据层"]
-        PostgreSQL[(Supabase / PostgreSQL 15)]
-        Redis[(Redis Cluster)]
-        OSS[(对象存储)]
+        PostgreSQL[("Supabase PostgreSQL<br/>业务数据 / 队列 / runtime_states")]
+        AuthData[(Supabase Auth)]
+        OSS[(Supabase Storage)]
         FutureData["后续：Citus / ES / Milvus"]
         Kafka[/Kafka（后续）/]
     end
@@ -56,6 +58,7 @@ flowchart TB
     BFF --> Service
     Service --> AI
     Service --> Data
+    BFF --> AuthData
     Service --> External
     AI --> LLMs
     AI --> Data
@@ -87,15 +90,15 @@ flowchart TB
 
 ### 2.3 后端
 
-| 模块             | 选型                                                      | 理由                                 |
-| ---------------- | --------------------------------------------------------- | ------------------------------------ |
-| BFF / 业务主语言 | NestJS (TypeScript)                                       | 与前端共享类型；生态成熟             |
-| 高并发 IO        | Go (gin/fiber)                                            | 采集、订单代发场景                   |
-| AI 视觉服务      | Python + FastAPI                                          | PyTorch / SAM / Diffusers 生态       |
-| ORM              | Prisma（NestJS）/ GORM（Go）                              | 类型安全                             |
-| RPC              | gRPC + Protobuf                                           | 内部服务通信                         |
-| 队列             | PostgreSQL `publish_jobs`（当前）/ Kafka + BullMQ（后续） | 当前保证持久化认领、退避、死信与恢复 |
-| 调度             | Nest worker（当前）/ Temporal（后续）                     | 业务跨服务、跨小时后再引入 Temporal  |
+| 模块             | 选型                                             | 理由                                 |
+| ---------------- | ------------------------------------------------ | ------------------------------------ |
+| BFF / 业务主语言 | NestJS (TypeScript)                              | 与前端共享类型；生态成熟             |
+| 高并发 IO        | Go (gin/fiber)                                   | 采集、订单代发场景                   |
+| AI 视觉服务      | Python + FastAPI                                 | PyTorch / SAM / Diffusers 生态       |
+| ORM              | Prisma（NestJS）/ GORM（Go）                     | 类型安全                             |
+| RPC              | gRPC + Protobuf                                  | 内部服务通信                         |
+| 队列             | PostgreSQL `publish_jobs`（当前）/ Kafka（后续） | 当前保证持久化认领、退避、死信与恢复 |
+| 调度             | Nest worker（当前）/ Temporal（后续）            | 业务跨服务、跨小时后再引入 Temporal  |
 
 ### 2.4 AI 中台
 
@@ -113,16 +116,17 @@ flowchart TB
 
 ### 2.5 数据层
 
-| 模块     | 选型                                                      | 用途                                 |
-| -------- | --------------------------------------------------------- | ------------------------------------ |
-| 关系型   | Supabase / PostgreSQL 15                                  | 业务主库 + Auth + Storage + Realtime |
-| 大表扩容 | Citus 分区 / 独立 PG 集群                                 | 货源亿级 SKU 时再切（MVP 不做）      |
-| 搜索     | Postgres `pg_trgm` + GIN（早期）→ Elasticsearch 8（后期） | 商品全文检索                         |
-| 向量     | Supabase `pgvector`（早期）→ Milvus 2.4（亿级）           | 选品语义、类目映射                   |
-| 缓存     | Redis（当前）→ Redis Cluster（扩容后）                    | OAuth state、锁、限流与运行依赖      |
-| 对象存储 | Supabase Storage（当前）→ OSS / 七牛（按部署选择）        | 图片、视频                           |
-| 消息     | PostgreSQL 队列（当前）→ Kafka 3.x（跨服务后）            | 铺货任务与后续事件流                 |
-| 数仓     | PostgreSQL 聚合（当前）→ ClickHouse（数据量增长后）       | 经营分析、看板                       |
+| 模块     | 选型                                                      | 用途                                                                                      |
+| -------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 关系型   | Supabase / PostgreSQL 15+                                 | 业务主库、队列、计量与审计                                                                |
+| 身份     | Supabase Auth                                             | 邮箱身份、JWT 与会话                                                                      |
+| 短期状态 | Supabase PostgreSQL `runtime_states`（当前）              | OAuth state/result、Token 刷新恢复、订单/商品租约、1688 fixed-window limiter、AI 精确缓存 |
+| 大表扩容 | Citus 分区 / 独立 PG 集群                                 | 货源亿级 SKU 时再切（MVP 不做）                                                           |
+| 搜索     | Postgres `pg_trgm` + GIN（早期）→ Elasticsearch 8（后期） | 商品全文检索                                                                              |
+| 向量     | Supabase `pgvector`（早期）→ Milvus 2.4（亿级）           | 选品语义、类目映射                                                                        |
+| 对象存储 | Supabase Storage（当前）→ OSS / 七牛（按部署选择）        | 图片、视频                                                                                |
+| 消息     | PostgreSQL 队列（当前）→ Kafka 3.x（跨服务后）            | 铺货任务与后续事件流                                                                      |
+| 数仓     | PostgreSQL 聚合（当前）→ ClickHouse（数据量增长后）       | 经营分析、看板                                                                            |
 
 ### 2.6 基础设施
 
@@ -148,9 +152,9 @@ flowchart LR
     BFFPod --> AIGateway[AI Gateway]
     AIGateway --> LLM[外部 LLM]
     AIGateway --> VisionPod[Vision GPU Pod]
-    BFFPod --> PG[(Supabase / PostgreSQL)]
-    BFFPod --> Redis[(生产 Redis)]
-    BFFPod --> Storage[(Supabase Storage / OSS)]
+    BFFPod --> PG[("Supabase PostgreSQL<br/>业务 / 队列 / runtime_states")]
+    BFFPod --> SupabaseAuth[Supabase Auth]
+    BFFPod --> Storage[(Supabase Storage)]
     BFFPod --> Platform[抖店 / 1688 OpenAPI]
     Prometheus[Prometheus] -->|独立运维 token 抓取| BFFPod
     BFFPod -->|HMAC 签名 Webhook| AlertReceiver[告警接收端]
@@ -182,6 +186,13 @@ flowchart LR
 - 当前铺货在单体内执行，`publish_jobs` 已提供原子认领、指数退避、死信、stale lock 恢复和人工重试，减少 MVP 运维面
 - 当流程真正跨服务、跨小时并需要补偿事务与工作流版本化时再引入 Temporal
 - 引入新调度系统前必须证明现有数据库队列成为容量或可靠性瓶颈，并完成迁移与双跑方案
+
+### 4.5 为什么运行时状态也使用 Supabase PostgreSQL？
+
+- 内测阶段优先减少独立中间件：BFF 只依赖同一个 Supabase 项目的 PostgreSQL / Auth / Storage，staging 和 production 都不需要 `REDIS_URL`
+- `runtime_states` 以单条 SQL 完成一次性写入/消费、带 owner token 的租约与 fixed-window 计数，兼容 Supabase transaction pooler；过期记录有索引并由有界清理回收
+- OAuth state/result、加密后的 Token refresh recovery、订单同步锁、商品变更锁、1688 全局限流与 AI 精确缓存共用该抽象，但业务持久事实、任务状态和审计仍保存于各自正式表
+- readiness 同时检查最新必需 migration、数据库与 `runtime_states`；任一失败都返回 503。只有真实负载证明 PostgreSQL 协调成为瓶颈时，才评估新的托管服务并先完成容量、故障和迁移验证
 
 ## 5. 服务边界
 

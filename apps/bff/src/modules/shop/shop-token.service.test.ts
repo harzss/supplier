@@ -1,8 +1,8 @@
 import type { ConfigService } from '@nestjs/config';
-import type Redis from 'ioredis';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CryptoService } from '../../common/crypto.module';
 import type { PrismaService } from '../../common/prisma.module';
+import type { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAuthConfigService } from './oauth-config.service';
 import { ShopTokenService } from './shop-token.service';
 import type { AlertService } from '../observability/alert.service';
@@ -10,21 +10,29 @@ import type { AlertService } from '../observability/alert.service';
 const CALLBACK = 'https://supplier.example.com/api/shops/oauth/douyin/callback';
 const ALIBABA_1688_CALLBACK = 'https://supplier.example.com/api/shops/oauth/alibaba_1688/callback';
 
-class FakeRedis {
+class FakeRuntimeState {
   lockAvailable = true;
+  storeFailures = 0;
   private readonly values = new Map<string, string>();
-  set = vi.fn(async (key: string, value: string, ...args: unknown[]) => {
-    if (key.startsWith('oauth:refresh:') && !this.lockAvailable) return null;
-    if (args.includes('NX') && this.values.has(key)) return null;
-    this.values.set(key, value);
-    return 'OK';
+  acquireLease = vi.fn(async (key: string) => {
+    if (!this.lockAvailable || this.values.has(key)) return null;
+    const token = '6ca0280f-3158-4cbc-a34c-4d957f4a3e7a';
+    this.values.set(key, token);
+    return token;
   });
-  get = vi.fn(async (key: string) => this.values.get(key) ?? null);
-  del = vi.fn(async (key: string) => (this.values.delete(key) ? 1 : 0));
-  eval = vi.fn(async (_script: string, _keys: number, key: string, value: string) => {
-    if (this.values.get(key) !== value) return 0;
+  store = vi.fn(async (key: string, value: string) => {
+    if (this.storeFailures > 0) {
+      this.storeFailures -= 1;
+      throw new Error('runtime state unavailable');
+    }
+    this.values.set(key, value);
+  });
+  read = vi.fn(async (key: string) => this.values.get(key) ?? null);
+  remove = vi.fn(async (key: string) => {
     this.values.delete(key);
-    return 1;
+  });
+  releaseLease = vi.fn(async (key: string, token: string) => {
+    if (this.values.get(key) === token) this.values.delete(key);
   });
 }
 
@@ -47,6 +55,7 @@ function makeService(opts: {
   lockAvailable?: boolean;
   platform?: 'douyin' | 'alibaba_1688';
   tokenPersistenceFailures?: number;
+  runtimeStateStoreFailures?: number;
 }) {
   const crypto = new CryptoService({ get: () => 'unit-test-key' } as unknown as ConfigService);
   const platform = opts.platform ?? 'douyin';
@@ -91,13 +100,20 @@ function makeService(opts: {
       ),
     },
   } as unknown as PrismaService;
-  const redis = new FakeRedis();
-  redis.lockAvailable = opts.lockAvailable ?? true;
+  const runtimeState = new FakeRuntimeState();
+  runtimeState.lockAvailable = opts.lockAvailable ?? true;
+  runtimeState.storeFailures = opts.runtimeStateStoreFailures ?? 0;
   const alerts = { raise: vi.fn(), resolve: vi.fn() } as unknown as AlertService;
   return {
-    service: new ShopTokenService(prisma, crypto, makeConfig(), redis as unknown as Redis, alerts),
+    service: new ShopTokenService(
+      prisma,
+      crypto,
+      makeConfig(),
+      runtimeState as unknown as RuntimeStateService,
+      alerts,
+    ),
     crypto,
-    redis,
+    runtimeState,
     updates,
     alerts,
     shop,
@@ -110,10 +126,10 @@ afterEach(() => {
 
 describe('ShopTokenService', () => {
   it('decrypts a token that is not close to expiry', async () => {
-    const { service, redis } = makeService({ expiresInMs: 10 * 60 * 1000 });
+    const { service, runtimeState } = makeService({ expiresInMs: 10 * 60 * 1000 });
 
     await expect(service.getAccessToken(9n, 42n)).resolves.toBe('old-access-token');
-    expect(redis.set).not.toHaveBeenCalled();
+    expect(runtimeState.acquireLease).not.toHaveBeenCalled();
   });
 
   it('refreshes a near-expiry token once and stores only ciphertext', async () => {
@@ -136,30 +152,22 @@ describe('ShopTokenService', () => {
           ),
       ),
     );
-    const { service, crypto, redis, updates } = makeService({ expiresInMs: 2 * 60 * 1000 });
+    const { service, crypto, runtimeState, updates } = makeService({
+      expiresInMs: 2 * 60 * 1000,
+    });
 
     await expect(service.getAccessToken(9n, 42n)).resolves.toBe('new-access-token');
 
-    expect(redis.set).toHaveBeenCalledTimes(2);
-    expect(redis.set).toHaveBeenNthCalledWith(
-      1,
-      'oauth:refresh:9',
-      expect.any(String),
-      'PX',
-      60_000,
-      'NX',
-    );
-    expect(redis.set).toHaveBeenNthCalledWith(
-      2,
+    expect(runtimeState.acquireLease).toHaveBeenCalledWith('oauth:refresh:9', 60_000);
+    expect(runtimeState.store).toHaveBeenCalledWith(
       'oauth:refresh-result:9',
       expect.any(String),
-      'PX',
       86_400_000,
     );
-    const recoveryPayload = String(redis.set.mock.calls[1]?.[1]);
+    const recoveryPayload = String(runtimeState.store.mock.calls[0]?.[1]);
     expect(recoveryPayload).not.toContain('new-access-token');
     expect(recoveryPayload).not.toContain('new-refresh-token');
-    expect(redis.eval).toHaveBeenCalledTimes(1);
+    expect(runtimeState.releaseLease).toHaveBeenCalledTimes(1);
     expect(updates).toHaveLength(1);
     expect(updates[0]?.accessTokenEnc).not.toBe('new-access-token');
     expect(updates[0]?.refreshTokenEnc).not.toBe('new-refresh-token');
@@ -167,7 +175,7 @@ describe('ShopTokenService', () => {
     expect(crypto.decrypt(String(updates[0]?.refreshTokenEnc))).toBe('new-refresh-token');
   });
 
-  it('recovers a rotated token from encrypted Redis state after database persistence fails', async () => {
+  it('recovers a rotated token from encrypted runtime state after database persistence fails', async () => {
     const fetcher = vi.fn(
       async () =>
         new Response(
@@ -193,7 +201,71 @@ describe('ShopTokenService', () => {
     expect(state.shop.status).toBe('active');
     expect(state.updates).toHaveLength(1);
     expect(state.crypto.decrypt(String(state.shop.refreshTokenEnc))).toBe('new-refresh-token');
-    expect(state.redis.del).toHaveBeenCalledWith('oauth:refresh-result:9');
+    expect(state.runtimeState.remove).toHaveBeenCalledWith('oauth:refresh-result:9');
+  });
+
+  it('persists the rotated token directly after bounded recovery-journal retries fail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              err_no: 0,
+              data: {
+                access_token: 'new-access-token',
+                refresh_token: 'new-refresh-token',
+                expires_in: 7200,
+                shop_id: '4463798',
+              },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const state = makeService({ expiresInMs: -1, runtimeStateStoreFailures: 3 });
+
+    await expect(state.service.getAccessToken(9n, 42n)).resolves.toBe('new-access-token');
+
+    expect(state.runtimeState.store).toHaveBeenCalledTimes(3);
+    expect(state.updates).toHaveLength(1);
+    expect(state.crypto.decrypt(String(state.shop.refreshTokenEnc))).toBe('new-refresh-token');
+  });
+
+  it('retries the encrypted recovery journal after both initial journal writes and persistence fail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              err_no: 0,
+              data: {
+                access_token: 'new-access-token',
+                refresh_token: 'new-refresh-token',
+                expires_in: 7200,
+                shop_id: '4463798',
+              },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const state = makeService({
+      expiresInMs: -1,
+      runtimeStateStoreFailures: 6,
+      tokenPersistenceFailures: 3,
+    });
+
+    await expect(state.service.getAccessToken(9n, 42n)).rejects.toThrow('店铺授权刷新结果待恢复');
+
+    expect(state.runtimeState.store).toHaveBeenCalledTimes(6);
+    expect(state.alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: 'critical',
+        details: expect.objectContaining({ failure: 'token_refresh_recovery_store' }),
+      }),
+    );
   });
 
   it('uses the still-valid token when another request owns the refresh lock', async () => {

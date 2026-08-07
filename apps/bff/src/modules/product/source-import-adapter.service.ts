@@ -1,14 +1,12 @@
 import {
   BadRequestException,
-  Inject,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MockAdapter, OpenApi1688Adapter, type SourceAdapter } from '@supplier/crawler';
-import type Redis from 'ioredis';
-import { REDIS_CLIENT } from '../../common/redis.module';
+import { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAuthConfigService } from '../shop/oauth-config.service';
 import { ShopTokenService } from '../shop/shop-token.service';
 import { PrismaService } from '../../common/prisma.module';
@@ -115,32 +113,26 @@ export class SourceImportAdapterFactory {
 
 @Injectable()
 export class SourceImportRateLimiter {
-  constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
+  constructor(private readonly runtimeState: RuntimeStateService) {}
 
   async take(demo: boolean): Promise<void> {
     if (demo) return;
     for (let attempt = 0; attempt < 10; attempt++) {
-      let waitMs: unknown;
+      let decision: Awaited<ReturnType<RuntimeStateService['takeFixedWindow']>>;
       try {
-        waitMs = await this.redis.eval(
-          `local current = redis.call('incr', KEYS[1])
-           if current == 1 then redis.call('pexpire', KEYS[1], ARGV[2]) end
-           if current <= tonumber(ARGV[1]) then return 0 end
-           return redis.call('pttl', KEYS[1])`,
-          1,
+        decision = await this.runtimeState.takeFixedWindow(
           GLOBAL_RATE_KEY,
-          String(GLOBAL_RATE_LIMIT_PER_SECOND),
-          '1000',
+          GLOBAL_RATE_LIMIT_PER_SECOND,
+          1_000,
         );
       } catch {
         throw new ServiceUnavailableException('1688 采集依赖共享限流器，不可用时拒绝执行');
       }
-      const delay = typeof waitMs === 'number' ? waitMs : Number(waitMs);
-      if (!Number.isFinite(delay) || delay < 0) {
+      if (!Number.isSafeInteger(decision.retryAfterMs) || decision.retryAfterMs < 0) {
         throw new ServiceUnavailableException('1688 采集共享限流器状态异常，已拒绝执行');
       }
-      if (delay === 0) return;
-      await sleep(Math.min(Math.max(delay, 10), 1_000));
+      if (decision.allowed) return;
+      await sleep(Math.min(Math.max(decision.retryAfterMs, 10), 1_000));
     }
     throw new ServiceUnavailableException('1688 采集共享配额繁忙，请稍后重试');
   }

@@ -16,6 +16,21 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+// BFF-only short-lived coordination state stored in Supabase PostgreSQL.
+// Client-facing Supabase roles have no privileges or RLS policies on this table.
+model RuntimeState {
+  key          String   @id @db.VarChar(255)
+  value        Json?    @db.JsonB
+  ownerToken   String?  @map("owner_token") @db.Uuid
+  counterValue Int?     @map("counter_value")
+  expiresAt    DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([expiresAt])
+  @@map("runtime_states")
+}
+
 // ----- 用户与店铺 -----
 
 enum UserPlan {
@@ -458,6 +473,9 @@ model PublishedProduct {
   title                      String                 @db.VarChar(255)
   salePrice                  Decimal                @map("sale_price") @db.Decimal(10, 2)
   costPrice                  Decimal?               @map("cost_price") @db.Decimal(10, 2)
+  skuSpecSnapshot            Json?                  @map("sku_spec_snapshot") @db.JsonB
+  skuSpecFingerprint         String?                @map("sku_spec_fingerprint") @db.VarChar(64)
+  skuSpecSyncedAt            DateTime?              @map("sku_spec_synced_at")
   skuPriceSnapshot           Json?                  @map("sku_price_snapshot") @db.JsonB
   skuInventorySnapshot       Json?                  @map("sku_inventory_snapshot") @db.JsonB
   priceSyncedAt              DateTime?              @map("price_synced_at")
@@ -540,6 +558,7 @@ model PublishedProductSourceBinding {
 enum ProductBatchAction {
   edit_title
   edit_price
+  edit_sku
   sync_inventory
   online
   offline

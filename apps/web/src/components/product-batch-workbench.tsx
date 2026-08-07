@@ -19,6 +19,7 @@ import {
   hasValidCleanupCandidateState,
   hasValidOfflineCandidateState,
   hasValidOnlineCandidateState,
+  hasValidSkuEditCandidateState,
   hasValidSourceChangeCandidateState,
   productBatchWorkbenchStorageKey,
   readProductBatchWorkbenchSession,
@@ -28,6 +29,7 @@ import {
   type ProductBatchPreviewSession,
   type ProductBatchSessionScope,
 } from './product-batch-session';
+import { SkuMatrixEditor } from './sku-matrix-editor';
 import {
   ApiError,
   api,
@@ -38,6 +40,8 @@ import {
   type ProductBatchItem,
   type ProductBatchPreviewRequest,
   type ProductBatchPriceRule,
+  type ProductBatchSkuEditContext,
+  type ProductBatchSkuTarget,
   type ProductBatchTask,
 } from '../lib/api';
 
@@ -47,6 +51,7 @@ const TARGET_PAGE_SIZE = 20;
 const ACTIVE_TASK_STATUSES = new Set(['queued', 'running', 'cancelling']);
 const ONLINE_RESULT_UNKNOWN_CODES = new Set(['ONLINE_WRITE_STARTED', 'ONLINE_RESULT_UNKNOWN']);
 const OFFLINE_RESULT_UNKNOWN_CODES = new Set(['OFFLINE_WRITE_STARTED', 'OFFLINE_RESULT_UNKNOWN']);
+const SKU_RESULT_UNKNOWN_CODES = new Set(['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN']);
 const CURRENCY_FORMATTER = new Intl.NumberFormat('zh-CN', {
   style: 'currency',
   currency: 'CNY',
@@ -79,6 +84,7 @@ type ProductBatchPreviewInput =
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'offline' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_title' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_price' }>, 'clientRequestId'>
+  | Omit<Extract<ProductBatchPreviewRequest, { action: 'edit_sku' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'sync_inventory' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'change_source' }>, 'clientRequestId'>
   | Omit<Extract<ProductBatchPreviewRequest, { action: 'cleanup' }>, 'clientRequestId'>;
@@ -95,6 +101,7 @@ const EMPTY_COMPOSER_DRAFT: ProductBatchComposerDraft = {
   targetInputs: {},
   titleInputs: {},
   sourceTargetInputs: {},
+  skuTargets: {},
   bulkTargetInput: '',
   targetPage: 1,
   selected: [],
@@ -166,6 +173,8 @@ function BatchComposer({
   const [targetInputs, setTargetInputs] = useState<Record<string, string>>({});
   const [titleInputs, setTitleInputs] = useState<Record<string, string>>({});
   const [sourceTargetInputs, setSourceTargetInputs] = useState<Record<string, string>>({});
+  const [skuTargets, setSkuTargets] = useState<Record<string, ProductBatchSkuTarget>>({});
+  const [skuEditorProduct, setSkuEditorProduct] = useState<ProductBatchCandidate | null>(null);
   const [bulkTargetInput, setBulkTargetInput] = useState('');
   const [targetPage, setTargetPage] = useState(1);
   const [validationAttempted, setValidationAttempted] = useState(false);
@@ -174,6 +183,8 @@ function BatchComposer({
   const pageCheckboxRef = useRef<HTMLInputElement>(null);
   const percentageInputRef = useRef<HTMLInputElement>(null);
   const targetInputRefs = useRef(new Map<string, HTMLInputElement>());
+  const skuEditorTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const skuEditorReturnFocusIdRef = useRef<string | null>(null);
   const previewAttempt = useRef<ProductBatchPreviewSession | null>(null);
   const candidates = useQuery({
     queryKey: ['productBatchCandidates', page, PAGE_SIZE, status, query],
@@ -185,6 +196,12 @@ function BatchComposer({
     queryKey: ['productBatchTasks', 1, 5],
     queryFn: () => api.productBatchTasks(1, 5),
     enabled: storageHydrated,
+  });
+  const skuEditContext = useQuery<ProductBatchSkuEditContext>({
+    queryKey: ['productBatchSkuEditContext', skuEditorProduct?.publishedProductId],
+    queryFn: () => api.productBatchSkuEditContext(skuEditorProduct!.publishedProductId),
+    enabled: Boolean(skuEditorProduct),
+    retry: false,
   });
   const createPreview = useMutation({
     mutationFn: (request: ProductBatchPreviewRequest) => api.createProductBatchPreview(request),
@@ -209,6 +226,18 @@ function BatchComposer({
     enabled: storageHydrated && Boolean(storedPreview?.taskId),
     retry: false,
   });
+  const openSkuEditor = (item: ProductBatchCandidate) => {
+    skuEditorReturnFocusIdRef.current = item.publishedProductId;
+    setSkuEditorProduct(item);
+  };
+  const closeSkuEditor = () => {
+    const returnFocusId = skuEditorProduct?.publishedProductId ?? skuEditorReturnFocusIdRef.current;
+    setSkuEditorProduct(null);
+    if (!returnFocusId) return;
+    window.requestAnimationFrame(() => {
+      skuEditorTriggerRefs.current.get(returnFocusId)?.focus();
+    });
+  };
   const pageItems =
     candidates.data?.items.filter((item) => isCandidateSelectable(item, action)) ?? [];
   const pageIds = pageItems.map((item) => item.publishedProductId);
@@ -268,6 +297,9 @@ function BatchComposer({
   const invalidSourceTargetCount = [...sourceTargetValidations.values()].filter(
     (value) => !value.value,
   ).length;
+  const invalidSkuTargetCount = selectedItems.filter(
+    (item) => !skuTargets[item.publishedProductId],
+  ).length;
   const composerDraft = useMemo<ProductBatchComposerDraft>(
     () => ({
       page,
@@ -281,6 +313,9 @@ function BatchComposer({
       targetInputs,
       titleInputs,
       sourceTargetInputs,
+      skuTargets: Object.fromEntries(
+        Object.entries(skuTargets).filter(([id]) => selectedSet.has(id)),
+      ),
       bulkTargetInput,
       targetPage,
       selected: selectedItems,
@@ -299,6 +334,8 @@ function BatchComposer({
       targetInputs,
       titleInputs,
       sourceTargetInputs,
+      skuTargets,
+      selectedSet,
       targetPage,
     ],
   );
@@ -314,6 +351,8 @@ function BatchComposer({
     setTargetInputs(draft.targetInputs);
     setTitleInputs(draft.titleInputs);
     setSourceTargetInputs(draft.sourceTargetInputs);
+    setSkuTargets(draft.skuTargets);
+    setSkuEditorProduct(null);
     setBulkTargetInput(draft.bulkTargetInput);
     setTargetPage(draft.targetPage);
     setSelected(new Map(draft.selected.map((item) => [item.publishedProductId, item] as const)));
@@ -409,6 +448,16 @@ function BatchComposer({
   }, [targetTotalPages]);
 
   useEffect(() => {
+    setSkuTargets((current) => {
+      const entries = Object.entries(current).filter(([id]) => selectedSet.has(id));
+      return entries.length === Object.keys(current).length ? current : Object.fromEntries(entries);
+    });
+    if (skuEditorProduct && !selectedSet.has(skuEditorProduct.publishedProductId)) {
+      setSkuEditorProduct(null);
+    }
+  }, [selectedSet, skuEditorProduct]);
+
+  useEffect(() => {
     if (!pendingTargetFocusId) return;
     const input = targetInputRefs.current.get(pendingTargetFocusId);
     if (!input) return;
@@ -449,12 +498,18 @@ function BatchComposer({
     if (nextAction === action) return;
     if (requestedAction) router.replace('/published/batch');
     setAction(nextAction);
-    setStatus(nextAction === 'online' || nextAction === 'change_source' ? 'offline' : 'online');
+    setStatus(
+      nextAction === 'online' || nextAction === 'change_source' || nextAction === 'edit_sku'
+        ? 'offline'
+        : 'online',
+    );
     setPage(1);
     setSelected(new Map());
     setTargetInputs({});
     setTitleInputs({});
     setSourceTargetInputs({});
+    setSkuTargets({});
+    setSkuEditorProduct(null);
     setTargetPage(1);
     resetPreviewFeedback();
   };
@@ -577,6 +632,13 @@ function BatchComposer({
         return;
       }
     }
+    if (action === 'edit_sku') {
+      const missingTarget = selectedItems.find((item) => !skuTargets[item.publishedProductId]);
+      if (missingTarget) {
+        openSkuEditor(missingTarget);
+        return;
+      }
+    }
     const requestWithoutId = {
       action,
       publishedProductIds: selectedIds,
@@ -597,6 +659,11 @@ function BatchComposer({
               expectedMutationRevision: item.mutationRevision,
               targetSourceProductId: sourceTargetValidations.get(item.publishedProductId)!.value!,
             })),
+          }
+        : {}),
+      ...(action === 'edit_sku'
+        ? {
+            skuTargets: selectedItems.map((item) => skuTargets[item.publishedProductId]!),
           }
         : {}),
     } as ProductBatchPreviewInput;
@@ -642,6 +709,21 @@ function BatchComposer({
                 <small>已下架商品 → 库存核验 → 在线</small>
               </span>
               <em>已开放</em>
+            </button>
+            <button
+              type="button"
+              className={`batch-action-card ${action === 'edit_sku' ? 'is-active' : ''}`}
+              aria-pressed={action === 'edit_sku'}
+              onClick={() => chooseAction('edit_sku')}
+            >
+              <span className="batch-action-icon" aria-hidden="true">
+                SKU
+              </span>
+              <span>
+                <strong>批量改 SKU</strong>
+                <small>增删规格、重映射 1688 并回读</small>
+              </span>
+              <em>候选</em>
             </button>
             <button
               type="button"
@@ -977,9 +1059,11 @@ function BatchComposer({
                           ? '1688 权威库存'
                           : action === 'edit_title'
                             ? '标题状态'
-                            : action === 'change_source'
-                              ? '当前货源 / SKU'
-                              : '起售价 / SKU'}
+                            : action === 'edit_sku'
+                              ? '平台 SKU / 编辑状态'
+                              : action === 'change_source'
+                                ? '当前货源 / SKU'
+                                : '起售价 / SKU'}
                   </th>
                   <th>
                     {action === 'cleanup'
@@ -1097,6 +1181,79 @@ function BatchComposer({
         />
       ) : null}
 
+      {action === 'edit_sku' && selected.size > 0 ? (
+        <section className="batch-catalog-panel" aria-labelledby="batch-sku-target-heading">
+          <div className="batch-catalog-toolbar">
+            <div>
+              <p className="batch-step-label">03 · 配置 SKU</p>
+              <h2 id="batch-sku-target-heading" className="batch-section-title">
+                SKU 目标集合
+              </h2>
+              <p className="batch-section-description">
+                逐件读取平台 SKU 与类目规则；全部配置完成后才能生成差异预览。
+              </p>
+            </div>
+            <span className="batch-safety-chip">
+              已配置 {selected.size - invalidSkuTargetCount} / {selected.size}
+            </span>
+          </div>
+          <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3">
+            {selectedItems.map((item) => {
+              const target = skuTargets[item.publishedProductId];
+              return (
+                <article
+                  key={item.publishedProductId}
+                  className="flex min-w-0 items-center justify-between gap-3 rounded-xl border bg-background p-3"
+                >
+                  <div className="min-w-0">
+                    <strong className="block truncate text-sm">{item.title}</strong>
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      {target ? `已配置 ${target.rows.length} 个目标 SKU` : '尚未配置 SKU 目标'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={target ? 'batch-secondary-button' : 'batch-primary-button'}
+                    ref={(element) => {
+                      if (element)
+                        skuEditorTriggerRefs.current.set(item.publishedProductId, element);
+                      else skuEditorTriggerRefs.current.delete(item.publishedProductId);
+                    }}
+                    onClick={() => openSkuEditor(item)}
+                  >
+                    {target ? '重新编辑' : '配置 SKU'}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+
+      <SkuMatrixEditor
+        open={Boolean(skuEditorProduct)}
+        productTitle={skuEditorProduct?.title ?? ''}
+        context={
+          skuEditContext.data?.publishedProductId === skuEditorProduct?.publishedProductId
+            ? (skuEditContext.data ?? null)
+            : null
+        }
+        initialTarget={
+          skuEditorProduct ? skuTargets[skuEditorProduct.publishedProductId] : undefined
+        }
+        error={skuEditContext.isError ? errorMessage(skuEditContext.error) : null}
+        retrying={skuEditContext.isFetching}
+        onOpenChange={(open) => {
+          if (!open) closeSkuEditor();
+        }}
+        onRetry={() => void skuEditContext.refetch()}
+        onSave={(target) => {
+          setSkuTargets((current) => ({ ...current, [target.publishedProductId]: target }));
+          closeSkuEditor();
+          resetPreviewFeedback();
+        }}
+      />
+
       {recent.data?.items.length ? (
         <section className="batch-recent-panel">
           <div>
@@ -1133,7 +1290,9 @@ function BatchComposer({
                   ? `还有 ${invalidTitleTargetCount} 件商品的标题不符合目标平台规则。`
                   : action === 'change_source' && invalidSourceTargetCount > 0
                     ? `还需填写 ${invalidSourceTargetCount} 件商品已采集的 1688 offer ID。`
-                    : '下一步只生成差异预览，不会立即调用平台。'}
+                    : action === 'edit_sku' && invalidSkuTargetCount > 0
+                      ? `还需配置 ${invalidSkuTargetCount} 件商品的完整 SKU 目标集合。`
+                      : '下一步只生成差异预览，不会立即调用平台。'}
             </span>
           </div>
           <div className="batch-selection-actions">
@@ -1145,6 +1304,8 @@ function BatchComposer({
                 setTargetInputs({});
                 setTitleInputs({});
                 setSourceTargetInputs({});
+                setSkuTargets({});
+                setSkuEditorProduct(null);
                 resetPreviewFeedback();
               }}
             >
@@ -1238,6 +1399,15 @@ function CandidateRow({
             </strong>
             <small className="batch-cell-secondary">{titleRuleLabel(item.platform)}</small>
           </>
+        ) : action === 'edit_sku' ? (
+          <>
+            <strong className="batch-cell-primary">
+              {item.skuCount > 0 ? `${item.skuCount} 个平台 SKU` : 'SKU 快照待读取'}
+            </strong>
+            <small className={selectable ? 'batch-row-success' : 'batch-row-note'}>
+              {selectable ? '可读取完整 SKU 规则' : unavailableReason}
+            </small>
+          </>
         ) : action === 'change_source' ? (
           <>
             <strong className="batch-cell-primary">1688 · {item.sourceProductId}</strong>
@@ -1278,6 +1448,14 @@ function CandidateRow({
             href={`/published/batch?task=${encodeURIComponent(item.onlineVerificationTaskId)}`}
           >
             打开待核验上架任务
+          </Link>
+        ) : null}
+        {action === 'edit_sku' && item.skuVerificationTaskId ? (
+          <Link
+            className="batch-row-link"
+            href={`/published/batch?task=${encodeURIComponent(item.skuVerificationTaskId)}`}
+          >
+            打开待核验 SKU 任务
           </Link>
         ) : null}
         {item.offlineVerificationTaskId ? (
@@ -1845,13 +2023,18 @@ function BatchTask({
     mutationFn: (itemId: string) => api.verifyProductBatchOffline(taskId, itemId),
     onSuccess: refresh,
   });
+  const verifySkus = useMutation({
+    mutationFn: (itemId: string) => api.verifyProductBatchSkus(taskId, itemId),
+    onSuccess: refresh,
+  });
   const taskMutationPending =
     execute.isPending ||
     cancel.isPending ||
     retry.isPending ||
     verifyTitle.isPending ||
     verifyOnline.isPending ||
-    verifyOffline.isPending;
+    verifyOffline.isPending ||
+    verifySkus.isPending;
 
   useEffect(() => {
     if (task.data && task.data.status !== 'preview') {
@@ -1870,18 +2053,18 @@ function BatchTask({
   const priceAction = value.action === 'edit_price';
   const inventoryAction = value.action === 'sync_inventory';
   const changeSourceAction = value.action === 'change_source';
+  const skuAction = value.action === 'edit_sku';
   const verifiedAction =
     onlineAction ||
     offlineLikeAction ||
     titleAction ||
     priceAction ||
     inventoryAction ||
-    changeSourceAction;
+    changeSourceAction ||
+    skuAction;
   const active = ACTIVE_TASK_STATUSES.has(value.status);
   const preview = value.status === 'preview';
-  const retryableFailedIds = value.items
-    .filter((item) => item.status === 'failed' && item.retryable)
-    .map((item) => item.itemId);
+  const retryableFailedIds = retryableProductBatchItemIds(value.action, value.items);
   const unknownTitleResultCount = value.items.filter(
     (item) => item.status === 'failed' && item.errorCode === 'TITLE_RESULT_UNKNOWN',
   ).length;
@@ -1893,6 +2076,9 @@ function BatchTask({
   ).length;
   const unknownOfflineResultCount = value.items.filter((item) =>
     requiresProductBatchOfflineVerification(value.action, item.status, item.errorCode),
+  ).length;
+  const unknownSkuResultCount = value.items.filter((item) =>
+    requiresProductBatchSkuVerification(value.action, item.status, item.errorCode),
   ).length;
   const canRetry = ['failed', 'partial'].includes(value.status) && retryableFailedIds.length > 0;
   const pendingExecution = value.summary.pending + value.summary.retryWait;
@@ -1909,6 +2095,16 @@ function BatchTask({
           return summary;
         },
         { increased: 0, decreased: 0 },
+      )
+    : null;
+  const skuChanges = skuAction
+    ? value.items.reduce(
+        (summary, item) => ({
+          added: summary.added + (item.skuAddedCount ?? 0),
+          changed: summary.changed + (item.skuChangedCount ?? 0),
+          deleted: summary.deleted + (item.skuDeletedCount ?? 0),
+        }),
+        { added: 0, changed: 0, deleted: 0 },
       )
     : null;
 
@@ -1933,13 +2129,15 @@ function BatchTask({
                     ? '确认前请逐件检查当前标题和目标标题；执行后将回读平台标题核验。'
                     : priceAction
                       ? '确认前请检查每件商品的起售价、SKU 价格区间和调整方向。'
-                      : inventoryAction
-                        ? '确认前请检查同步前库存、1688 权威目标快照及库存版本；执行后将逐 SKU 回读平台核验。'
-                        : changeSourceAction
-                          ? '确认前请核对旧、新 1688 offer、SKU 路由数和采购成本；执行只切换离线采购路由，平台商品保持下架。'
-                          : '确认前请检查每件商品的当前状态与执行后状态。'
+                      : skuAction
+                        ? '确认前请检查每件商品的 SKU 新增、修改、删除数量与目标指纹；执行后必须回读完整平台 SKU 集合。'
+                        : inventoryAction
+                          ? '确认前请检查同步前库存、1688 权威目标快照及库存版本；执行后将逐 SKU 回读平台核验。'
+                          : changeSourceAction
+                            ? '确认前请核对旧、新 1688 offer、SKU 路由数和采购成本；执行只切换离线采购路由，平台商品保持下架。'
+                            : '确认前请检查每件商品的当前状态与执行后状态。'
               : active
-                ? `任务按商品独立${cleanupAction ? '复核订单证据、安全下架并回读平台状态' : onlineAction ? '补齐库存、上架并回读平台状态与库存' : titleAction ? '改标题并回读平台标题' : priceAction ? '改价并回读平台价格' : inventoryAction ? '同步并回读平台库存' : changeSourceAction ? '复核平台下架状态并切换采购路由' : offlineAction ? '下架并回读平台状态' : '执行'}；停止只影响尚未开始的条目。`
+                ? `任务按商品独立${cleanupAction ? '复核订单证据、安全下架并回读平台状态' : onlineAction ? '补齐库存、上架并回读平台状态与库存' : titleAction ? '改标题并回读平台标题' : priceAction ? '改价并回读平台价格' : skuAction ? '替换并回读完整平台 SKU 集合' : inventoryAction ? '同步并回读平台库存' : changeSourceAction ? '复核平台下架状态并切换采购路由' : offlineAction ? '下架并回读平台状态' : '执行'}；停止只影响尚未开始的条目。`
                 : '任务结果已持久化，可安全刷新或稍后返回查看。'}
           </p>
         </div>
@@ -2036,32 +2234,38 @@ function BatchTask({
                     ? '修改前'
                     : priceAction
                       ? '改价前'
-                      : inventoryAction
-                        ? '同步前'
-                        : changeSourceAction
-                          ? '原 1688 offer'
-                          : cleanupAction
-                            ? '清理证据'
-                            : onlineAction
-                              ? '上架前'
-                              : '下架前'}
+                      : skuAction
+                        ? '当前 SKU'
+                        : inventoryAction
+                          ? '同步前'
+                          : changeSourceAction
+                            ? '原 1688 offer'
+                            : cleanupAction
+                              ? '清理证据'
+                              : onlineAction
+                                ? '上架前'
+                                : '下架前'}
                 </th>
                 <th>
                   {titleAction
                     ? '目标标题'
                     : priceAction
                       ? '目标价格'
-                      : inventoryAction
-                        ? '1688 目标'
-                        : changeSourceAction
-                          ? '新 1688 offer'
-                          : cleanupAction
-                            ? '安全下架'
-                            : onlineAction
-                              ? '上架目标'
-                              : '下架目标'}
+                      : skuAction
+                        ? '目标变化'
+                        : inventoryAction
+                          ? '1688 目标'
+                          : changeSourceAction
+                            ? '新 1688 offer'
+                            : cleanupAction
+                              ? '安全下架'
+                              : onlineAction
+                                ? '上架目标'
+                                : '下架目标'}
                 </th>
-                {verifiedAction ? <th>{changeSourceAction ? '生效绑定' : '平台回读'}</th> : null}
+                {verifiedAction ? (
+                  <th>{changeSourceAction ? '生效绑定' : skuAction ? 'SKU 回读' : '平台回读'}</th>
+                ) : null}
                 <th>执行状态</th>
                 <th>尝试</th>
               </tr>
@@ -2075,10 +2279,12 @@ function BatchTask({
                   verifyingTitle={verifyTitle.isPending}
                   verifyingOnline={verifyOnline.isPending}
                   verifyingOffline={verifyOffline.isPending}
+                  verifyingSkus={verifySkus.isPending}
                   verificationDisabled={taskMutationPending}
                   onVerifyTitle={() => verifyTitle.mutate(item.itemId)}
                   onVerifyOnline={() => verifyOnline.mutate(item.itemId)}
                   onVerifyOffline={() => verifyOffline.mutate(item.itemId)}
+                  onVerifySkus={() => verifySkus.mutate(item.itemId)}
                 />
               ))}
             </tbody>
@@ -2096,7 +2302,9 @@ function BatchTask({
             {preview
               ? priceAction
                 ? `${pendingExecution} 件可执行；${priceChanges?.increased ?? 0} 件上调，${priceChanges?.decreased ?? 0} 件下调，${value.summary.skipped} 件跳过。`
-                : `${pendingExecution} 件可执行，${value.summary.skipped} 件将跳过。`
+                : skuAction
+                  ? `${pendingExecution} 件可执行；SKU 新增 ${skuChanges?.added ?? 0}、修改 ${skuChanges?.changed ?? 0}、删除 ${skuChanges?.deleted ?? 0}，${value.summary.skipped} 件跳过。`
+                  : `${pendingExecution} 件可执行，${value.summary.skipped} 件将跳过。`
               : active
                 ? `已完成 ${value.summary.completed} / ${value.summary.total} 件。`
                 : `完成于 ${value.finishedAt ? new Date(value.finishedAt).toLocaleString('zh-CN') : '—'}`}
@@ -2158,6 +2366,7 @@ function BatchTask({
           verifyTitle.error,
           verifyOnline.error,
           verifyOffline.error,
+          verifySkus.error,
         ].find(Boolean) ? (
           <p className="batch-bar-error" role="alert">
             {errorMessage(
@@ -2168,6 +2377,7 @@ function BatchTask({
                 verifyTitle.error,
                 verifyOnline.error,
                 verifyOffline.error,
+                verifySkus.error,
               ].find(Boolean),
             )}
           </p>
@@ -2190,6 +2400,12 @@ function BatchTask({
             个下架结果未知。不要直接重试，请逐项执行“核验平台下架结果”，确认商品已停止销售。
           </p>
         ) : null}
+        {unknownSkuResultCount > 0 ? (
+          <p className="batch-bar-error" role="alert">
+            {unknownSkuResultCount} 个 SKU 写入结果未知。不要直接重试，请逐项执行“核验平台
+            SKU”，确认完整 SKU 集合。
+          </p>
+        ) : null}
       </section>
     </div>
   );
@@ -2201,20 +2417,24 @@ function TaskItemRow({
   verifyingTitle,
   verifyingOnline,
   verifyingOffline,
+  verifyingSkus,
   verificationDisabled,
   onVerifyTitle,
   onVerifyOnline,
   onVerifyOffline,
+  onVerifySkus,
 }: {
   item: ProductBatchItem;
   action: ProductBatchAction;
   verifyingTitle: boolean;
   verifyingOnline: boolean;
   verifyingOffline: boolean;
+  verifyingSkus: boolean;
   verificationDisabled: boolean;
   onVerifyTitle: () => void;
   onVerifyOnline: () => void;
   onVerifyOffline: () => void;
+  onVerifySkus: () => void;
 }) {
   const onlineAction = action === 'online';
   const cleanupAction = action === 'cleanup';
@@ -2224,6 +2444,7 @@ function TaskItemRow({
   const priceAction = action === 'edit_price';
   const inventoryAction = action === 'sync_inventory';
   const changeSourceAction = action === 'change_source';
+  const skuAction = action === 'edit_sku';
   const actualMismatch =
     priceAction &&
     item.status === 'succeeded' &&
@@ -2253,6 +2474,12 @@ function TaskItemRow({
     item.actualSourceProductId !== null &&
     item.desiredSourceProductId !== null &&
     item.actualSourceProductId !== item.desiredSourceProductId;
+  const actualSkuMismatch =
+    skuAction &&
+    item.status === 'succeeded' &&
+    item.actualSkuFingerprint !== null &&
+    item.desiredSkuFingerprint !== null &&
+    item.actualSkuFingerprint !== item.desiredSkuFingerprint;
   return (
     <tr>
       <td>
@@ -2352,6 +2579,35 @@ function TaskItemRow({
                 {item.status === 'succeeded' ? '回读待核验' : '执行后回读'}
               </span>
             )}
+          </td>
+        </>
+      ) : skuAction ? (
+        <>
+          <td>
+            <SkuFingerprintSummary
+              fingerprint={item.beforeSkuFingerprint}
+              emptyLabel="当前 SKU 指纹缺失"
+            />
+          </td>
+          <td>
+            <SkuChangeSummary
+              added={item.skuAddedCount}
+              changed={item.skuChangedCount}
+              deleted={item.skuDeletedCount}
+            />
+            <SkuFingerprintSummary
+              fingerprint={item.desiredSkuFingerprint}
+              emptyLabel="目标 SKU 指纹缺失"
+            />
+          </td>
+          <td>
+            <SkuFingerprintSummary
+              fingerprint={item.actualSkuFingerprint}
+              emptyLabel={item.status === 'succeeded' ? 'SKU 回读待核验' : '执行后回读 SKU'}
+            />
+            {actualSkuMismatch ? (
+              <small className="batch-row-error">平台 SKU 集合与目标不一致</small>
+            ) : null}
           </td>
         </>
       ) : inventoryAction ? (
@@ -2496,6 +2752,16 @@ function TaskItemRow({
             {verifyingOffline ? '核验中…' : '核验平台下架结果'}
           </button>
         ) : null}
+        {requiresProductBatchSkuVerification(action, item.status, item.errorCode) ? (
+          <button
+            type="button"
+            className="batch-inline-action"
+            disabled={verificationDisabled}
+            onClick={onVerifySkus}
+          >
+            {verifyingSkus ? '核验中…' : '核验平台 SKU'}
+          </button>
+        ) : null}
       </td>
       <td className="batch-mono">
         {item.attempts}/{item.maxAttempts}
@@ -2511,6 +2777,42 @@ function TitleValue({ value, emptyLabel }: { value: string | null; emptyLabel: s
     </span>
   ) : (
     <span className="batch-cell-secondary">{emptyLabel}</span>
+  );
+}
+
+function SkuFingerprintSummary({
+  fingerprint,
+  emptyLabel,
+}: {
+  fingerprint: string | null;
+  emptyLabel: string;
+}) {
+  return fingerprint ? (
+    <span className="batch-price-range-stack">
+      <strong className="batch-mono">{fingerprint.slice(0, 12)}</strong>
+      <small>完整指纹已保存</small>
+    </span>
+  ) : (
+    <span className="batch-cell-secondary">{emptyLabel}</span>
+  );
+}
+
+function SkuChangeSummary({
+  added,
+  changed,
+  deleted,
+}: {
+  added: number | null;
+  changed: number | null;
+  deleted: number | null;
+}) {
+  return (
+    <span className="batch-price-range-stack">
+      <strong>
+        +{added ?? 0} / ~{changed ?? 0} / −{deleted ?? 0}
+      </strong>
+      <small>新增 / 修改 / 删除</small>
+    </span>
   );
 }
 
@@ -2762,11 +3064,39 @@ export function requiresProductBatchOfflineVerification(
   );
 }
 
+export function requiresProductBatchSkuVerification(
+  action: ProductBatchAction,
+  status: string,
+  errorCode: string | null,
+): boolean {
+  return (
+    action === 'edit_sku' &&
+    status === 'failed' &&
+    errorCode !== null &&
+    SKU_RESULT_UNKNOWN_CODES.has(errorCode)
+  );
+}
+
+export function retryableProductBatchItemIds(
+  action: ProductBatchAction,
+  items: Array<Pick<ProductBatchItem, 'itemId' | 'status' | 'retryable' | 'errorCode'>>,
+): string[] {
+  return items
+    .filter(
+      (item) =>
+        item.status === 'failed' &&
+        item.retryable &&
+        !requiresProductBatchSkuVerification(action, item.status, item.errorCode),
+    )
+    .map((item) => item.itemId);
+}
+
 function batchActionLabel(action: ProductBatchAction): string {
   if (action === 'online') return '批量上架';
   if (action === 'cleanup') return '滞销安全下架';
   if (action === 'edit_title') return '批量改标题';
   if (action === 'edit_price') return '批量改价';
+  if (action === 'edit_sku') return '批量改 SKU';
   if (action === 'sync_inventory') return '同步并核验库存';
   if (action === 'change_source') return '离线安全换源';
   return '批量下架';
@@ -2777,6 +3107,7 @@ function batchActionVerb(action: ProductBatchAction): string {
   if (action === 'cleanup') return '安全下架';
   if (action === 'edit_title') return '改标题';
   if (action === 'edit_price') return '改价';
+  if (action === 'edit_sku') return '改 SKU';
   if (action === 'sync_inventory') return '同步库存';
   if (action === 'change_source') return '安全换源';
   return '下架';
@@ -2791,6 +3122,9 @@ function batchActionDescription(action: ProductBatchAction): string {
   }
   if (action === 'edit_price') {
     return '先定义改价规则，再逐件核对 SKU 价格区间；平台回读后才记为成功。';
+  }
+  if (action === 'edit_sku') {
+    return '只选择平台确认已下架或草稿商品；逐件配置完整 SKU 集合、1688 规格路由与新增售价，写入后强回读核验。';
   }
   if (action === 'sync_inventory') {
     return '按 1688 权威 SKU 库存快照同步，写入后回读平台逐项核验；不是手填库存。';
@@ -2816,6 +3150,9 @@ export function isCandidateSelectable(
   }
   if (action === 'edit_title') return item.titleEditable;
   if (action === 'edit_price') return item.priceEditable;
+  if (action === 'edit_sku') {
+    return hasValidSkuEditCandidateState(item) && item.skuEditEligible === true;
+  }
   if (action === 'sync_inventory') return item.inventorySyncEligible;
   if (action === 'cleanup') {
     return (
@@ -2854,6 +3191,12 @@ export function candidateUnavailableReason(
   }
   if (action === 'edit_title') return item.titleEditReason ?? '当前商品不能安全修改标题';
   if (action === 'edit_price') return item.priceEditReason ?? '当前商品缺少可核对的 SKU 价格';
+  if (action === 'edit_sku') {
+    if (!hasValidSkuEditCandidateState(item)) {
+      return '商品 SKU 编辑安全状态异常，请刷新商品后再操作';
+    }
+    return item.skuEditReason ?? '当前商品不能安全编辑 SKU，请刷新后重试';
+  }
   if (action === 'sync_inventory') {
     return item.inventorySyncReason ?? '当前商品没有可安全同步的 1688 库存快照';
   }
@@ -3005,6 +3348,24 @@ export function productBatchPreviewFingerprint(input: ProductBatchPreviewInput):
               : input.priceRule,
         }
       : {}),
+    ...(input.action === 'edit_sku'
+      ? {
+          skuTargets: [...input.skuTargets]
+            .sort((left, right) => left.publishedProductId.localeCompare(right.publishedProductId))
+            .map((target) => ({
+              ...target,
+              dimensions: target.dimensions.map((dimension) => ({
+                ...dimension,
+                values: [...dimension.values].sort((left, right) =>
+                  `${left.valueId}:${left.valueName}`.localeCompare(
+                    `${right.valueId}:${right.valueName}`,
+                  ),
+                ),
+              })),
+              rows: [...target.rows].sort((left, right) => left.rowId.localeCompare(right.rowId)),
+            })),
+        }
+      : {}),
     ...(input.action === 'change_source'
       ? {
           sourceTargets: [...input.sourceTargets].sort((left, right) =>
@@ -3033,13 +3394,19 @@ export function shouldAcceptProductBatchPreviewResponse(
             publishedProductIds: request.publishedProductIds,
             priceRule: request.priceRule,
           }
-        : request.action === 'change_source'
+        : request.action === 'edit_sku'
           ? {
-              action: 'change_source',
+              action: 'edit_sku',
               publishedProductIds: request.publishedProductIds,
-              sourceTargets: request.sourceTargets,
+              skuTargets: request.skuTargets,
             }
-          : { action: request.action, publishedProductIds: request.publishedProductIds };
+          : request.action === 'change_source'
+            ? {
+                action: 'change_source',
+                publishedProductIds: request.publishedProductIds,
+                sourceTargets: request.sourceTargets,
+              }
+            : { action: request.action, publishedProductIds: request.publishedProductIds };
   return attempt.fingerprint === productBatchPreviewFingerprint(input);
 }
 

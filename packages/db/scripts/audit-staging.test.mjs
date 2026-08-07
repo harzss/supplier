@@ -247,6 +247,19 @@ test('accepts Prisma status exit 1 only when it reports the exact pending suffix
       pending,
     ),
   );
+  assert.doesNotThrow(() =>
+    assertExpectedPendingStatus(
+      {
+        status: 1,
+        signal: null,
+        stdout:
+          '3 migrations found in prisma/migrations\n' +
+          `Following migration have not yet been applied:\n${pending[1]}\n`,
+        stderr: '',
+      },
+      [pending[1]],
+    ),
+  );
 
   assert.throws(
     () =>

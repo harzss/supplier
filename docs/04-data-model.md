@@ -1,11 +1,11 @@
 # 核心数据模型
 
-> 当前数据层：Supabase / PostgreSQL 17.6（业务主库 + Auth + Storage）、Redis（缓存与锁）；Milvus 为后续向量规模化选项。
+> 当前数据层：Supabase / PostgreSQL 17.6（业务主库、持久队列与 `runtime_states`）+ Supabase Auth + Supabase Storage；staging / production 不再依赖 Redis，本机也不运行中间件。Milvus 为后续向量规模化选项。
 > 货源大表（source_products）若达到亿级再考虑 Citus 分区或独立 PG 集群。
 
 > **权威说明**：当前可执行数据库定义以 `packages/db/prisma/schema.prisma` 和 `packages/db/prisma/migrations/` 为准。下方 MySQL DDL 是早期容量设计草案，不能用于当前环境建库、迁移或 schema diff。
 
-> **2026-08-06 staging 状态**：维护窗口已完成十条 mock 货源的定向 `supplierId` backfill、第 34～43 个 migration、43/43 status、live schema diff `No difference detected`，并复核全部 public 表 RLS 与 `anon` / `authenticated` 表、sequence、default ACL；当前 BFF、Cloudflare Gateway 与 Web 候选也已完成部署 smoke。该结果覆盖下文历史里程碑中“staging 仍为 33/43”“migration 尚未应用”或“候选尚未部署”的阶段性表述。真实 Auth 会话以及抖店、1688、LLM、图片服务 E2E 仍未完成，因此不能据此宣称生产可用。
+> **2026-08-08 当前状态**：2026-08-06 的维护窗口已把 staging 推进到当时的 43/43，并完成十条 mock 货源定向 `supplierId` backfill、schema diff 与 41/41 public 表 RLS/ACL 复核；但仓库现已新增第 44 个 SKU 编辑 migration 和第 45 个 `runtime_states` migration，staging 因而是 **43/45**，两条均未应用。下文写有“43/43 已应用”的内容是 2026-08-06 历史证据，不代表当前仓库最新。当前 SHA CI、最新真实备份恢复以及抖店、1688、Auth、LLM、图片服务 E2E 仍未完成，不能据此宣称生产可用。
 
 ## 1. 实体关系（ER 概览）
 
@@ -263,7 +263,7 @@ erDiagram
 
 ## 3. 当前批量商品操作契约
 
-`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `online`（批量安全上架）、`offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）、`sync_inventory`（同步并核验 1688 库存）、`cleanup`（基于订单证据的滞销安全下架）与 `change_source`（抖店离线安全换源）。`change_source` 只切换版本化采购绑定，不修改平台 SKU、售价或上下架状态；任意平台 SKU 编辑仍未实现。
+`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `online`（批量安全上架）、`offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）、`sync_inventory`（同步并核验 1688 库存）、`cleanup`（基于订单证据的滞销安全下架）、`change_source`（抖店离线安全换源）与候选 `edit_sku`（普通 SKU 完整集合编辑）。`change_source` 只切换版本化采购绑定，不修改平台 SKU、售价或上下架状态；`edit_sku` 由独立开关控制且默认关闭，只允许连续强回读确认的 `offline/draft` 商品。第 44 个 migration 与真实抖店 E2E 尚未完成，因此它仍是应用侧候选。
 
 ### 3.1 `product_batch_tasks`
 
@@ -283,13 +283,15 @@ erDiagram
 - 标题预览保存原标题、逐商品目标标题与预期商品 revision。平台写入前先保存 `TITLE_WRITE_STARTED` 与开始时间；平台超时、锁/worker 所有权丢失、取消竞态或响应畸形时收敛为不可重放的 `TITLE_RESULT_UNKNOWN`，只有核验平台标题后才能继续。目标标题、原标题、第三方标题和驳回/封禁状态分别按明确规则原子同步商品与 item。
 - 滞销清理在 `before_snapshot.cleanupEvidence` 固化策略版本、30 天窗口、7 天观察期、订单数、最近付款时间和订单同步水位。有效订单按 `order_items.published_product_id` 聚合，避免多商品订单只读取主商品；真实店还必须启用订单同步、配置至少 30 天回溯、完成显式历史回补确认，并满足水位新鲜、无错误且未在同步。执行前与平台写入前再次评估，平台确认下架后若发现新订单或证据失效，保留真实离线状态并把 item 标记为需要人工复核。
 - 下架写入前保存 `OFFLINE_WRITE_STARTED` 与时间。transport、408/429/5xx、畸形响应、写后失锁、取消竞态或 worker 中断均收敛为不可直接重放的 `OFFLINE_RESULT_UNKNOWN`；专用核验要求两次平台状态回读稳定一致。未核验下架 fence 同时阻断后续批量动作、完整商品编辑、普通状态同步与库存 worker，避免把真实离线商品用旧快照重新写成在线。
+- SKU 编辑预览保存权威平台 SKU 集合、平台类目规格规则、目标完整集合、1688 spec 一对一映射与预期商品 revision。支持 SKU 增删、规格调整、多个 `propertyId=0` 自定义维度和多个 `valueId=0` 自定义值；既有 SKU 保留平台 ID/key、售价和 side fields，新 SKU 使用服务端稳定 key 并要求明确售价。默认单 SKU 可以使用 `sourceSpecId=null`，但库存仍须经过强回读闭环。
+- SKU 写入前保存 `SKU_WRITE_STARTED`。网络/限流/5xx、畸形响应、失去商品租约、worker 失权或写后回读不一致都收敛为 `SKU_RESULT_UNKNOWN`；只有专用 SKU 核验可以解开 fence。未核验期间必须阻断标题、价格、库存、上下架、完整编辑和其他批量平台写入，不能直接重放。
 - 状态为 `pending / running / retry_wait / succeeded / failed / skipped / cancelled`。worker 以旧状态、attempts 和任务取消状态做 CAS 领取，并记录 `locked_at / locked_by`；超过 5 分钟的 running 项按次数恢复为等待重试或失败。
 - 失败重试只把选中的 `failed` 项重置为 `pending`；`succeeded` 与 `skipped` 不会重新执行。`result` 保存平台确认/恢复原因，错误码与脱敏信息按 item 保留。
 
 ### 3.3 `published_products.mutation_revision`
 
 - 每次可能改变平台商品事实的本地成功写入递增 `mutation_revision`；批量执行使用预览值做条件更新，阻止旧预览覆盖后来的人工修正、状态同步或库存任务。
-- 人工修正和平台状态同步在取得共享 Redis 商品锁后必须重读商品，并在最终写入时再次按 `mutation_revision` CAS；等待锁期间形成的旧快照不能复活已下架商品。
+- 人工修正和平台状态同步在取得 Supabase `runtime_states` 共享商品租约后必须重读商品，并在最终写入时再次按 `mutation_revision` CAS；等待租约期间形成的旧快照不能复活已下架商品。
 - `(shop_id, platform_product_id)` 在非空平台商品 ID 上保持唯一，既支撑稳定锁域，也在 migration 前显式阻断历史重复绑定。
 
 ### 3.4 `published_products.sku_price_snapshot`
@@ -357,6 +359,31 @@ erDiagram
 - 关闭前必须取得 5 分钟内的销售平台回读，并确认售后不再处理中、部分退款剩余履约决策和实际退款金额有效、当前采购版本的人工动作已确认、采购异常与最终实际成本已核销。任一条件不满足时只追加 `verification_failed` 证据，不写 `closed`。
 
 第 42 个 migration `20260805030000_add_after_sale_cases` 新增四张售后表、生命周期枚举、一单一工单与命令唯一键、复合租户/订单外键、状态和事件 CHECK、RLS 及客户端表/sequence 权限回收。第 43 个 migration `20260805040000_harden_workflow_check_null_semantics` 不修改第 41/42 个 migration 的 checksum，而是在事务内重建异常事件、售后采购关联和售后事件的三个 CHECK，以最外层 `IS TRUE` 拒绝 UNKNOWN。一次性 PostgreSQL 15 已完成 43/43 deploy/status、live schema diff `No difference detected`、三个回滚式负向探针和合法状态正向探针，并复核全部 public 表 RLS 及 anon/authenticated ACL；临时资源已清理。2026-08-04 的真实数据备份和隔离 33→43 恢复升级是迁移前演练；该阶段性“staging 仍为 33/43”结论已被 2026-08-06 维护覆盖：十条 mock 货源完成定向 `supplierId` backfill，第 34～43 个 migration 已应用，staging 达到 43/43、schema diff 无差异且 RLS/ACL 复核通过，BFF、Cloudflare Gateway 与 Web 候选完成部署 smoke。真实 Auth 与抖店、1688、LLM、图片服务 E2E 仍未完成，系统仍不能视为生产可用。
+
+### 3.10 平台 SKU 完整集合快照
+
+第 44 个 migration `20260807110000_add_published_product_sku_edits` 为 `ProductBatchAction` 增加 `edit_sku`，并为 `published_products` 增加 `sku_spec_snapshot`、`sku_spec_fingerprint` 与 `sku_spec_synced_at`。三列必须同时为空，或同时保存版本化平台 SKU 对象、64 位 SHA-256 指纹和回读时间；历史发布任务没有足够的平台 SKU 身份与属性元数据，因此 migration 不猜测回填，首次权威平台回读后才写入。
+
+- `sku_spec_snapshot` 保存商品状态/审核码、类目、商品类型、起售类型，以及按稳定平台 SKU key 排序的 1～100 个 SKU；每项保留平台 SKU ID/key、价格、库存、图片/编码等 side fields 和有序规格属性。
+- 平台 SKU ID、key 与规格组合必须各自唯一；规格维度最多 3 个。非自定义属性/值 ID 不得重复，自定义 ID `0` 使用名称参与身份，不能只按数值 ID 合并。
+- 价格、库存与规格快照在同一平台强回读后同步推进；SKU 集合改变时，价格/库存和当前采购 binding 路由必须共同校验，避免新规格存在但采购或库存无法落到对应 1688 spec。
+- `PRODUCT_BATCH_SKU_EDIT_ENABLED=false` 是当前 staging 默认值；第 44 个 migration 尚未应用，也未完成真实抖店编辑/未知结果恢复 E2E。
+
+### 3.11 Supabase PostgreSQL 运行状态
+
+第 45 个 migration `20260807150000_add_runtime_state_store` 新增 BFF-only 的 `runtime_states`，用于可过期、可重建的跨实例协调状态，不替代业务事实表、任务表或审计表。
+
+| 字段 / 约束  | 当前契约                                                                                                                          |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `key`        | 最长 255 字符的主键，命名空间区分 OAuth、租约、限流与 AI 缓存                                                                     |
+| 三种 mode    | 每行只能在 `value`、`owner_token`、`counter_value` 中恰有一个非空；分别表示 JSON 值、租约与正整数计数器                           |
+| TTL          | `expires_at` 为必填 `timestamptz(3)` 并有索引；写入、续租、读取、消费与限流窗口使用数据库 `clock_timestamp()`，不信任应用实例时钟 |
+| 所有权       | 租约 acquire/renew/release 均校验 UUID owner token；过期后才能由其他实例原子接管                                                  |
+| 一次性消费   | OAuth state/result 通过单条 `DELETE ... RETURNING` 原子消费，重放返回空                                                           |
+| fixed window | 1688 全局采集限流以单条 upsert 原子递增并返回剩余窗口；状态存储不可用时 fail-closed                                               |
+| 隔离         | 表启用 RLS，但没有客户端 policy；`anon` / `authenticated` 的全部表权限均撤销，只允许 BFF 数据库身份访问                           |
+
+当前使用范围包括 OAuth state/result、加密 Token refresh recovery、订单同步租约、商品平台写入租约、1688 fixed-window limiter 和 AI 精确缓存。readiness 的 `runtimeState` 检查直接探测该表，并与最新 migration 检查共同决定是否接流。过期行由每次写入后的有界清理（最多 100 行）回收；清理失败只告警，不使已经完成的原子操作回滚。staging 当前为 43/45，因此本节仍是未部署候选；只有第 44、45 个 migration、schema diff、RLS/ACL、真实备份恢复和候选动态 smoke 全部通过后才能写成 staging 已验收。
 
 ## 4. 核心表 Schema（历史 MySQL 设计草案）
 
@@ -667,15 +694,20 @@ CREATE TABLE subscriptions (
 | `purchase.placed`       | order 服务   | 1688 代发                               |
 | `ai.usage.recorded`     | ai-gateway   | 计费 + 限流                             |
 
-## 8. 缓存策略
+## 8. 运行状态与缓存策略
 
-| Key 模式                       | 用途         | TTL                |
-| ------------------------------ | ------------ | ------------------ |
-| `product:{id}`                 | 货源详情     | 1h                 |
-| `score:top:{cat}:{date}`       | 类目每日推荐 | 24h                |
-| `shop:token:{shop_id}`         | OAuth Token  | 提前 5min 过期刷新 |
-| `ratelimit:user:{id}:{module}` | AI 限流      | 滑动窗口           |
-| `compliance:words`             | 敏感词库     | 24h                |
+| Key 模式                                  | 数据形态 | 用途                                      | TTL / 失败语义                                |
+| ----------------------------------------- | -------- | ----------------------------------------- | --------------------------------------------- |
+| `oauth:state:{digest}`                    | value    | OAuth 请求绑定与防重放                    | 60～900 秒；原子消费，缺失即拒绝              |
+| `oauth:result:{userId}:{digest}`          | value    | 登录用户一次性读取 OAuth callback 结果    | 短期；原子消费，跨用户/重放拒绝               |
+| `oauth:refresh:{shopId}`                  | lease    | 同店铺 Token 刷新互斥                     | 有界租约；owner token 不匹配不能续租/释放     |
+| `oauth:refresh-result:{shopId}`           | value    | 加密后的 Token 轮换恢复记录               | 24h；正式店铺表提交后删除                     |
+| `orders:sync:{shopId}`                    | lease    | 同店订单同步跨实例互斥                    | 长任务续租；失权后不推进水位                  |
+| `platform-product:mutation:{publishedId}` | lease    | 标题/价格/库存/SKU/状态等平台写入串行化   | 长任务续租；失权后停止后续副作用              |
+| `source-import:rate:alibaba-1688:*`       | counter  | 1688 全局 offer 采集 fixed-window limiter | 窗口结束过期；存储故障时拒绝真实采集          |
+| `ai:{namespace}:{sha256-prefix}`          | value    | 标题/详情完全相同请求的 L1 精确缓存       | 当前 1h；故障时仅进程内存降级，不影响计费账本 |
+
+货源、平台规则、AI 用量、Token 正式密文、任务状态与外部副作用证据不是可丢弃缓存，仍写入各自持久表。语义缓存与向量检索尚未成为当前运行依赖。
 
 ## 9. 数据合规
 

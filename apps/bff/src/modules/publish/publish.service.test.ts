@@ -1774,7 +1774,7 @@ describe('PublishService', () => {
     });
   });
 
-  it('blocks a full product edit while a title mutation result still needs verification', async () => {
+  it('blocks a full product edit before locking while a SKU mutation needs verification', async () => {
     const fixture = createFixture();
     fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
     fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 51n });
@@ -1785,12 +1785,14 @@ describe('PublishService', () => {
 
     expect(fixture.platformProductLocks.acquire).not.toHaveBeenCalled();
     expect(fixture.updateProduct).not.toHaveBeenCalled();
-    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenNthCalledWith(
+      1,
       expect.objectContaining({
         where: expect.objectContaining({
           OR: expect.arrayContaining([
             expect.objectContaining({
-              errorCode: { in: ['OFFLINE_WRITE_STARTED', 'OFFLINE_RESULT_UNKNOWN'] },
+              errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+              task: { userId: 1n, action: 'edit_sku' },
             }),
           ]),
         }),
@@ -1835,7 +1837,7 @@ describe('PublishService', () => {
     expect(fixture.updateProduct).not.toHaveBeenCalled();
   });
 
-  it('rechecks unresolved title mutations after taking the product lock', async () => {
+  it('rechecks unresolved SKU mutations after taking the product lock', async () => {
     const fixture = createFixture();
     fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
     fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
@@ -1850,6 +1852,19 @@ describe('PublishService', () => {
     expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);
     expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
     expect(fixture.updateProduct).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+              task: { userId: 1n, action: 'edit_sku' },
+            }),
+          ]),
+        }),
+      }),
+    );
   });
 
   it('persists the confirmed platform status instead of reviving a locally online product', async () => {
@@ -1909,6 +1924,89 @@ describe('PublishService', () => {
         title: '只修改这个商品标题',
         salePrice: 18,
         skus: [expect.objectContaining({ sourceSkuId: 'default', price: 18 })],
+      }),
+    );
+  });
+
+  it('rebuilds a full edit from the confirmed SKU spec snapshot instead of the publish task', async () => {
+    const fixture = createFixture();
+    const record = publishedProductRecord();
+    fixture.prisma.productCategoryMapping.findUnique.mockResolvedValue({ categoryId: '12345' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue({
+      ...record,
+      salePrice: 23,
+      skuSpecSnapshot: {
+        version: 1,
+        state: 'draft',
+        status: 1,
+        checkStatus: 1,
+        categoryId: '12345',
+        productType: 0,
+        startSaleType: 1,
+        items: [
+          {
+            platformSkuId: '7001',
+            platformSkuKey: 'sku-modern',
+            properties: [
+              {
+                propertyId: '10',
+                propertyName: '颜色',
+                valueId: '101',
+                valueName: '星空灰',
+                remark: null,
+              },
+            ],
+            priceCents: 2300,
+            stock: 7,
+            skuStatus: true,
+            skuType: 0,
+            code: null,
+            supplierId: null,
+            stepStock: 0,
+            barcodes: [],
+            skuPictureUrls: ['https://img.example/modern.jpg'],
+          },
+        ],
+      },
+      skuPriceSnapshot: {
+        version: 1,
+        items: [{ sourceSkuId: 'sku-modern', priceCents: 2300 }],
+      },
+      skuInventorySnapshot: {
+        version: 1,
+        items: [{ sourceSkuId: 'sku-modern', stock: 7 }],
+      },
+    });
+    fixture.getProductPrices.mockResolvedValue({
+      state: 'draft',
+      status: 1,
+      checkStatus: 1,
+      items: [{ sourceSkuId: 'sku-modern', priceCents: 2300 }],
+    });
+    fixture.getProductInventory.mockResolvedValue({
+      state: 'draft',
+      status: 1,
+      checkStatus: 1,
+      items: [{ sourceSkuId: 'sku-modern', stock: 7 }],
+    });
+
+    await fixture.service.updatePublishedProduct(USER, '7', { title: '保留新规格的标题' });
+
+    expect(fixture.updateProduct).toHaveBeenCalledWith(
+      'plain-access-token',
+      expect.objectContaining({
+        title: '保留新规格的标题',
+        salePrice: 23,
+        skus: [
+          {
+            sourceSkuId: 'sku-modern',
+            specName: '星空灰',
+            price: 23,
+            stock: 7,
+            attributes: { 颜色: '星空灰' },
+            image: 'https://img.example/modern.jpg',
+          },
+        ],
       }),
     );
   });
@@ -2203,23 +2301,25 @@ describe('PublishService', () => {
     );
   });
 
-  it('blocks ordinary status sync while an online result still needs verification', async () => {
+  it('blocks status sync before locking while a SKU mutation needs verification', async () => {
     const fixture = createFixture();
     fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
     fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 51n });
 
     await expect(fixture.service.syncPublishedProductStatus(USER, '7')).rejects.toThrow(
-      '存在结果待核验的上下架操作',
+      '存在结果待核验的平台写入',
     );
 
     expect(fixture.platformProductLocks.acquire).not.toHaveBeenCalled();
     expect(fixture.getProductState).not.toHaveBeenCalled();
-    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenNthCalledWith(
+      1,
       expect.objectContaining({
         where: expect.objectContaining({
           OR: expect.arrayContaining([
             expect.objectContaining({
-              errorCode: { in: ['OFFLINE_WRITE_STARTED', 'OFFLINE_RESULT_UNKNOWN'] },
+              errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+              task: { userId: 1n, action: 'edit_sku' },
             }),
           ]),
         }),
@@ -2227,7 +2327,7 @@ describe('PublishService', () => {
     );
   });
 
-  it('rechecks the online verification fence after taking the status-sync lock', async () => {
+  it('rechecks the SKU verification fence after taking the status-sync lock', async () => {
     const fixture = createFixture();
     fixture.prisma.publishedProduct.findFirst.mockResolvedValue(publishedProductRecord());
     fixture.prisma.productBatchItem.findFirst
@@ -2235,12 +2335,25 @@ describe('PublishService', () => {
       .mockResolvedValueOnce({ id: 51n });
 
     await expect(fixture.service.syncPublishedProductStatus(USER, '7')).rejects.toThrow(
-      '存在结果待核验的上下架操作',
+      '存在结果待核验的平台写入',
     );
 
     expect(fixture.platformProductLocks.acquire).toHaveBeenCalledWith(7n);
     expect(fixture.getProductState).not.toHaveBeenCalled();
     expect(fixture.platformProductLocks.release).toHaveBeenCalledWith(7n, 'product-lock');
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+              task: { userId: 1n, action: 'edit_sku' },
+            }),
+          ]),
+        }),
+      }),
+    );
   });
 
   it('queues a retained inventory target when a non-online product becomes online', async () => {

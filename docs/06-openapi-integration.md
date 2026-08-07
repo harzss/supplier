@@ -1,6 +1,8 @@
 # 平台 OpenAPI 接入方案
 
 > **原则**：仅使用官方 OpenAPI，不做账号 Cookie、不做爬虫黑产。所有授权走 OAuth 2.0。
+>
+> **运行依赖状态（2026-08-08）**：OAuth 一次性 state/result、Token refresh recovery、订单/商品租约、1688 fixed-window limiter 与 AI 精确缓存已改为 Supabase PostgreSQL `runtime_states`，staging / production 不再配置 `REDIS_URL`。第 45 个 migration 尚未应用到 staging（当前 43/45）；真实平台 E2E 和当前 SHA CI 也未完成，以下“应用侧实现”不能视为平台验收或生产可用。
 
 ## 1. 平台清单
 
@@ -40,7 +42,7 @@
 
 - 普通应用：500 次 / 分钟 / 接口
 - 服务市场应用：可申请提升到 5000 次 / 分钟
-- **应对**：本地缓存 + 增量同步 + 异步队列
+- **应对**：Supabase 短期状态/缓存 + 增量同步 + PostgreSQL 异步队列
 
 ### 2.4 当前实现约定
 
@@ -105,7 +107,7 @@
 - 通用 API 使用 HMAC-SHA256 签名，业务 JSON 递归按 key 排序后参与签名，请求超时 10 秒
 - 商品发布需要配置 `DOUYIN_CUSTOMER_MOBILE`，货源 `attributes` 中需要提供 `douyinCategoryId`，或 `platformCategoryIds.douyin`
 - OAuth 完成后由 BFF 只使用一次性 state 中绑定的站内相对路径跳回原业务页；callback 只在 URL 中携带短期一次性结果 token，登录用户通过 `POST /api/shops/oauth/result` 消费后才能读取成功、店铺或错误信息，跨用户、伪造和重放均被拒绝。`OAUTH_RESULT_REDIRECT_URL` 提供可信 Web origin 和无上下文时的设置页回退，页面消费结果后清理 URL 参数
-- `GET /api/shops/oauth/douyin/readiness` 只读检查应用凭证、OAuth/Redis/加密配置、客服电话、真实授权店铺和可发布测试商品，不返回任何密钥
+- `GET /api/shops/oauth/douyin/readiness` 只读检查应用凭证、OAuth/Supabase runtime state/加密配置、客服电话、真实授权店铺和可发布测试商品，不返回任何密钥
 - `POST /api/orders/sync/:shopId` 按固定更新时间窗从第 0 页全分页增量同步；成功后才推进持久水位，手机号和地址经 AES-256-GCM 加密后落库
 - 平台订单主状态不能代表全部售后结果：部分退款和已完成订单后续退款时，主订单状态可能保持不变；系统读取子订单 `after_sale_info.after_sale_status/after_sale_type/refund_status`
 - `order.searchList` 与 `order.orderDetail` 不允许静默过滤异常父订单或子单；父订单必须包含 ID 和非空子单数组，每个子单必须包含 SKU ID 与稳定平台子单 ID，重复子单 ID 也会使整批同步 fail-closed
@@ -131,6 +133,10 @@
 - 批量改价使用独立的 `sku.editPrice`，请求只携带 `product_id`、发布时写入的 `out_sku_id` 和绝对整数分 `price`；不得为了改价复用会同时覆盖标题、图片、库存等字段的 `product.editV2`
 - 改价预览把比例或逐项目标起售价物化为逐 SKU 绝对价格。执行前后使用 `product.detail.spec_prices` 回读，并严格要求外部 SKU ID 非空且唯一、价格为正整数；平台已达目标时恢复成功，部分成功时只续跑剩余 SKU，出现额外价格漂移或 SKU 集合变化时同步真实快照并 fail-closed
 - 后续执行完整 `product.editV2` 前必须先回读并保留平台最新 SKU 价格，防止标题或详情修正把独立批量改价覆盖回旧价格
+- 普通 SKU 完整集合编辑当前使用 `product.getProductUpdateRule` 获取类目规格规则、`product.detail(show_draft=true)` 读取权威 SKU 集合，并通过 `product.editV2` 替换规格；只接受连续强回读为 `offline/draft` 的普通商品。支持 SKU 增删、规格调整和 1688 spec 一对一重映射，保留既有平台 SKU ID/key、售价及 side fields；新增 SKU 使用服务端稳定 key 且必须明确售价
+- 多个 `propertyId=0` 自定义规格维度和多个 `valueId=0` 自定义值按名称区分；源 spec 映射必须唯一且完整，不能按数组位置猜测。默认单 SKU 允许 `sourceSpecId=null`，但其库存闭环仍必须通过平台回读
+- SKU 写入前保存 `SKU_WRITE_STARTED`；网络/限流/5xx、畸形响应、失锁或所有权丢失均收敛为 `SKU_RESULT_UNKNOWN`。未完成专用 `verify-skus` 强回读前，标题、价格、库存、状态、完整编辑及其他批量平台写入均被阻断，不能直接重放
+- 该能力由 `PRODUCT_BATCH_SKU_EDIT_ENABLED` 独立控制，默认 `false`。第 44 个 migration 和真实抖店 E2E 未完成前，不得在 staging 长期开启或把它计为已验收功能
 - 批量改标题只使用 `product.partialEdit`，请求仅携带 `product_id + name`，不得复用会覆盖图片、价格、库存与 SKU 的完整 `product.editV2`
 - 标题回读使用 `product.detail(show_draft=true).data.name`，同时保存平台状态、审核状态和实际标题；抖店标题统一按 8～30 个汉字、16～60 加权字符校验
 - `partialEdit` 的网络错误、408/429/5xx、无法解析或缺失合法业务 `code` 的 2xx 响应均视为结果未知；写入 fence 未核验前禁止再次改标题或执行完整商品编辑。明确普通 4xx 才按确定失败处理
@@ -224,18 +230,18 @@
 | Web 调用 BFF     | `https://supplier-staging-gateway.chenjie.workers.dev`                                       | Web 的 `NEXT_PUBLIC_BFF_URL`                        | 工程负责人                     | ✅ 当前静态 Web 已重部署并通过固定 Gateway 验收                |
 | BFF 允许 Web     | `https://supplier-staging-web.chenjie.workers.dev`                                           | `CORS_ORIGINS`                                      | 工程负责人                     | ✅ 精确 CORS 已回填；PUT/DELETE 正向及恶意 Origin 负向探针通过 |
 
-生产式 OAuth 还必须配置可用的 `REDIS_URL`、至少 32 字符随机 `ENCRYPTION_KEY` 和 60–900 秒的 `OAUTH_STATE_TTL_SECONDS`。Redis 保存一次性 state 和短期用户绑定结果 token，数据库只保存 AES-256-GCM 加密后的平台 Token；截图、日志、提交、工单和聊天中均不得出现 AppSecret、access token、refresh token、收货地址明文或完整手机号。
+生产式 OAuth 必须配置可用且已应用第 45 个 migration 的 Supabase PostgreSQL、至少 32 字符随机 `ENCRYPTION_KEY` 和 60–900 秒的 `OAUTH_STATE_TTL_SECONDS`。`runtime_states` 保存一次性 state、短期用户绑定结果 token 及加密后的 Token refresh recovery；正式店铺表只保存 AES-256-GCM 加密后的平台 Token。截图、日志、提交、工单和聊天中均不得出现 AppSecret、access token、refresh token、收货地址明文或完整手机号。
 
-| 平台 / 阶段           | 必填环境变量                                                                                                                                                        | 开关顺序与安全约束                                                                                                                                        |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 抖店授权与发布        | `DOUYIN_APP_KEY`、`DOUYIN_APP_SECRET`、`DOUYIN_SERVICE_ID`、`DOUYIN_CUSTOMER_MOBILE`、`DOUYIN_OAUTH_REDIRECT_URI`、`DOUYIN_OAUTH_SANDBOX=false`                     | 先写密钥并完成 OAuth；当前使用正式网关 + 测试店，不虚构独立 sandbox 域名                                                                                  |
-| 抖店订单同步          | `DOUYIN_ORDER_SYNC_ENABLED`、`DOUYIN_ORDER_SYNC_INTERVAL_MS`、`DOUYIN_ORDER_SYNC_LOOKBACK_DAYS`、`DOUYIN_ORDER_SYNC_OVERLAP_SECONDS`、`DOUYIN_ORDER_SYNC_MAX_PAGES` | 凭证、真实店和订单读取权限未通过前保持 `false`；首次手工同步成功后再开启 worker                                                                           |
-| 抖店库存同步          | `INVENTORY_SYNC_ENABLED`、`INVENTORY_SYNC_POLL_MS`、`INVENTORY_SYNC_MAX_ATTEMPTS`                                                                                   | 真实商品、`outer_sku_id = 1688 specId` 和库存权限验证前保持 `false`                                                                                       |
-| 1688 OAuth 与人工支付 | `ALIBABA_1688_APP_KEY`、`ALIBABA_1688_APP_SECRET`、`ALIBABA_1688_OAUTH_REDIRECT_URI`、`ALIBABA_1688_PAYMENT_MODE=manual`                                            | 首期禁止免密自动扣款；必须由授权付款人到 1688 核对 offer、SKU、数量、地址和金额后付款                                                                     |
-| 1688 真实采购         | `ALIBABA_1688_PURCHASE_ENABLED`                                                                                                                                     | 初始保持 `false`；其余 7 项 1688 readiness 通过、预算获批并完成创建前人工复核后，才由工程负责人显式改为 `true`                                            |
-| 1688 已履约巡检       | `ALIBABA_1688_PURCHASE_AUDIT_ENABLED`、`ALIBABA_1688_PURCHASE_AUDIT_INTERVAL_MS`、`ALIBABA_1688_PURCHASE_AUDIT_BATCH_SIZE`                                          | 只有真实采购已开启且首笔已发货订单对账完成后才启用；首次 E2E 不把巡检开关当成前置条件                                                                     |
-| 1688 持久货源采集     | `SOURCE_IMPORT_ENABLED`、`SOURCE_IMPORT_POLL_MS`、`SOURCE_IMPORT_MAX_ATTEMPTS`、`ALIBABA_1688_SOURCE_DATA_SCOPE`、1688 OAuth 凭证                                   | 初始保持 `false`；应用最新 migration、验证买家 Token/配额/曝光回传和跨买家数据一致后，才设置 `global_offer` 并启用 worker；Redis 限流不可用时 fail-closed |
-| 1688 货源采集 CLI     | 临时进程变量 `ALIBABA_1688_APP_KEY`、`ALIBABA_1688_APP_SECRET`、`ALIBABA_1688_ACCESS_TOKEN`；可选搜索场景与筛选变量                                                 | 只保留为受控联调/诊断入口，不作为 SaaS 用户工作流；短时注入 Token 并在结束后清除，不写入仓库、命令历史或证据                                              |
+| 平台 / 阶段           | 必填环境变量                                                                                                                                                        | 开关顺序与安全约束                                                                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 抖店授权与发布        | `DOUYIN_APP_KEY`、`DOUYIN_APP_SECRET`、`DOUYIN_SERVICE_ID`、`DOUYIN_CUSTOMER_MOBILE`、`DOUYIN_OAUTH_REDIRECT_URI`、`DOUYIN_OAUTH_SANDBOX=false`                     | 先写密钥并完成 OAuth；当前使用正式网关 + 测试店，不虚构独立 sandbox 域名                                                                                                      |
+| 抖店订单同步          | `DOUYIN_ORDER_SYNC_ENABLED`、`DOUYIN_ORDER_SYNC_INTERVAL_MS`、`DOUYIN_ORDER_SYNC_LOOKBACK_DAYS`、`DOUYIN_ORDER_SYNC_OVERLAP_SECONDS`、`DOUYIN_ORDER_SYNC_MAX_PAGES` | 凭证、真实店和订单读取权限未通过前保持 `false`；首次手工同步成功后再开启 worker                                                                                               |
+| 抖店库存同步          | `INVENTORY_SYNC_ENABLED`、`INVENTORY_SYNC_POLL_MS`、`INVENTORY_SYNC_MAX_ATTEMPTS`                                                                                   | 真实商品、`outer_sku_id = 1688 specId` 和库存权限验证前保持 `false`                                                                                                           |
+| 1688 OAuth 与人工支付 | `ALIBABA_1688_APP_KEY`、`ALIBABA_1688_APP_SECRET`、`ALIBABA_1688_OAUTH_REDIRECT_URI`、`ALIBABA_1688_PAYMENT_MODE=manual`                                            | 首期禁止免密自动扣款；必须由授权付款人到 1688 核对 offer、SKU、数量、地址和金额后付款                                                                                         |
+| 1688 真实采购         | `ALIBABA_1688_PURCHASE_ENABLED`                                                                                                                                     | 初始保持 `false`；其余 7 项 1688 readiness 通过、预算获批并完成创建前人工复核后，才由工程负责人显式改为 `true`                                                                |
+| 1688 已履约巡检       | `ALIBABA_1688_PURCHASE_AUDIT_ENABLED`、`ALIBABA_1688_PURCHASE_AUDIT_INTERVAL_MS`、`ALIBABA_1688_PURCHASE_AUDIT_BATCH_SIZE`                                          | 只有真实采购已开启且首笔已发货订单对账完成后才启用；首次 E2E 不把巡检开关当成前置条件                                                                                         |
+| 1688 持久货源采集     | `SOURCE_IMPORT_ENABLED`、`SOURCE_IMPORT_POLL_MS`、`SOURCE_IMPORT_MAX_ATTEMPTS`、`ALIBABA_1688_SOURCE_DATA_SCOPE`、1688 OAuth 凭证                                   | 初始保持 `false`；应用最新 migration、验证买家 Token/配额/曝光回传和跨买家数据一致后，才设置 `global_offer` 并启用 worker；Supabase fixed-window limiter 不可用时 fail-closed |
+| 1688 货源采集 CLI     | 临时进程变量 `ALIBABA_1688_APP_KEY`、`ALIBABA_1688_APP_SECRET`、`ALIBABA_1688_ACCESS_TOKEN`；可选搜索场景与筛选变量                                                 | 只保留为受控联调/诊断入口，不作为 SaaS 用户工作流；短时注入 Token 并在结束后清除，不写入仓库、命令历史或证据                                                                  |
 
 ### 4.4 测试商品、订单、金额与物流数据
 
@@ -262,7 +268,7 @@
 
 | 接口                                          | 自动检查 ID                                                                                                                                                   | 自动证明的内容                                                                                                                                 | 仍不能证明                                                                                                        |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `GET /api/shops/oauth/douyin/readiness`       | `app_credentials`、`oauth_security`、`customer_mobile`、`order_sync`、`authorized_shop`、`publish_candidate`                                                  | 应用变量、精确回调 / 返回页、加密与 Redis、客服电话、订单 worker 开关、真实授权店和至少一个有主图且已确认抖店类目的货源                        | 官方 scope / 权限编码、应用审核状态、测试店绑定资格、API 配额、隐私字段权限、真实发布 / 下单 / 发货成功           |
+| `GET /api/shops/oauth/douyin/readiness`       | `app_credentials`、`oauth_security`、`customer_mobile`、`order_sync`、`authorized_shop`、`publish_candidate`                                                  | 应用变量、精确回调 / 返回页、加密与 Supabase runtime state、客服电话、订单 worker 开关、真实授权店和至少一个有主图且已确认抖店类目的货源       | 官方 scope / 权限编码、应用审核状态、测试店绑定资格、API 配额、隐私字段权限、真实发布 / 下单 / 发货成功           |
 | `GET /api/shops/oauth/alibaba_1688/readiness` | `app_credentials`、`oauth_security`、`payment_strategy`、`purchase_enabled`、`authorized_buyer`、`structured_address`、`sku_binding`、`multi_purchase_orders` | 应用变量、OAuth 安全、人工支付模式、真实采购开关、真实买家 Token、订单结构化地址、销售 SKU 到 offer / spec / supplier 的绑定和按供应商拆单能力 | 官方方案订购、scope / 权限编码、搜索 / 详情配额、曝光回传义务、买家余额 / 付款授权、供应商真实发货和平台 API 成功 |
 
 开关验证顺序：
@@ -376,13 +382,15 @@ packages/platform-sdk/
 
 ## 8. 类目映射策略
 
-### 8.1 离线建表
+> 当前实现使用抖店官方类目目录/推荐接口、PostgreSQL 快照、人工确认与规则指纹，不依赖 Milvus。下述 embedding / Milvus 是未来规模化方案，未部署到 staging，也不得作为当前 runtime 中间件；早期需要向量检索时优先评估托管 Supabase pgvector。
+
+### 8.1 未来离线建表
 
 ```
 1688 类目（全量） + 抖音/淘宝/拼多多 类目 → 多模态 Embedding → Milvus
 ```
 
-### 8.2 在线映射
+### 8.2 未来在线映射
 
 ```
 商品标题 + 主图 → Embedding → Milvus 检索 → 候选 Top5 → LLM 裁决 → 返回 Top1
@@ -397,10 +405,13 @@ packages/platform-sdk/
 
 - Token 加密存储：AES-256-GCM + KMS
 - 解密只在内存中、用完即弃
+- 平台刷新成功而正式店铺表尚未提交时，加密后的结果短期写入 Supabase `runtime_states`，后续请求在同一店铺租约下恢复；记录过期或数据库不可用时 fail-closed，不再依赖本机 Redis
 - 审计：每次 Token 使用记录 trace_id
 - 异常检测：Token 异地调用告警
 
-## 10. Webhook 接入
+## 10. Webhook 接入（目标设计）
+
+当前抖店订单路径使用固定时间窗分页增量同步和 Supabase PostgreSQL 持久队列，不运行 Kafka；平台事件验签、回放和真实订阅尚未完成。只有跨服务规模和真实负载证明需要独立消息系统后，才评估托管 Kafka，不得在本机启动它作为 staging 依赖。
 
 | 平台   | 事件                            |
 | ------ | ------------------------------- |
@@ -408,7 +419,7 @@ packages/platform-sdk/
 | 淘宝   | TMC 消息（订单、退款、商品）    |
 | 拼多多 | 订单状态变更                    |
 
-**架构**：网关接收 → 验签 → 入 Kafka → 业务消费
+**未来架构**：网关接收 → 验签 → 托管消息系统 → 业务消费
 
 ## 11. 开发与测试
 

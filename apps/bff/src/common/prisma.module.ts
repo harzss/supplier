@@ -11,7 +11,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     super({
       datasources: {
         db: {
-          url: config.get<string>('DATABASE_URL') ?? 'mysql://root:root@localhost:3306/supplier',
+          url: requiredDatabaseUrl(config),
         },
       },
       log: [{ emit: 'event', level: 'error' }],
@@ -49,6 +49,12 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     });
     return this.reconnecting;
   }
+}
+
+function requiredDatabaseUrl(config: ConfigService): string {
+  const databaseUrl = config.get<string>('DATABASE_URL');
+  if (!databaseUrl) throw new Error('DATABASE_URL is required');
+  return databaseUrl;
 }
 
 @Global()

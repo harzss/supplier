@@ -14,6 +14,13 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
     throw new Error('NODE_ENV must be development, test, or production');
   }
   environment.NODE_ENV = nodeEnv;
+  const gitSha = optionalString(environment.SUPPLIER_GIT_SHA);
+  if (gitSha !== undefined) {
+    if (!/^[a-f0-9]{40}$/.test(gitSha)) {
+      throw new Error('SUPPLIER_GIT_SHA must be a 40-character lowercase Git SHA');
+    }
+    environment.SUPPLIER_GIT_SHA = gitSha;
+  }
   environment.PORT = integer(environment.PORT, 3001, 1, 65_535, 'PORT');
   environment.HEALTH_CHECK_TIMEOUT_MS = integer(
     environment.HEALTH_CHECK_TIMEOUT_MS,
@@ -210,6 +217,13 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
   if (typeof environment.PRODUCT_BATCH_ENABLED === 'boolean') {
     environment.PRODUCT_BATCH_ENABLED = String(environment.PRODUCT_BATCH_ENABLED);
   }
+  validateOptionalBoolean(
+    environment.PRODUCT_BATCH_SKU_EDIT_ENABLED,
+    'PRODUCT_BATCH_SKU_EDIT_ENABLED',
+  );
+  if (typeof environment.PRODUCT_BATCH_SKU_EDIT_ENABLED === 'boolean') {
+    environment.PRODUCT_BATCH_SKU_EDIT_ENABLED = String(environment.PRODUCT_BATCH_SKU_EDIT_ENABLED);
+  }
   validateOptionalBoolean(environment.SOURCE_IMPORT_ENABLED, 'SOURCE_IMPORT_ENABLED');
   if (typeof environment.SOURCE_IMPORT_ENABLED === 'boolean') {
     environment.SOURCE_IMPORT_ENABLED = String(environment.SOURCE_IMPORT_ENABLED);
@@ -288,9 +302,7 @@ function validateProductionEnvironment(environment: RuntimeEnvironment): void {
   }
   const databaseUrl = requiredString(environment, 'DATABASE_URL');
   validateUrl(databaseUrl, 'DATABASE_URL', ['postgres:', 'postgresql:']);
-
-  const redisUrl = requiredString(environment, 'REDIS_URL');
-  validateUrl(redisUrl, 'REDIS_URL', ['redis:', 'rediss:']);
+  validateSupabaseRuntimeDatabase(databaseUrl, requiredString(environment, 'SUPABASE_URL'));
 
   validateSecret(requiredString(environment, 'ENCRYPTION_KEY'), 'ENCRYPTION_KEY');
   validateSecret(requiredString(environment, 'OPERATIONS_TOKEN'), 'OPERATIONS_TOKEN');
@@ -387,6 +399,72 @@ function validateSupabaseAuth(environment: RuntimeEnvironment, production: boole
   if (legacySecret && legacySecret.length < 32) {
     throw new Error('SUPABASE_JWT_SECRET must contain at least 32 characters');
   }
+}
+
+export function validateSupabaseRuntimeDatabase(databaseUrl: string, supabaseUrl: string): void {
+  const projectRef = supabaseProjectRef(supabaseUrl);
+  let database: URL;
+  try {
+    database = new URL(databaseUrl);
+  } catch {
+    throw new Error('DATABASE_URL must be a valid URL');
+  }
+  if (!['postgres:', 'postgresql:'].includes(database.protocol)) {
+    throw new Error('DATABASE_URL must use postgres: or postgresql:');
+  }
+  if (database.pathname !== '/postgres') {
+    throw new Error('DATABASE_URL must target the Supabase postgres database');
+  }
+  if (!database.password) throw new Error('DATABASE_URL must contain a database password');
+  const sslMode = database.searchParams.get('sslmode');
+  if (sslMode !== null && sslMode !== 'require') {
+    throw new Error('DATABASE_URL must not disable or weaken Supabase TLS');
+  }
+
+  const directHost = `db.${projectRef}.supabase.co`;
+  if (database.hostname === directHost) {
+    if ((database.port || '5432') !== '5432' || database.username !== 'postgres') {
+      throw new Error('DATABASE_URL must use the matching Supabase direct connection');
+    }
+    return;
+  }
+
+  if (
+    !database.hostname.endsWith('.pooler.supabase.com') ||
+    database.username !== `postgres.${projectRef}` ||
+    database.port !== '6543'
+  ) {
+    throw new Error('DATABASE_URL must use the matching Supabase transaction pooler');
+  }
+  if (database.searchParams.get('pgbouncer') !== 'true') {
+    throw new Error('Supabase transaction pooler DATABASE_URL must set pgbouncer=true');
+  }
+  const connectionLimit = Number(database.searchParams.get('connection_limit'));
+  if (!Number.isInteger(connectionLimit) || connectionLimit < 1 || connectionLimit > 10) {
+    throw new Error('Supabase transaction pooler connection_limit must be between 1 and 10');
+  }
+}
+
+function supabaseProjectRef(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('SUPABASE_URL must be a valid URL');
+  }
+  const match = url.hostname.match(/^([a-z0-9]{20})\.supabase\.co$/);
+  if (
+    !match ||
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.pathname !== '/' ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error('SUPABASE_URL must be the exact HTTPS project origin');
+  }
+  return match[1]!;
 }
 
 function validateUrl(value: string, name: string, protocols: string[]): void {

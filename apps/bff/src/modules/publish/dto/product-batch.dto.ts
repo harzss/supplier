@@ -5,6 +5,7 @@ import {
   ArrayUnique,
   IsDefined,
   IsArray,
+  IsBoolean,
   IsIn,
   IsInt,
   IsOptional,
@@ -17,6 +18,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { productSkuPropertyIdentity } from '../product-sku-state';
 import { IsPositiveInt64String } from './create-publish-task.dto';
 
 export const PRODUCT_BATCH_ACTIONS = [
@@ -24,6 +26,7 @@ export const PRODUCT_BATCH_ACTIONS = [
   'offline',
   'edit_title',
   'edit_price',
+  'edit_sku',
   'sync_inventory',
   'change_source',
   'cleanup',
@@ -33,6 +36,164 @@ export const PRODUCT_BATCH_MAX_ITEMS = 100;
 
 export const PRODUCT_BATCH_PRICE_RULE_MODES = ['percentage', 'targets'] as const;
 export const PRODUCT_BATCH_PRICE_DIRECTIONS = ['increase', 'decrease'] as const;
+const PRODUCT_SKU_FINGERPRINT = /^[a-f0-9]{64}$/;
+const PRODUCT_SKU_IDENTIFIER = /^[^\u0000-\u001f\u007f]+$/;
+const PRODUCT_SKU_PICTURE_URL = /^https:\/\/[^\s]+$/i;
+
+export class ProductBatchSkuPropertyDto {
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  propertyId!: string;
+
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  propertyName!: string;
+
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  valueId!: string;
+
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  valueName!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  remark?: string;
+}
+
+export class ProductBatchSkuDimensionValueDto {
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  valueId!: string;
+
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  valueName!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  remark?: string;
+}
+
+export class ProductBatchSkuDimensionDto {
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  propertyId!: string;
+
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  propertyName!: string;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @ArrayUnique((value: ProductBatchSkuDimensionValueDto) =>
+    JSON.stringify([value.valueId, value.valueName, value.remark ?? null]),
+  )
+  @ValidateNested({ each: true })
+  @Type(() => ProductBatchSkuDimensionValueDto)
+  values!: ProductBatchSkuDimensionValueDto[];
+}
+
+export class ProductBatchSkuRowDto {
+  @IsString()
+  @MaxLength(128)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  rowId!: string;
+
+  @IsBoolean()
+  isNew!: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  platformSkuId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  platformSkuKey?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  @Matches(PRODUCT_SKU_IDENTIFIER)
+  sourceSpecId?: string;
+
+  @IsArray()
+  @ArrayMaxSize(3)
+  @ArrayUnique((property: ProductBatchSkuPropertyDto) =>
+    productSkuPropertyIdentity(property.propertyId, property.propertyName),
+  )
+  @ValidateNested({ each: true })
+  @Type(() => ProductBatchSkuPropertyDto)
+  properties!: ProductBatchSkuPropertyDto[];
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100_000_000)
+  priceCents!: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ArrayUnique()
+  @IsString({ each: true })
+  @MaxLength(512, { each: true })
+  @Matches(PRODUCT_SKU_PICTURE_URL, { each: true })
+  skuPictureUrls?: string[];
+}
+
+export class ProductBatchSkuTargetDto {
+  @IsString()
+  @IsPositiveInt64String()
+  publishedProductId!: string;
+
+  @IsInt()
+  @Min(1)
+  expectedMutationRevision!: number;
+
+  @IsString()
+  @Matches(PRODUCT_SKU_FINGERPRINT)
+  expectedPlatformSkuFingerprint!: string;
+
+  @IsString()
+  @Matches(PRODUCT_SKU_FINGERPRINT)
+  expectedRuleFingerprint!: string;
+
+  @IsArray()
+  @ArrayMaxSize(3)
+  @ArrayUnique((dimension: ProductBatchSkuDimensionDto) =>
+    productSkuPropertyIdentity(dimension.propertyId, dimension.propertyName),
+  )
+  @ValidateNested({ each: true })
+  @Type(() => ProductBatchSkuDimensionDto)
+  dimensions!: ProductBatchSkuDimensionDto[];
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @ArrayUnique((row: ProductBatchSkuRowDto) => row.rowId)
+  @ValidateNested({ each: true })
+  @Type(() => ProductBatchSkuRowDto)
+  rows!: ProductBatchSkuRowDto[];
+}
 
 export class ProductBatchTitleTargetDto {
   @IsString()
@@ -143,6 +304,16 @@ export class CreateProductBatchPreviewDto {
   @ValidateNested({ each: true })
   @Type(() => ProductBatchSourceTargetDto)
   sourceTargets?: ProductBatchSourceTargetDto[];
+
+  @ValidateIf((value: CreateProductBatchPreviewDto) => value.action === 'edit_sku')
+  @IsDefined()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(PRODUCT_BATCH_MAX_ITEMS)
+  @ArrayUnique((target: ProductBatchSkuTargetDto) => target.publishedProductId)
+  @ValidateNested({ each: true })
+  @Type(() => ProductBatchSkuTargetDto)
+  skuTargets?: ProductBatchSkuTargetDto[];
 }
 
 export class ExecuteProductBatchDto {

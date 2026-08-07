@@ -189,7 +189,7 @@ describe('ShopController OAuth callback', () => {
 
   it('fails closed to the fixed page when the result token cannot be stored', async () => {
     const oauth = {
-      issueResult: vi.fn().mockRejectedValue(new Error('redis down')),
+      issueResult: vi.fn().mockRejectedValue(new Error('runtime state down')),
       exchange: vi.fn().mockResolvedValue({
         userId: 42n,
         platform: 'douyin',

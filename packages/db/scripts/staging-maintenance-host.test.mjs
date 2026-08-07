@@ -133,11 +133,25 @@ test('allows only closed maintenance operations and arguments', () => {
       .projectRef,
     PROJECT_REF,
   );
+  assert.deepEqual(
+    readStagingMaintenanceHostOptions(['migrate-forward-once', `--confirm-project=${PROJECT_REF}`]),
+    {
+      action: 'run',
+      operation: 'migrate-forward-once',
+      projectRef: PROJECT_REF,
+      containerArgs: [
+        'packages/db/scripts/staging-libpq.mjs',
+        'migrate-forward-once',
+        `--confirm-project=${PROJECT_REF}`,
+      ],
+    },
+  );
   for (const args of [
     [],
     ['audit', '--unknown'],
     ['backfill-apply'],
     ['migrate-once', '--confirm-project=short'],
+    ['migrate-forward-once', '--confirm-project=short'],
     ['shell'],
     ['build', '--file=other'],
   ]) {

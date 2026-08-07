@@ -1,16 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { corsOrigins, swaggerEnabled, validateEnvironment } from './environment';
+import {
+  corsOrigins,
+  swaggerEnabled,
+  validateEnvironment,
+  validateSupabaseRuntimeDatabase,
+} from './environment';
+
+const PROJECT_REF = 'abcdefghijklmnopqrst';
 
 const PRODUCTION_ENV = {
   NODE_ENV: 'production',
   AUTH_MODE: 'supabase',
-  DATABASE_URL: 'postgresql://supplier:secret@db.example.com:5432/supplier',
-  REDIS_URL: 'rediss://cache.example.com:6379',
+  DATABASE_URL: `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require`,
   ENCRYPTION_KEY: 'encryption-key-that-is-longer-than-32-characters',
   OPERATIONS_TOKEN: 'operations-token-that-is-longer-than-32-characters',
   ALERT_WEBHOOK_URL: 'https://alerts.example.com/hooks/supplier',
   ALERT_WEBHOOK_SECRET: 'alert-webhook-secret-longer-than-32-characters',
-  SUPABASE_URL: 'https://project.supabase.co',
+  SUPABASE_URL: `https://${PROJECT_REF}.supabase.co`,
   CORS_ORIGINS: 'https://supplier.example.com,https://admin.example.com',
   PUBLISH_QUEUE_MODE: 'database',
 };
@@ -36,6 +42,18 @@ const PRODUCTION_ORDER_SYNC_ENV = {
 };
 
 describe('validateEnvironment', () => {
+  it('accepts only an optional full lowercase build revision', () => {
+    const gitSha = 'a'.repeat(40);
+    expect(validateEnvironment({ SUPPLIER_GIT_SHA: gitSha })).toMatchObject({
+      SUPPLIER_GIT_SHA: gitSha,
+    });
+    for (const value of ['short', 'A'.repeat(40), 'g'.repeat(40)]) {
+      expect(() => validateEnvironment({ SUPPLIER_GIT_SHA: value })).toThrow(
+        'SUPPLIER_GIT_SHA must be a 40-character lowercase Git SHA',
+      );
+    }
+  });
+
   it('keeps safe development defaults', () => {
     expect(validateEnvironment({})).toMatchObject({
       NODE_ENV: 'development',
@@ -71,12 +89,39 @@ describe('validateEnvironment', () => {
       validateEnvironment({
         NODE_ENV: 'production',
         AUTH_MODE: 'supabase',
-        SUPABASE_URL: 'https://project.supabase.co',
+        SUPABASE_URL: `https://${PROJECT_REF}.supabase.co`,
       }),
     ).toThrow('DATABASE_URL is required in production');
     expect(() =>
       validateEnvironment({ ...PRODUCTION_ENV, ENCRYPTION_KEY: 'change-me-in-production' }),
     ).toThrow('ENCRYPTION_KEY must be a non-default secret');
+  });
+
+  it('accepts only the matching Supabase runtime datasource', () => {
+    expect(() =>
+      validateSupabaseRuntimeDatabase(
+        `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=2&sslmode=require`,
+        `https://${PROJECT_REF}.supabase.co`,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateSupabaseRuntimeDatabase(
+        `postgresql://postgres:secret@db.${PROJECT_REF}.supabase.co:5432/postgres?sslmode=require`,
+        `https://${PROJECT_REF}.supabase.co`,
+      ),
+    ).not.toThrow();
+
+    for (const databaseUrl of [
+      'postgresql://postgres:secret@127.0.0.1:5432/postgres',
+      `postgresql://postgres.differentprojectref1:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require`,
+      `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?connection_limit=1&sslmode=require`,
+      `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=100&sslmode=require`,
+      `postgresql://postgres.${PROJECT_REF}:secret@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=disable`,
+    ]) {
+      expect(() =>
+        validateSupabaseRuntimeDatabase(databaseUrl, `https://${PROJECT_REF}.supabase.co`),
+      ).toThrow();
+    }
   });
 
   it('requires Supabase Auth configuration when the mode is enabled', () => {
@@ -258,14 +303,19 @@ describe('validateEnvironment', () => {
     expect(() => validateEnvironment({ PRODUCT_BATCH_MAX_ATTEMPTS: 11 })).toThrow(
       'PRODUCT_BATCH_MAX_ATTEMPTS must be an integer between 1 and 10',
     );
+    expect(() => validateEnvironment({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'enabled' })).toThrow(
+      'PRODUCT_BATCH_SKU_EDIT_ENABLED must be true or false',
+    );
     expect(
       validateEnvironment({
         PRODUCT_BATCH_ENABLED: true,
+        PRODUCT_BATCH_SKU_EDIT_ENABLED: true,
         PRODUCT_BATCH_POLL_MS: '500',
         PRODUCT_BATCH_MAX_ATTEMPTS: '10',
       }),
     ).toMatchObject({
       PRODUCT_BATCH_ENABLED: 'true',
+      PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true',
       PRODUCT_BATCH_POLL_MS: 500,
       PRODUCT_BATCH_MAX_ATTEMPTS: 10,
     });

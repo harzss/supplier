@@ -1,12 +1,6 @@
-import {
-  BadRequestException,
-  Inject,
-  Injectable,
-  ServiceUnavailableException,
-} from '@nestjs/common';
+import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
-import type Redis from 'ioredis';
-import { REDIS_CLIENT } from '../../common/redis.module';
+import { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAUTH_PLATFORMS, OAuthConfigService, type OAuthPlatform } from './oauth-config.service';
 
 const STATE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -41,7 +35,7 @@ export type OAuthResultPayload = OAuthResultData & {
 @Injectable()
 export class OAuthStateService {
   constructor(
-    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly runtimeState: RuntimeStateService,
     private readonly oauthConfig: OAuthConfigService,
   ) {}
 
@@ -64,14 +58,12 @@ export class OAuthStateService {
     };
 
     try {
-      const stored = await this.redis.set(
+      const stored = await this.runtimeState.storeIfAbsent(
         this.key(state),
         JSON.stringify(payload),
-        'EX',
-        ttlSeconds,
-        'NX',
+        ttlSeconds * 1_000,
       );
-      if (stored !== 'OK') throw new Error('state collision');
+      if (!stored) throw new Error('state collision');
     } catch {
       throw new ServiceUnavailableException('OAuth state store is unavailable');
     }
@@ -90,7 +82,7 @@ export class OAuthStateService {
     const normalizedCallback = this.oauthConfig.assertAllowedCallback(expectedCallbackUri);
     let raw: string | null;
     try {
-      raw = await this.redis.getdel(this.key(state));
+      raw = await this.runtimeState.consume<string>(this.key(state));
     } catch {
       throw new ServiceUnavailableException('OAuth state store is unavailable');
     }
@@ -117,14 +109,12 @@ export class OAuthStateService {
     };
 
     try {
-      const stored = await this.redis.set(
+      const stored = await this.runtimeState.storeIfAbsent(
         this.resultKey(token, userId),
         JSON.stringify(payload),
-        'EX',
-        ttlSeconds,
-        'NX',
+        ttlSeconds * 1_000,
       );
-      if (stored !== 'OK') throw new Error('result token collision');
+      if (!stored) throw new Error('result token collision');
     } catch {
       throw new ServiceUnavailableException('OAuth result store is unavailable');
     }
@@ -138,7 +128,7 @@ export class OAuthStateService {
 
     let raw: string | null;
     try {
-      raw = await this.redis.getdel(this.resultKey(token, currentUserId));
+      raw = await this.runtimeState.consume<string>(this.resultKey(token, currentUserId));
     } catch {
       throw new ServiceUnavailableException('OAuth result store is unavailable');
     }

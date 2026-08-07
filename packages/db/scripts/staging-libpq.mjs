@@ -41,6 +41,20 @@ const WORKFLOW_CHECK_ASSERTION_PATH = join(
   'postgres',
   'assert-workflow-check-constraints.sql',
 );
+const SKU_EDIT_FORWARD_ASSERTION_PATH = join(
+  packageDir,
+  'scripts',
+  'assert-43-to-44-sku-edits.sql',
+);
+const RUNTIME_STATE_FORWARD_ASSERTION_PATH = join(
+  packageDir,
+  'scripts',
+  'assert-44-to-45-runtime-state.sql',
+);
+const FORWARD_ASSERTION_PATHS = Object.freeze([
+  SKU_EDIT_FORWARD_ASSERTION_PATH,
+  RUNTIME_STATE_FORWARD_ASSERTION_PATH,
+]);
 const POST_UPGRADE_ASSERTIONS = Object.freeze([
   join(repositoryRoot, 'infra', 'postgres', 'assert-public-schema-isolation.sql'),
   WORKFLOW_CHECK_ASSERTION_PATH,
@@ -65,6 +79,10 @@ export const EXPECTED_STAGING_PENDING_MIGRATIONS = Object.freeze([
   '20260805030000_add_after_sale_cases',
   '20260805040000_harden_workflow_check_null_semantics',
 ]);
+export const EXPECTED_STAGING_FORWARD_MIGRATIONS = Object.freeze([
+  '20260807110000_add_published_product_sku_edits',
+  '20260807150000_add_runtime_state_store',
+]);
 const VERSION_TIMEOUT_MS = 30_000;
 const BACKUP_TIMEOUT_MS = 300_000;
 const AUDIT_TIMEOUT_MS = 300_000;
@@ -76,11 +94,14 @@ const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const USAGE =
   'Usage: staging-libpq.mjs backup --output=<absolute.dump> --confirm-project=<STAGING_PROJECT_REF>\n' +
   '   or: staging-libpq.mjs migrate-once --confirm-project=<STAGING_PROJECT_REF>\n' +
+  '   or: staging-libpq.mjs migrate-forward-once --confirm-project=<STAGING_PROJECT_REF>\n' +
   '   or: staging-libpq.mjs post-upgrade-assert --confirm-project=<STAGING_PROJECT_REF>';
 
 export function readStagingLibpqOptions(args) {
   const action = args[0];
-  if (!['backup', 'migrate-once', 'post-upgrade-assert'].includes(action)) throw new Error(USAGE);
+  if (!['backup', 'migrate-once', 'migrate-forward-once', 'post-upgrade-assert'].includes(action)) {
+    throw new Error(USAGE);
+  }
 
   const expectedLength = action === 'backup' ? 3 : 2;
   const confirmations = args.slice(1).filter((arg) => arg.startsWith('--confirm-project='));
@@ -119,10 +140,16 @@ export function readStagingLibpqConfiguration(args, environment) {
   if (options.confirmedProjectRef !== datasource.projectRef) {
     throw new Error('--confirm-project must exactly match the validated STAGING_PROJECT_REF.');
   }
-  if (options.action === 'migrate-once' && datasource.direct.port !== '5432') {
+  if (
+    (options.action === 'migrate-once' || options.action === 'migrate-forward-once') &&
+    datasource.direct.port !== '5432'
+  ) {
     throw new Error('migrate-once DIRECT_URL must use the PostgreSQL session port 5432.');
   }
-  if (options.action === 'migrate-once' && datasource.database !== 'postgres') {
+  if (
+    (options.action === 'migrate-once' || options.action === 'migrate-forward-once') &&
+    datasource.database !== 'postgres'
+  ) {
     throw new Error('migrate-once must target the postgres database.');
   }
 
@@ -218,6 +245,11 @@ export async function runStagingLibpq({
     return runMigration(configuration, spawnSync, prismaDotenvCandidates);
   }
 
+  if (configuration.action === 'migrate-forward-once') {
+    assertStagingMaintenanceRuntime(environment, platform);
+    return runForwardMigration(configuration, spawnSync, prismaDotenvCandidates);
+  }
+
   assertLibpq17('psql', spawnSync);
   return runPostUpgradeAssertions(configuration, spawnSync);
 }
@@ -263,6 +295,92 @@ async function runMigration(configuration, spawnSync, prismaDotenvCandidates) {
     action: configuration.action,
     projectRef: configuration.datasource.projectRef,
     verifiedMigrationCount: EXPECTED_STAGING_PENDING_MIGRATIONS.length,
+  };
+}
+
+async function runForwardMigration(configuration, spawnSync, prismaDotenvCandidates) {
+  await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
+  const auditResult = spawnMaintenanceNode(
+    spawnSync,
+    [AUDIT_STAGING_PATH, '--allow-pending'],
+    configuration.auditEnvironment,
+    AUDIT_TIMEOUT_MS,
+  );
+  assertCommandSucceeded('staging pre-migration audit', auditResult);
+
+  const statusArgs = [PRISMA_CLI_PATH, 'migrate', 'status', '--schema', PRISMA_SCHEMA_PATH];
+  await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
+  const beforeStatus = spawnMaintenanceNode(
+    spawnSync,
+    statusArgs,
+    configuration.prismaEnvironment,
+    PRISMA_STATUS_TIMEOUT_MS,
+  );
+  assertExpectedPendingStatus(beforeStatus, EXPECTED_STAGING_FORWARD_MIGRATIONS);
+
+  await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
+  const migrationResult = spawnMaintenanceNode(
+    spawnSync,
+    [PRISMA_CLI_PATH, 'migrate', 'deploy', '--schema', PRISMA_SCHEMA_PATH],
+    configuration.prismaEnvironment,
+    PRISMA_MIGRATE_TIMEOUT_MS,
+  );
+  assertCommandSucceeded('prisma migrate deploy', migrationResult);
+
+  await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
+  const afterStatus = spawnMaintenanceNode(
+    spawnSync,
+    statusArgs,
+    configuration.prismaEnvironment,
+    PRISMA_STATUS_TIMEOUT_MS,
+  );
+  assertCommandSucceeded('post-migration prisma migrate status', afterStatus);
+
+  await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
+  const diffResult = spawnMaintenanceNode(
+    spawnSync,
+    [
+      PRISMA_CLI_PATH,
+      'migrate',
+      'diff',
+      '--exit-code',
+      '--from-schema-datasource',
+      PRISMA_SCHEMA_PATH,
+      '--to-schema-datamodel',
+      PRISMA_SCHEMA_PATH,
+    ],
+    configuration.prismaEnvironment,
+    PRISMA_STATUS_TIMEOUT_MS,
+  );
+  assertCommandSucceeded('post-migration prisma migrate diff', diffResult);
+
+  const completedAssertions = [];
+  for (const assertionPath of FORWARD_ASSERTION_PATHS) {
+    await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
+    const assertionResult = spawnMaintenanceNode(
+      spawnSync,
+      [
+        PRISMA_CLI_PATH,
+        'db',
+        'execute',
+        '--file',
+        assertionPath,
+        '--schema',
+        PRISMA_SCHEMA_PATH,
+      ],
+      configuration.prismaEnvironment,
+      ASSERTION_TIMEOUT_MS,
+    );
+    assertCommandSucceeded(`prisma db execute ${basename(assertionPath)}`, assertionResult);
+    completedAssertions.push(basename(assertionPath));
+  }
+
+  return {
+    action: configuration.action,
+    projectRef: configuration.datasource.projectRef,
+    verifiedMigrationCount: EXPECTED_STAGING_FORWARD_MIGRATIONS.length,
+    completedAssertions,
+    prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
   };
 }
 
@@ -437,7 +555,7 @@ async function main() {
     );
     return;
   }
-  if (result.action === 'migrate-once') {
+  if (result.action === 'migrate-once' || result.action === 'migrate-forward-once') {
     console.log(
       `Staging migration status verified for confirmed project: projectRef=${result.projectRef} expectedMigrationCount=${result.verifiedMigrationCount}.`,
     );

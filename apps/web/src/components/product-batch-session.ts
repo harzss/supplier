@@ -1,7 +1,10 @@
-import type { ProductBatchAction, ProductBatchCandidate } from '../lib/api';
+import type { ProductBatchAction, ProductBatchCandidate, ProductBatchSkuTarget } from '../lib/api';
+import { skuDimensionIdentity } from './sku-edit-draft';
 
-const STORAGE_VERSION = 1;
-const STORAGE_PREFIX = 'supplier.product-batch.workbench.v1';
+const STORAGE_VERSION = 2;
+const STORAGE_PREFIX = 'supplier.product-batch.workbench.v2';
+const LEGACY_STORAGE_VERSION = 1;
+const LEGACY_STORAGE_PREFIX = 'supplier.product-batch.workbench.v1';
 const MAX_SELECTION = 100;
 const VALID_STATUSES = new Set(['online', 'draft', 'rejected', 'offline']);
 const INVENTORY_CANDIDATE_FIELDS = [
@@ -31,6 +34,12 @@ const SOURCE_CHANGE_CANDIDATE_FIELDS = [
   'sourceChangeReason',
   'currentSourceRouteCount',
 ] as const;
+const SKU_EDIT_CANDIDATE_FIELDS = [
+  'skuEditEligible',
+  'skuEditReason',
+  'skuVerificationTaskId',
+  'skuVerificationItemId',
+] as const;
 
 type LegacyProductBatchCandidate = Omit<
   ProductBatchCandidate,
@@ -40,6 +49,7 @@ type LegacyProductBatchCandidate = Omit<
   | (typeof OFFLINE_CANDIDATE_FIELDS)[number]
   | (typeof CLEANUP_CANDIDATE_FIELDS)[number]
   | (typeof SOURCE_CHANGE_CANDIDATE_FIELDS)[number]
+  | (typeof SKU_EDIT_CANDIDATE_FIELDS)[number]
 >;
 
 export interface ProductBatchSessionScope {
@@ -59,6 +69,7 @@ export interface ProductBatchComposerDraft {
   targetInputs: Record<string, string>;
   titleInputs: Record<string, string>;
   sourceTargetInputs: Record<string, string>;
+  skuTargets: Record<string, ProductBatchSkuTarget>;
   bulkTargetInput: string;
   targetPage: number;
   selected: ProductBatchCandidate[];
@@ -86,19 +97,27 @@ export function readProductBatchWorkbenchSession(
   storage: ProductBatchSessionStorage | undefined = browserSessionStorage(),
 ): ProductBatchWorkbenchSession | null {
   if (!storage) return null;
-  const key = productBatchWorkbenchStorageKey(scope);
-  try {
-    const raw = storage.getItem(key);
-    if (!raw) return null;
-    const value = JSON.parse(raw) as unknown;
-    const parsed = parseStoredSession(value, scope);
-    if (parsed) return parsed;
-    storage.removeItem(key);
-  } catch {
+  const currentKey = productBatchWorkbenchStorageKey(scope);
+  for (const key of [currentKey, legacyProductBatchWorkbenchStorageKey(scope)]) {
     try {
+      const raw = storage.getItem(key);
+      if (!raw) continue;
+      const value = JSON.parse(raw) as unknown;
+      const parsed = parseStoredSession(value, scope);
+      if (parsed) {
+        if (key !== currentKey || !isRecord(value) || value.version !== STORAGE_VERSION) {
+          writeProductBatchWorkbenchSession(scope, parsed, storage);
+          if (key !== currentKey) storage.removeItem(key);
+        }
+        return parsed;
+      }
       storage.removeItem(key);
     } catch {
-      // sessionStorage 不可用时，调用方仍可依赖服务端幂等约束。
+      try {
+        storage.removeItem(key);
+      } catch {
+        // sessionStorage 不可用时，调用方仍可依赖服务端幂等约束。
+      }
     }
   }
   return null;
@@ -132,6 +151,7 @@ export function clearProductBatchWorkbenchSession(
 ): void {
   try {
     storage?.removeItem(productBatchWorkbenchStorageKey(scope));
+    storage?.removeItem(legacyProductBatchWorkbenchStorageKey(scope));
   } catch {
     // 清理失败不影响服务端任务状态。
   }
@@ -175,19 +195,22 @@ function parseStoredSession(
 ): ProductBatchWorkbenchSession | null {
   if (!isRecord(value)) return null;
   if (
-    value.version !== STORAGE_VERSION ||
+    (value.version !== STORAGE_VERSION && value.version !== LEGACY_STORAGE_VERSION) ||
     value.accountId !== scope.accountId ||
     value.pathname !== scope.pathname
   ) {
     return null;
   }
-  const draft = parseDraft(value.draft);
+  const draft = parseDraft(value.draft, value.version);
   const preview = parsePreview(value.preview);
   if (!draft || preview === undefined) return null;
   return { draft, preview };
 }
 
-function parseDraft(value: unknown): ProductBatchComposerDraft | null {
+function parseDraft(
+  value: unknown,
+  storageVersion: typeof STORAGE_VERSION | typeof LEGACY_STORAGE_VERSION,
+): ProductBatchComposerDraft | null {
   if (!isRecord(value)) return null;
   const action = value.action;
   if (
@@ -198,6 +221,7 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     typeof value.searchInput !== 'string' ||
     typeof value.query !== 'string' ||
     !isProductBatchAction(action) ||
+    (storageVersion === LEGACY_STORAGE_VERSION && action === 'edit_sku') ||
     !isPriceMode(value.priceMode) ||
     !isPriceDirection(value.priceDirection) ||
     typeof value.percentageInput !== 'string' ||
@@ -207,6 +231,7 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     !isStringRecord(value.targetInputs) ||
     (value.titleInputs !== undefined && !isStringRecord(value.titleInputs)) ||
     (value.sourceTargetInputs !== undefined && !isStringRecord(value.sourceTargetInputs)) ||
+    (value.skuTargets !== undefined && !isSkuTargetRecord(value.skuTargets)) ||
     (action === 'change_source' &&
       (value.status !== 'offline' ||
         !isStringRecord(value.sourceTargetInputs) ||
@@ -233,6 +258,11 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
       ([id]) => selectedIds.has(id),
     ),
   );
+  const skuTargets = Object.fromEntries(
+    Object.entries(isSkuTargetRecord(value.skuTargets) ? value.skuTargets : {}).filter(
+      ([id, target]) => selectedIds.has(id) && target.publishedProductId === id,
+    ),
+  );
   return {
     page: value.page,
     status: value.status,
@@ -245,6 +275,7 @@ function parseDraft(value: unknown): ProductBatchComposerDraft | null {
     targetInputs,
     titleInputs,
     sourceTargetInputs,
+    skuTargets,
     bulkTargetInput: value.bulkTargetInput,
     targetPage: value.targetPage,
     selected: candidates,
@@ -277,6 +308,7 @@ function parseProductBatchCandidate(
     return (action !== 'online' || value.onlineEligible === true) &&
       (action !== 'cleanup' || value.cleanupEligible === true) &&
       (action !== 'change_source' || value.sourceChangeEligible === true) &&
+      (action !== 'edit_sku' || value.skuEditEligible === true) &&
       value.offlineVerificationTaskId === null
       ? value
       : null;
@@ -291,12 +323,14 @@ function parseProductBatchCandidate(
   const hasSourceChangeFields = SOURCE_CHANGE_CANDIDATE_FIELDS.some((field) =>
     Object.hasOwn(value, field),
   );
+  const hasSkuEditFields = SKU_EDIT_CANDIDATE_FIELDS.some((field) => Object.hasOwn(value, field));
   const inventoryFieldsValid = hasInventoryCandidateFields(value);
   const titleFieldsValid = hasTitleCandidateFields(value);
   const onlineFieldsValid = hasValidOnlineCandidateState(value);
   const offlineFieldsValid = hasValidOfflineCandidateState(value);
   const cleanupFieldsValid = hasValidCleanupCandidateState(value);
   const sourceChangeFieldsValid = hasValidSourceChangeCandidateState(value);
+  const skuEditFieldsValid = hasValidSkuEditCandidateState(value);
   if (
     (hasInventoryFields && !inventoryFieldsValid) ||
     (hasTitleFields && !titleFieldsValid) ||
@@ -304,13 +338,15 @@ function parseProductBatchCandidate(
     (hasOfflineFields && (!offlineFieldsValid || value.offlineVerificationTaskId !== null)) ||
     (hasCleanupFields && !cleanupFieldsValid) ||
     (hasSourceChangeFields && !sourceChangeFieldsValid) ||
+    (hasSkuEditFields && !skuEditFieldsValid) ||
     (action === 'sync_inventory' && !inventoryFieldsValid) ||
     (action === 'edit_title' && !titleFieldsValid) ||
     (action === 'online' && (!onlineFieldsValid || value.onlineEligible !== true)) ||
     (action === 'cleanup' && (!cleanupFieldsValid || value.cleanupEligible !== true)) ||
     (action === 'change_source' &&
       (!sourceChangeFieldsValid || value.sourceChangeEligible !== true)) ||
-    (['offline', 'cleanup', 'change_source'].includes(action) &&
+    (action === 'edit_sku' && (!skuEditFieldsValid || value.skuEditEligible !== true)) ||
+    (['offline', 'cleanup', 'change_source', 'edit_sku'].includes(action) &&
       (!offlineFieldsValid || value.offlineVerificationTaskId !== null))
   ) {
     return null;
@@ -363,6 +399,16 @@ function parseProductBatchCandidate(
     currentSourceRouteCount: sourceChangeFieldsValid
       ? (value.currentSourceRouteCount as number)
       : 0,
+    skuEditEligible: skuEditFieldsValid ? (value.skuEditEligible as boolean) : false,
+    skuEditReason: skuEditFieldsValid
+      ? (value.skuEditReason as string | null)
+      : '旧版会话缺少 SKU 编辑状态，请刷新商品后再操作',
+    skuVerificationTaskId: skuEditFieldsValid
+      ? (value.skuVerificationTaskId as string | null)
+      : null,
+    skuVerificationItemId: skuEditFieldsValid
+      ? (value.skuVerificationItemId as string | null)
+      : null,
   };
 }
 
@@ -403,7 +449,8 @@ function isProductBatchCandidate(
     hasValidOnlineCandidateState(value) &&
     hasValidOfflineCandidateState(value) &&
     hasValidCleanupCandidateState(value) &&
-    hasValidSourceChangeCandidateState(value)
+    hasValidSourceChangeCandidateState(value) &&
+    hasValidSkuEditCandidateState(value)
   );
 }
 
@@ -480,6 +527,26 @@ export function hasValidSourceChangeCandidateState(value: unknown): boolean {
   return typeof reason === 'string' && reason.trim().length > 0;
 }
 
+export function hasValidSkuEditCandidateState(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const eligible = value.skuEditEligible;
+  const reason = value.skuEditReason;
+  const taskId = value.skuVerificationTaskId;
+  const itemId = value.skuVerificationItemId;
+  const verificationIdsValid =
+    (taskId === null && itemId === null) || (isPositiveId(taskId) && isPositiveId(itemId));
+  if (typeof eligible !== 'boolean' || !verificationIdsValid) return false;
+  if (eligible) {
+    return (
+      (value.status === 'offline' || value.status === 'draft') &&
+      reason === null &&
+      taskId === null &&
+      itemId === null
+    );
+  }
+  return typeof reason === 'string' && reason.trim().length > 0;
+}
+
 function isCleanupEvidence(
   value: unknown,
 ): value is NonNullable<ProductBatchCandidate['cleanupEvidence']> {
@@ -513,10 +580,101 @@ function isProductBatchAction(value: unknown): value is ProductBatchAction {
     value === 'offline' ||
     value === 'edit_title' ||
     value === 'edit_price' ||
+    value === 'edit_sku' ||
     value === 'sync_inventory' ||
     value === 'change_source' ||
     value === 'cleanup'
   );
+}
+
+function isSkuTargetRecord(value: unknown): value is Record<string, ProductBatchSkuTarget> {
+  if (!isRecord(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length > MAX_SELECTION) return false;
+  return entries.every(([id, target]) => isSkuTarget(target) && id === target.publishedProductId);
+}
+
+function isSkuTarget(value: unknown): value is ProductBatchSkuTarget {
+  if (
+    !isRecord(value) ||
+    !isPositiveId(value.publishedProductId) ||
+    !isPositiveInteger(value.expectedMutationRevision) ||
+    !isFingerprint(value.expectedPlatformSkuFingerprint) ||
+    !isFingerprint(value.expectedRuleFingerprint) ||
+    !Array.isArray(value.dimensions) ||
+    value.dimensions.length > 3 ||
+    !Array.isArray(value.rows) ||
+    value.rows.length > 100
+  ) {
+    return false;
+  }
+  const dimensions = value.dimensions;
+  const rows = value.rows;
+  const dimensionsValid = dimensions.every(
+    (dimension) =>
+      isRecord(dimension) &&
+      isNonEmptyText(dimension.propertyId) &&
+      isNonEmptyText(dimension.propertyName) &&
+      Array.isArray(dimension.values) &&
+      dimension.values.length > 0 &&
+      dimension.values.length <= 100 &&
+      dimension.values.every(
+        (entry) =>
+          isRecord(entry) &&
+          isNonEmptyText(entry.valueId) &&
+          isNonEmptyText(entry.valueName) &&
+          (entry.remark === undefined || isNonEmptyText(entry.remark)),
+      ),
+  );
+  if (!dimensionsValid) return false;
+  const dimensionIdentities = dimensions.map((dimension) => skuDimensionIdentity(dimension));
+  if (new Set(dimensionIdentities).size !== dimensionIdentities.length || rows.length === 0) {
+    return false;
+  }
+  return rows.every((row) => {
+    if (
+      !isRecord(row) ||
+      !isNonEmptyText(row.rowId) ||
+      typeof row.isNew !== 'boolean' ||
+      (row.platformSkuId !== null && !isNonEmptyText(row.platformSkuId)) ||
+      (row.platformSkuKey !== null && !isNonEmptyText(row.platformSkuKey)) ||
+      (row.sourceSpecId !== null && !isNonEmptyText(row.sourceSpecId)) ||
+      !isPositiveInteger(row.priceCents) ||
+      Number(row.priceCents) > 100_000_000 ||
+      !Array.isArray(row.skuPictureUrls) ||
+      row.skuPictureUrls.length > 20 ||
+      !row.skuPictureUrls.every(
+        (url) => typeof url === 'string' && /^https:\/\/[^\s]+$/i.test(url),
+      ) ||
+      !Array.isArray(row.properties) ||
+      row.properties.length !== dimensions.length
+    ) {
+      return false;
+    }
+    if (
+      row.isNew
+        ? row.platformSkuId !== null || row.platformSkuKey !== null
+        : !row.platformSkuId || !row.platformSkuKey
+    ) {
+      return false;
+    }
+    return row.properties.every(
+      (entry, index) =>
+        isRecord(entry) &&
+        isNonEmptyText(entry.propertyId) &&
+        isNonEmptyText(entry.propertyName) &&
+        isNonEmptyText(entry.valueId) &&
+        isNonEmptyText(entry.valueName) &&
+        (entry.remark === undefined || isNonEmptyText(entry.remark)) &&
+        skuDimensionIdentity({ propertyId: entry.propertyId, propertyName: entry.propertyName }) ===
+          dimensionIdentities[index] &&
+        entry.propertyName.trim() === dimensions[index]?.propertyName.trim(),
+    );
+  });
+}
+
+function isFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
 }
 
 function isPriceMode(value: unknown): value is 'percentage' | 'targets' {
@@ -529,6 +687,10 @@ function isPriceDirection(value: unknown): value is 'increase' | 'decrease' {
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string');
+}
+
+function isNonEmptyText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function hasValidSourceTargetInputs(value: Record<string, string>): boolean {
@@ -575,4 +737,8 @@ function browserSessionStorage(): ProductBatchSessionStorage | undefined {
   } catch {
     return undefined;
   }
+}
+
+function legacyProductBatchWorkbenchStorageKey(scope: ProductBatchSessionScope): string {
+  return `${LEGACY_STORAGE_PREFIX}:${encodeURIComponent(scope.accountId)}:${encodeURIComponent(scope.pathname)}`;
 }

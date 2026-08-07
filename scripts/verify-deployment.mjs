@@ -1,6 +1,8 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { isCurrentBffReadiness, optionalGitSha } from './bff-readiness.mjs';
+
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 30_000;
@@ -23,12 +25,14 @@ export function readDeploymentConfiguration(environment = process.env) {
     webUrl,
     corsOrigin,
     operationsToken: requiredSecret(environment.OPERATIONS_TOKEN, 'OPERATIONS_TOKEN'),
+    expectedRevision: optionalGitSha(environment.SUPPLIER_GIT_SHA),
     timeoutMs: parseTimeout(environment.DEPLOY_VERIFY_TIMEOUT_MS),
   };
 }
 
 export async function verifyDeployment(configuration, { fetcher = fetch, logger = console } = {}) {
-  const { bffUrl, webUrl, corsOrigin, operationsToken, timeoutMs } = configuration;
+  const { bffUrl, webUrl, corsOrigin, operationsToken, expectedRevision, timeoutMs } =
+    configuration;
   const checks = [
     () =>
       checkJson(
@@ -40,16 +44,8 @@ export async function verifyDeployment(configuration, { fetcher = fetch, logger 
         (body) => body.status === 'ok',
       ),
     () =>
-      checkJson(
-        fetcher,
-        timeoutMs,
-        'BFF readiness',
-        `${bffUrl}/api/health/ready`,
-        200,
-        (body) =>
-          body.status === 'ready' &&
-          body.checks?.database?.status === 'up' &&
-          body.checks?.redis?.status === 'up',
+      checkJson(fetcher, timeoutMs, 'BFF readiness', `${bffUrl}/api/health/ready`, 200, (body) =>
+        isCurrentBffReadiness(body, expectedRevision),
       ),
     () => checkStatus(fetcher, timeoutMs, 'Swagger production gate', `${bffUrl}/docs`, 404),
     () =>

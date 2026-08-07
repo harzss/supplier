@@ -98,23 +98,28 @@ describe('SourceImportAdapterFactory', () => {
 });
 
 describe('SourceImportRateLimiter', () => {
-  it('bypasses Redis only for the demo adapter', async () => {
-    const redis = { eval: vi.fn() };
-    const limiter = new SourceImportRateLimiter(redis as never);
+  it('bypasses shared runtime state only for the demo adapter', async () => {
+    const runtimeState = { takeFixedWindow: vi.fn() };
+    const limiter = new SourceImportRateLimiter(runtimeState as never);
 
     await expect(limiter.take(true)).resolves.toBeUndefined();
-    expect(redis.eval).not.toHaveBeenCalled();
+    expect(runtimeState.takeFixedWindow).not.toHaveBeenCalled();
   });
 
-  it.each([-2, -1, Number.NaN])('fails closed for an invalid Redis PTTL result %s', async (ttl) => {
-    const limiter = new SourceImportRateLimiter({ eval: vi.fn().mockResolvedValue(ttl) } as never);
+  it.each([-2, -1, Number.NaN])(
+    'fails closed for an invalid fixed-window retry delay %s',
+    async (retryAfterMs) => {
+      const limiter = new SourceImportRateLimiter({
+        takeFixedWindow: vi.fn().mockResolvedValue({ allowed: false, retryAfterMs }),
+      } as never);
 
-    await expect(limiter.take(false)).rejects.toBeInstanceOf(ServiceUnavailableException);
-  });
+      await expect(limiter.take(false)).rejects.toBeInstanceOf(ServiceUnavailableException);
+    },
+  );
 
-  it('fails closed when the shared Redis limiter is unavailable', async () => {
+  it('fails closed when the shared runtime limiter is unavailable', async () => {
     const limiter = new SourceImportRateLimiter({
-      eval: vi.fn().mockRejectedValue(new Error('redis unavailable')),
+      takeFixedWindow: vi.fn().mockRejectedValue(new Error('runtime state unavailable')),
     } as never);
 
     await expect(limiter.take(false)).rejects.toBeInstanceOf(ServiceUnavailableException);

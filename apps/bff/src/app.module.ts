@@ -3,7 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { PrismaModule } from './common/prisma.module';
-import { RedisModule } from './common/redis.module';
+import { RuntimeStateModule } from './common/runtime-state.module';
 import { CryptoModule } from './common/crypto.module';
 import { HealthModule } from './modules/health/health.module';
 import { ProductModule } from './modules/product/product.module';
@@ -29,7 +29,7 @@ import { AfterSaleModule } from './modules/after-sale/after-sale.module';
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnvironment }),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     PrismaModule,
-    RedisModule,
+    RuntimeStateModule,
     CryptoModule,
     ObservabilityModule,
     AfterSaleModule,

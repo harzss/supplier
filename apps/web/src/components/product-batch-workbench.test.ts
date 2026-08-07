@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { ProductBatchCandidate, ProductBatchCleanupEvidence } from '../lib/api';
+import type {
+  ProductBatchCandidate,
+  ProductBatchCleanupEvidence,
+  ProductBatchSkuTarget,
+} from '../lib/api';
 import {
   candidateUnavailableReason,
   isCandidateSelectable,
@@ -8,6 +12,8 @@ import {
   normalizeTargetTitle,
   productBatchPreviewFingerprint,
   requiresProductBatchOfflineVerification,
+  requiresProductBatchSkuVerification,
+  retryableProductBatchItemIds,
   sameInventorySnapshot,
   shouldAcceptProductBatchPreviewResponse,
   summarizeInventorySnapshot,
@@ -110,6 +116,61 @@ describe('product batch price inputs', () => {
     });
 
     expect(left).toBe(right);
+  });
+
+  it('keeps SKU edit fingerprints stable across product, row, and dimension-value order', () => {
+    const first = skuTarget('1');
+    const second = skuTarget('2');
+    const left = productBatchPreviewFingerprint({
+      action: 'edit_sku',
+      publishedProductIds: ['2', '1'],
+      skuTargets: [
+        { ...second, rows: [...second.rows].reverse() },
+        {
+          ...first,
+          dimensions: first.dimensions.map((dimension) => ({
+            ...dimension,
+            values: [...dimension.values].reverse(),
+          })),
+        },
+      ],
+    });
+    const request = {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'edit_sku' as const,
+      publishedProductIds: ['1', '2'],
+      skuTargets: [first, second],
+    };
+
+    expect(left).toBe(
+      productBatchPreviewFingerprint({
+        action: request.action,
+        publishedProductIds: request.publishedProductIds,
+        skuTargets: request.skuTargets,
+      }),
+    );
+    expect(
+      shouldAcceptProductBatchPreviewResponse(
+        { fingerprint: left, clientRequestId: CLIENT_REQUEST_ID },
+        request,
+      ),
+    ).toBe(true);
+    expect(
+      productBatchPreviewFingerprint({
+        action: request.action,
+        publishedProductIds: request.publishedProductIds,
+        skuTargets: request.skuTargets.map((target, index) =>
+          index === 0
+            ? {
+                ...target,
+                rows: target.rows.map((row, rowIndex) =>
+                  rowIndex === 0 ? { ...row, sourceSpecId: 'changed-spec' } : row,
+                ),
+              }
+            : target,
+        ),
+      }),
+    ).not.toBe(left);
   });
 
   it('ignores a late preview response after the current request intent changed', () => {
@@ -479,6 +540,35 @@ describe('product batch price inputs', () => {
     );
   });
 
+  it('selects only server-approved offline or draft SKU candidates', () => {
+    const offline = {
+      ...candidate('11', '可编辑 SKU 商品'),
+      status: 'offline',
+      skuEditEligible: true,
+      skuEditReason: null,
+      cleanupEligible: false,
+      cleanupReason: '只有在线商品可以进入滞销安全下架',
+    };
+    const draft = { ...offline, status: 'draft' };
+    const fenced = {
+      ...offline,
+      skuEditEligible: false,
+      skuEditReason: '上一次 SKU 写入结果未知，请先核验',
+      skuVerificationTaskId: '41',
+      skuVerificationItemId: '52',
+    };
+    const wrongStatus = { ...offline, status: 'online' } as ProductBatchCandidate;
+
+    expect(isCandidateSelectable(offline, 'edit_sku')).toBe(true);
+    expect(isCandidateSelectable(draft, 'edit_sku')).toBe(true);
+    expect(isCandidateSelectable(fenced, 'edit_sku')).toBe(false);
+    expect(candidateUnavailableReason(fenced, 'edit_sku')).toBe(fenced.skuEditReason);
+    expect(isCandidateSelectable(wrongStatus, 'edit_sku')).toBe(false);
+    expect(candidateUnavailableReason(wrongStatus, 'edit_sku')).toBe(
+      '商品 SKU 编辑安全状态异常，请刷新商品后再操作',
+    );
+  });
+
   it('blocks every product mutation while an offline result awaits verification', () => {
     const fenced = {
       ...candidate('11', '待核验下架商品'),
@@ -493,6 +583,7 @@ describe('product batch price inputs', () => {
       'offline',
       'edit_title',
       'edit_price',
+      'edit_sku',
       'sync_inventory',
       'change_source',
       'cleanup',
@@ -517,6 +608,38 @@ describe('product batch price inputs', () => {
     expect(
       requiresProductBatchOfflineVerification('online', 'failed', 'OFFLINE_RESULT_UNKNOWN'),
     ).toBe(false);
+  });
+
+  it('requires SKU verification for both unknown SKU write states only', () => {
+    expect(requiresProductBatchSkuVerification('edit_sku', 'failed', 'SKU_WRITE_STARTED')).toBe(
+      true,
+    );
+    expect(requiresProductBatchSkuVerification('edit_sku', 'failed', 'SKU_RESULT_UNKNOWN')).toBe(
+      true,
+    );
+    expect(requiresProductBatchSkuVerification('edit_sku', 'succeeded', 'SKU_RESULT_UNKNOWN')).toBe(
+      false,
+    );
+    expect(requiresProductBatchSkuVerification('edit_price', 'failed', 'SKU_RESULT_UNKNOWN')).toBe(
+      false,
+    );
+    expect(
+      retryableProductBatchItemIds('edit_sku', [
+        {
+          itemId: 'unknown-started',
+          status: 'failed',
+          retryable: true,
+          errorCode: 'SKU_WRITE_STARTED',
+        },
+        {
+          itemId: 'unknown-result',
+          status: 'failed',
+          retryable: true,
+          errorCode: 'SKU_RESULT_UNKNOWN',
+        },
+        { itemId: 'safe-retry', status: 'failed', retryable: true, errorCode: 'PLATFORM_BUSY' },
+      ]),
+    ).toEqual(['safe-retry']);
   });
 
   it('summarizes and compares authoritative inventory snapshots by SKU', () => {
@@ -565,6 +688,7 @@ describe('product batch workbench session recovery', () => {
       targetInputs: { '11': '39.90', '88': '58' },
       titleInputs: {},
       sourceTargetInputs: {},
+      skuTargets: {},
       bulkTargetInput: '39.90',
       targetPage: 2,
       selected: [candidate('11', '第一页商品'), candidate('88', '第三页商品')],
@@ -581,6 +705,43 @@ describe('product batch workbench session recovery', () => {
     expect(writeProductBatchWorkbenchSession(scope, session, storage)).toBe(true);
 
     expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(session);
+  });
+
+  it('restores a complete SKU target only for an eligible selected product', () => {
+    const storage = new MemoryStorage();
+    const selected = {
+      ...candidate('11', '待编辑 SKU 商品'),
+      status: 'offline',
+      skuEditEligible: true,
+      skuEditReason: null,
+      cleanupEligible: false,
+      cleanupReason: '只有在线商品可以进入滞销安全下架',
+    };
+    const baseTarget = skuTarget('11');
+    const target = {
+      ...baseTarget,
+      expectedMutationRevision: selected.mutationRevision,
+      rows: baseTarget.rows.map((row, index) =>
+        index === 0 ? { ...row, sourceSpecId: null } : row,
+      ),
+    };
+    const skuSession: ProductBatchWorkbenchSession = {
+      ...session,
+      draft: {
+        ...session.draft,
+        action: 'edit_sku',
+        status: 'offline',
+        targetInputs: {},
+        selected: [selected],
+        skuTargets: { '11': target },
+      },
+    };
+
+    expect(writeProductBatchWorkbenchSession(scope, skuSession, storage)).toBe(true);
+    expect(readProductBatchWorkbenchSession(scope, storage)).toEqual(skuSession);
+    expect(
+      readProductBatchWorkbenchSession(scope, storage)?.draft.skuTargets['11']?.rows[0],
+    ).toMatchObject({ sourceSpecId: null });
   });
 
   it('restores inventory-sync action and its eligibility snapshot', () => {
@@ -755,7 +916,12 @@ describe('product batch workbench session recovery', () => {
       JSON.stringify({
         version: 1,
         ...scope,
-        draft: { ...session.draft, action: 'edit_price', selected: [selected] },
+        draft: {
+          ...session.draft,
+          action: 'edit_price',
+          skuTargets: undefined,
+          selected: [selected],
+        },
         preview,
       }),
     );
@@ -788,9 +954,37 @@ describe('product batch workbench session recovery', () => {
         sourceChangeEligible: false,
         sourceChangeReason: '旧版会话缺少安全换源状态，请刷新商品后再操作',
         currentSourceRouteCount: 0,
+        skuEditEligible: false,
+        skuEditReason: '旧版会话缺少 SKU 编辑状态，请刷新商品后再操作',
+        skuVerificationTaskId: null,
+        skuVerificationItemId: null,
       },
     ]);
     expect(isCandidateSelectable(restored!.draft.selected[0]!, 'sync_inventory')).toBe(false);
+  });
+
+  it('migrates the real v1 storage key into v2 and removes the legacy entry', () => {
+    const storage = new MemoryStorage();
+    const legacyKey = 'supplier.product-batch.workbench.v1:user-a:%2Fpublished%2Fbatch';
+    storage.setItem(
+      legacyKey,
+      JSON.stringify({
+        version: 1,
+        ...scope,
+        draft: {
+          ...session.draft,
+          skuTargets: undefined,
+          selected: [legacyCandidate('11', '旧版会话商品')],
+        },
+        preview: session.preview,
+      }),
+    );
+
+    const restored = readProductBatchWorkbenchSession(scope, storage);
+
+    expect(restored?.draft.skuTargets).toEqual({});
+    expect(storage.getItem(legacyKey)).toBeNull();
+    expect(storage.getItem(productBatchWorkbenchStorageKey(scope))).not.toBeNull();
   });
 
   it('does not migrate legacy candidates into an inventory-sync draft', () => {
@@ -1207,8 +1401,67 @@ function candidate(publishedProductId: string, title: string) {
     sourceChangeEligible: false,
     sourceChangeReason: '只有已下架商品可以安全换源',
     currentSourceRouteCount: 0,
+    skuEditEligible: false,
+    skuEditReason: '只有已下架商品可以安全编辑 SKU',
+    skuVerificationTaskId: null,
+    skuVerificationItemId: null,
     mutationRevision: 2,
     publishedAt: '2026-08-04T00:00:00.000Z',
+  };
+}
+
+function skuTarget(publishedProductId: string): ProductBatchSkuTarget {
+  return {
+    publishedProductId,
+    expectedMutationRevision: 3,
+    expectedPlatformSkuFingerprint: 'a'.repeat(64),
+    expectedRuleFingerprint: 'b'.repeat(64),
+    dimensions: [
+      {
+        propertyId: '100',
+        propertyName: '颜色',
+        values: [
+          { valueId: '101', valueName: '白色' },
+          { valueId: '102', valueName: '黑色' },
+        ],
+      },
+    ],
+    rows: [
+      {
+        rowId: `existing:${publishedProductId}:white`,
+        isNew: false,
+        platformSkuId: `sku-${publishedProductId}-white`,
+        platformSkuKey: `key-${publishedProductId}-white`,
+        sourceSpecId: `spec-${publishedProductId}-white`,
+        properties: [
+          {
+            propertyId: '100',
+            propertyName: '颜色',
+            valueId: '101',
+            valueName: '白色',
+          },
+        ],
+        priceCents: 1990,
+        skuPictureUrls: [],
+      },
+      {
+        rowId: `existing:${publishedProductId}:black`,
+        isNew: false,
+        platformSkuId: `sku-${publishedProductId}-black`,
+        platformSkuKey: `key-${publishedProductId}-black`,
+        sourceSpecId: `spec-${publishedProductId}-black`,
+        properties: [
+          {
+            propertyId: '100',
+            propertyName: '颜色',
+            valueId: '102',
+            valueName: '黑色',
+          },
+        ],
+        priceCents: 2090,
+        skuPictureUrls: [],
+      },
+    ],
   };
 }
 
@@ -1237,6 +1490,10 @@ function legacyCandidate(publishedProductId: string, title: string): Record<stri
     'sourceChangeEligible',
     'sourceChangeReason',
     'currentSourceRouteCount',
+    'skuEditEligible',
+    'skuEditReason',
+    'skuVerificationTaskId',
+    'skuVerificationItemId',
   ]) {
     delete legacy[field];
   }

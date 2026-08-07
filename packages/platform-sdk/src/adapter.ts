@@ -10,11 +10,15 @@ import type {
   PlatformOrder,
   PlatformProductInventoryState,
   PlatformProductPriceState,
+  PlatformProductSkuRules,
+  PlatformProductSkuRulesQuery,
+  PlatformProductSkuState,
   PlatformProductState,
   PlatformProductTitleState,
   PlatformExecutionGuard,
   PublishProductDto,
   PublishResult,
+  ReplaceProductSkusDto,
   ReplaceShipPackagesDto,
   ShipDto,
   ShipPackagesDto,
@@ -41,6 +45,12 @@ export interface PlatformAdapter {
   getProductTitle?(token: string, productId: string): Promise<PlatformProductTitleState>;
   getProductPrices?(token: string, productId: string): Promise<PlatformProductPriceState>;
   getProductInventory?(token: string, productId: string): Promise<PlatformProductInventoryState>;
+  getProductSkuState?(token: string, productId: string): Promise<PlatformProductSkuState>;
+  getProductSkuRules?(
+    token: string,
+    query: PlatformProductSkuRulesQuery,
+  ): Promise<PlatformProductSkuRules>;
+  replaceProductSkus?(token: string, dto: ReplaceProductSkusDto): Promise<void>;
   getProductState?(token: string, productId: string): Promise<PlatformProductState>;
   onlineProduct?(token: string, productId: string): Promise<void>;
   syncInventory(token: string, dto: SyncInventoryDto): Promise<void>;

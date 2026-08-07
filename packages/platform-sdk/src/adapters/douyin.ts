@@ -19,11 +19,15 @@ import type {
   PlatformOrder,
   PlatformProductInventoryState,
   PlatformProductPriceState,
+  PlatformProductSkuRules,
+  PlatformProductSkuRulesQuery,
+  PlatformProductSkuState,
   PlatformProductState,
   PlatformProductTitleState,
   PlatformShipmentPackage,
   PublishProductDto,
   PublishResult,
+  ReplaceProductSkusDto,
   ReplaceShipPackagesDto,
   ShipDto,
   ShipPackageDto,
@@ -100,10 +104,18 @@ interface DouyinProductDetailData {
   product_id?: number | string;
   product_id_str?: string;
   outer_product_id?: string;
+  category_leaf_id?: number | string;
+  product_type?: number | string;
+  start_sale_type?: number | string;
   status?: number | string;
   check_status?: number | string;
   name?: string;
   spec_prices?: unknown[];
+  [key: string]: unknown;
+}
+
+interface DouyinProductSkuRulesData {
+  product_spec_rule?: unknown;
 }
 
 const PRODUCT_DETAIL_NOT_FOUND_SUB_CODES = [
@@ -117,6 +129,88 @@ const API_VERSION = '2';
 const MAX_CATEGORY_NODES = 20_000;
 const CATEGORY_FETCH_CONCURRENCY = 6;
 const ACCEPTED_INVENTORY_IDEMPOTENCY_RESPONSE = Symbol('accepted inventory idempotency response');
+const ROUND_TRIPPABLE_PRODUCT_SKU_FIELDS = new Set([
+  'sku_id',
+  'outer_sku_id',
+  'sell_properties',
+  'price',
+  'stock_num',
+  'sku_status',
+  'sku_type',
+  'code',
+  'supplier_id',
+  'step_stock_num',
+  'barcodes',
+  'sku_picture_url',
+]);
+const ROUND_TRIPPABLE_PRODUCT_SKU_PROPERTY_FIELDS = new Set([
+  'property_id',
+  'property_name',
+  'value_id',
+  'value_name',
+  'remark',
+]);
+const SKU_RULE_MAX_DIMENSION_ALIASES = [
+  'max_spec_num',
+  'spec_num_limit',
+  'max_spec_count',
+  'max_dimension_num',
+] as const;
+const SKU_RULE_MAX_COMBINATION_ALIASES = [
+  'max_sku_num',
+  'sku_num_limit',
+  'max_sku_count',
+  'sku_limit',
+] as const;
+const SKU_RULE_MAX_VALUE_ALIASES = [
+  'max_spec_value_num',
+  'spec_value_num_limit',
+  'max_spec_value_count',
+  'value_num_limit',
+] as const;
+const SKU_RULE_REORDER_ALIASES = [
+  'support_spec_sequence',
+  'support_spec_sort',
+  'can_adjust_spec_sequence',
+  'spec_sequence_editable',
+] as const;
+const SKU_RULE_CUSTOM_DIMENSION_ALIASES = [
+  'support_custom_spec',
+  'support_diy_spec',
+  'support_custom_property',
+  'custom_spec_supported',
+] as const;
+const SKU_RULE_PICTURE_ALIASES = [
+  'sku_pic_need_all',
+  'all_sku_pic_required',
+  'sku_picture_required',
+  'require_all_sku_picture',
+] as const;
+const SKU_RULE_DIMENSION_ALIASES = [
+  'spec_properties',
+  'spec_property_list',
+  'properties',
+  'product_spec_properties',
+] as const;
+const SKU_RULE_REQUIRED_ALIASES = ['required', 'is_required'] as const;
+const SKU_RULE_CUSTOM_VALUE_ALIASES = [
+  'support_custom_value',
+  'support_diy',
+  'diy_type',
+  'custom_value_supported',
+] as const;
+const SKU_RULE_REMARK_ALIASES = ['support_remark', 'remark_type', 'allow_value_remark'] as const;
+const SKU_RULE_PAGED_VALUE_ALIASES = [
+  'values_need_page',
+  'value_need_page',
+  'requires_paging',
+] as const;
+const SKU_RULE_NAVIGATION_ALIASES = [
+  'navigation_properties',
+  'navigation_property_list',
+  'navigate_properties',
+] as const;
+const SKU_RULE_VALUE_ALIASES = ['values', 'property_values', 'options'] as const;
 
 /**
  * 抖音小店适配器
@@ -327,6 +421,87 @@ export class DouyinAdapter extends BasePlatformAdapter {
       checkStatus,
       items: parseProductInventory(data.spec_prices),
     };
+  }
+
+  async getProductSkuState(
+    token: string,
+    productIdValue: string,
+  ): Promise<PlatformProductSkuState> {
+    const productId = positiveNumericId(productIdValue, 'product ID');
+    const data = await this.requestApi<DouyinProductDetailData>(
+      '/product/detail',
+      'product.detail',
+      'product detail',
+      token,
+      { product_id: productId, show_draft: 'true' },
+    );
+    if (!data) throw new Error('Douyin product detail returned an invalid response');
+    assertProductDetailId(data, productId);
+    const categoryId = positiveSafeIntegerId(stringValue(data.category_leaf_id), 'category ID');
+    const productType = requiredNonNegativeInteger(
+      data.product_type,
+      'Douyin product detail returned an invalid product type',
+    );
+    const startSaleType = optionalInteger(data.start_sale_type);
+    if (startSaleType !== 0 && startSaleType !== 1) {
+      throw new Error('Douyin product detail returned an invalid start sale type');
+    }
+    const { state, status, checkStatus } = parseStrictProductState(data);
+    return {
+      state,
+      status,
+      checkStatus,
+      categoryId,
+      productType,
+      startSaleType,
+      items: parseProductSkuItems(data.spec_prices),
+    };
+  }
+
+  async getProductSkuRules(
+    token: string,
+    query: PlatformProductSkuRulesQuery,
+  ): Promise<PlatformProductSkuRules> {
+    const categoryId = positiveSafeIntegerId(query.categoryId, 'category ID');
+    const standardBrandId = query.standardBrandId
+      ? positiveSafeIntegerId(query.standardBrandId, 'standard brand ID')
+      : undefined;
+    const spuId = query.spuId ? positiveSafeIntegerId(query.spuId, 'SPU ID') : undefined;
+    const data = await this.requestApi<DouyinProductSkuRulesData>(
+      '/product/getProductUpdateRule',
+      'product.getProductUpdateRule',
+      'product SKU rules',
+      token,
+      {
+        category_id: Number(categoryId),
+        ...(standardBrandId ? { standard_brand_id: Number(standardBrandId) } : {}),
+        ...(spuId ? { spu_id: Number(spuId) } : {}),
+      },
+    );
+    if (!data) throw new Error('Douyin product SKU rules returned an invalid response');
+    return parseProductSkuRules(data.product_spec_rule);
+  }
+
+  async replaceProductSkus(token: string, dto: ReplaceProductSkusDto): Promise<void> {
+    const params = buildSkuReplacementPayload(dto);
+    try {
+      await this.requestApi<undefined>(
+        '/product/editV2',
+        'product.editV2',
+        'product SKU replacement',
+        token,
+        params,
+      );
+    } catch (error) {
+      if (mutationResultIsUnknown(error, 'product SKU replacement')) {
+        throw new PlatformMutationResultUnknownError(
+          error instanceof Error
+            ? error.message
+            : 'Douyin product SKU replacement result is unknown',
+        );
+      }
+      throw error;
+    }
   }
 
   async getProductState(token: string, productIdValue: string): Promise<PlatformProductState> {
@@ -939,6 +1114,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | '/product/editV2'
       | '/product/partialEdit'
       | '/product/detail'
+      | '/product/getProductUpdateRule'
       | '/product/GetRecommendCategory'
       | '/product/getCatePropertyV2'
       | '/product/qualificationConfig'
@@ -959,6 +1135,7 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | 'product.editV2'
       | 'product.partialEdit'
       | 'product.detail'
+      | 'product.getProductUpdateRule'
       | 'product.GetRecommendCategory'
       | 'product.getCatePropertyV2'
       | 'product.qualificationConfig'
@@ -979,6 +1156,8 @@ export class DouyinAdapter extends BasePlatformAdapter {
       | 'product update'
       | 'product title update'
       | 'product detail'
+      | 'product SKU rules'
+      | 'product SKU replacement'
       | 'category recommendation'
       | 'category attributes'
       | 'category qualifications'
@@ -1388,8 +1567,27 @@ function toStock(value: number): number {
 
 function positiveNumericId(value: string, label: string): string {
   const id = value.trim();
-  if (!/^\d+$/.test(id) || id === '0' || id.length > 32) {
+  if (!/^\d+$/.test(id) || /^0+$/.test(id) || id.length > 32) {
     throw new Error(`Douyin ${label} must be a positive numeric string`);
+  }
+  return id;
+}
+
+function strictPlatformNumericId(value: unknown, label: string, allowZero = false): string {
+  if (
+    (typeof value !== 'string' && typeof value !== 'number') ||
+    (typeof value === 'number' && !Number.isSafeInteger(value))
+  ) {
+    throw new Error(`Douyin ${label} is invalid`);
+  }
+  const id = String(value).trim();
+  if (
+    !/^\d+$/.test(id) ||
+    id.length > 32 ||
+    (!allowZero && /^0+$/.test(id)) ||
+    (allowZero && /^0+$/.test(id) && id !== '0')
+  ) {
+    throw new Error(`Douyin ${label} is invalid`);
   }
   return id;
 }
@@ -1400,6 +1598,14 @@ function positiveSafeIntegerId(value: string, label: string): string {
     throw new Error(`Douyin ${label} must be a positive safe integer`);
   }
   return id;
+}
+
+function skuValueIdentity(valueId: string, valueName: string, remark: string | null): string {
+  return canonicalJson([valueId, valueName, remark]);
+}
+
+function skuPropertyIdentity(propertyId: string, propertyName: string): string {
+  return canonicalJson([propertyId, propertyName]);
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -1618,6 +1824,726 @@ function parseProductInventory(value: unknown): PlatformProductInventoryState['i
   return items.sort((left, right) =>
     left.sourceSkuId < right.sourceSkuId ? -1 : left.sourceSkuId > right.sourceSkuId ? 1 : 0,
   );
+}
+
+function parseStrictProductState(data: DouyinProductDetailData): PlatformProductState {
+  const status = optionalInteger(data.status);
+  const checkStatus = optionalInteger(data.check_status);
+  if (
+    status === null ||
+    ![0, 1, 2].includes(status) ||
+    checkStatus === null ||
+    ![1, 2, 3, 4, 5, 7].includes(checkStatus)
+  ) {
+    throw new Error('Douyin product detail returned an invalid product state');
+  }
+  const state = mapProductState(status, checkStatus);
+  if (state === 'unknown') {
+    throw new Error('Douyin product detail returned an invalid product state');
+  }
+  return { state, status, checkStatus };
+}
+
+function parseProductSkuItems(value: unknown): PlatformProductSkuState['items'] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
+    throw new Error('Douyin product detail returned an invalid SKU list');
+  }
+  const seenIds = new Set<string>();
+  const seenKeys = new Set<string>();
+  const seenCombinations = new Set<string>();
+  const dimensionNames = new Map<string, string>();
+  const dimensionIdsByName = new Map<string, string>();
+  const valueNames = new Map<string, string>();
+  const valueIdsByName = new Map<string, string>();
+  const valueIdentitiesByDisplay = new Map<string, string>();
+  let expectedDimensions: string | undefined;
+
+  const items = value.map((itemValue) => {
+    const item = recordValue(itemValue);
+    if (!item) throw new Error('Douyin product detail returned an invalid SKU');
+    assertNoUnsupportedSkuFields(item);
+    const platformSkuId = strictPlatformNumericId(item.sku_id, 'SKU ID');
+    const platformSkuKey = strictExternalSkuId(item.outer_sku_id);
+    if (seenIds.has(platformSkuId)) {
+      throw new Error(`Douyin product detail returned duplicate SKU ID: ${platformSkuId}`);
+    }
+    if (seenKeys.has(platformSkuKey)) {
+      throw new Error(
+        `Douyin product detail returned duplicate external SKU ID: ${platformSkuKey}`,
+      );
+    }
+    seenIds.add(platformSkuId);
+    seenKeys.add(platformSkuKey);
+
+    const properties = parseSkuProperties(item.sell_properties);
+    const dimensionKey = canonicalJson(
+      properties
+        .map((property) => [property.propertyId, property.propertyName])
+        .sort(([leftId, leftName], [rightId, rightName]) =>
+          `${leftId}\u0000${leftName}`.localeCompare(`${rightId}\u0000${rightName}`),
+        ),
+    );
+    expectedDimensions ??= dimensionKey;
+    if (dimensionKey !== expectedDimensions) {
+      throw new Error('Douyin product detail returned inconsistent SKU dimensions');
+    }
+    for (const property of properties) {
+      if (property.propertyId !== '0') {
+        const dimensionName = dimensionNames.get(property.propertyId);
+        if (dimensionName && dimensionName !== property.propertyName) {
+          throw new Error('Douyin product detail returned inconsistent SKU property names');
+        }
+        dimensionNames.set(property.propertyId, property.propertyName);
+      }
+      const dimensionId = dimensionIdsByName.get(property.propertyName);
+      if (dimensionId && dimensionId !== property.propertyId) {
+        throw new Error('Douyin product detail returned ambiguous SKU property names');
+      }
+      dimensionIdsByName.set(property.propertyName, property.propertyId);
+      const displayKey = `${property.propertyId}\u0000${property.remark ?? property.valueName}`;
+      const valueIdentity = skuValueIdentity(property.valueId, property.valueName, property.remark);
+      const existingDisplayIdentity = valueIdentitiesByDisplay.get(displayKey);
+      if (existingDisplayIdentity && existingDisplayIdentity !== valueIdentity) {
+        throw new Error('Douyin product detail returned ambiguous SKU display values');
+      }
+      valueIdentitiesByDisplay.set(displayKey, valueIdentity);
+      if (property.valueId !== '0') {
+        const valueKey = `${property.propertyId}\u0000${property.valueId}`;
+        const valueName = valueNames.get(valueKey);
+        if (valueName && valueName !== property.valueName) {
+          throw new Error('Douyin product detail returned inconsistent SKU value names');
+        }
+        const valueNameKey = `${property.propertyId}\u0000${property.valueName}`;
+        const valueId = valueIdsByName.get(valueNameKey);
+        if (valueId && valueId !== property.valueId) {
+          throw new Error('Douyin product detail returned ambiguous SKU value names');
+        }
+        valueNames.set(valueKey, property.valueName);
+        valueIdsByName.set(valueNameKey, property.valueId);
+      }
+    }
+    const combination = canonicalJson(
+      properties
+        .map((property) => [
+          property.propertyId,
+          property.propertyName,
+          property.valueId,
+          property.valueName,
+          property.remark,
+        ])
+        .sort(([left], [right]) => String(left).localeCompare(String(right))),
+    );
+    if (seenCombinations.has(combination)) {
+      throw new Error('Douyin product detail returned duplicate SKU property combinations');
+    }
+    seenCombinations.add(combination);
+
+    const skuStatus = booleanValue(item.sku_status);
+    const skuType = optionalInteger(item.sku_type);
+    if (skuStatus === null || skuType === null) {
+      throw new Error('Douyin product detail returned an invalid SKU status or type');
+    }
+    if (skuType !== 0) {
+      throw new Error(`Douyin product SKU uses unsupported SKU type: ${skuType}`);
+    }
+    const validSkuType: 0 = skuType;
+    return {
+      platformSkuId,
+      platformSkuKey,
+      properties,
+      priceCents: positiveInteger(item.price, 'SKU price in cents'),
+      stock: nonNegativeInteger(item.stock_num, 'SKU stock'),
+      skuStatus,
+      skuType: validSkuType,
+      code: optionalSkuText(item.code, 128, 'SKU code'),
+      supplierId: optionalSkuText(item.supplier_id, 128, 'supplier ID'),
+      stepStock:
+        optionalNonNegativeInteger(
+          item.step_stock_num,
+          'Douyin product detail returned an invalid SKU step stock',
+        ) ?? 0,
+      barcodes: parseSkuTextList(item.barcodes, 128, 'barcode'),
+      skuPictureUrls: parseSkuPictureUrls(item.sku_picture_url),
+    };
+  });
+
+  return items.sort((left, right) =>
+    left.platformSkuKey < right.platformSkuKey
+      ? -1
+      : left.platformSkuKey > right.platformSkuKey
+        ? 1
+        : 0,
+  );
+}
+
+function parseSkuProperties(
+  value: unknown,
+): PlatformProductSkuState['items'][number]['properties'] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3) {
+    throw new Error('Douyin product detail returned invalid SKU properties');
+  }
+  const seen = new Set<string>();
+  const seenNonCustomIds = new Set<string>();
+  const seenNames = new Set<string>();
+  return value.map((propertyValue) => {
+    const property = recordValue(propertyValue);
+    if (!property) throw new Error('Douyin product detail returned an invalid SKU property');
+    assertOnlyKnownMeaningfulFields(
+      property,
+      ROUND_TRIPPABLE_PRODUCT_SKU_PROPERTY_FIELDS,
+      'Douyin product SKU property uses unsupported field',
+    );
+    const propertyId = strictPlatformNumericId(property.property_id, 'SKU property ID', true);
+    const propertyName = strictSkuText(property.property_name, 60, 'SKU property name');
+    const valueId = strictPlatformNumericId(property.value_id, 'SKU value ID', true);
+    const identity = skuPropertyIdentity(propertyId, propertyName);
+    if (
+      seen.has(identity) ||
+      (propertyId !== '0' && seenNonCustomIds.has(propertyId)) ||
+      seenNames.has(propertyName)
+    ) {
+      throw new Error(`Douyin product detail returned duplicate SKU property ID: ${propertyId}`);
+    }
+    seen.add(identity);
+    if (propertyId !== '0') seenNonCustomIds.add(propertyId);
+    seenNames.add(propertyName);
+    return {
+      propertyId,
+      propertyName,
+      valueId,
+      valueName: strictSkuText(property.value_name, 100, 'SKU value name'),
+      remark: optionalSkuText(property.remark, 100, 'SKU value remark'),
+    };
+  });
+}
+
+function assertNoUnsupportedSkuFields(item: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(item)) {
+    if (!hasMeaningfulValue(value)) continue;
+    if (ROUND_TRIPPABLE_PRODUCT_SKU_FIELDS.has(key)) continue;
+    throw new Error(`Douyin product SKU uses unsupported field: ${key.slice(0, 100)}`);
+  }
+}
+
+/** V8.01 has shipped multiple field spellings; aliases are accepted, but every critical limit/flag is required. */
+function parseProductSkuRules(value: unknown): PlatformProductSkuRules {
+  const rule = recordValue(value);
+  if (!rule) throw new Error('Douyin product SKU rules returned an invalid response');
+  const maxDimensions = requiredAliasedRuleInteger(
+    rule,
+    SKU_RULE_MAX_DIMENSION_ALIASES,
+    'dimension limit',
+  );
+  const maxCombinations = requiredAliasedRuleInteger(
+    rule,
+    SKU_RULE_MAX_COMBINATION_ALIASES,
+    'combination limit',
+  );
+  const maxValuesPerDimension = requiredAliasedRuleInteger(
+    rule,
+    SKU_RULE_MAX_VALUE_ALIASES,
+    'value limit',
+  );
+  const supportsDimensionReordering = requiredAliasedRuleBoolean(
+    rule,
+    SKU_RULE_REORDER_ALIASES,
+    'dimension reordering flag',
+  );
+  const supportsCustomDimensions = requiredAliasedRuleBoolean(
+    rule,
+    SKU_RULE_CUSTOM_DIMENSION_ALIASES,
+    'custom dimension flag',
+  );
+  const allSkuPicturesRequired = requiredAliasedRuleBoolean(
+    rule,
+    SKU_RULE_PICTURE_ALIASES,
+    'SKU picture flag',
+  );
+  const rawDimensions = aliasedRuleValue(rule, SKU_RULE_DIMENSION_ALIASES);
+  if (!Array.isArray(rawDimensions)) {
+    throw new Error('Douyin product SKU rules returned invalid dimensions');
+  }
+
+  const seenPropertyIds = new Set<string>();
+  const seenProperties = new Set<string>();
+  const seenPropertyNames = new Set<string>();
+  const dimensions = rawDimensions.map((dimensionValue) => {
+    const dimension = recordValue(dimensionValue);
+    if (!dimension) throw new Error('Douyin product SKU rules returned an invalid dimension');
+    const propertyId = strictPlatformNumericId(dimension.property_id, 'SKU property ID', true);
+    const propertyName = strictSkuText(dimension.property_name, 60, 'SKU property name');
+    const propertyIdentity = skuPropertyIdentity(propertyId, propertyName);
+    if (
+      seenProperties.has(propertyIdentity) ||
+      (propertyId !== '0' && seenPropertyIds.has(propertyId))
+    ) {
+      throw new Error(`Douyin product SKU rules returned duplicate property ID: ${propertyId}`);
+    }
+    if (seenPropertyNames.has(propertyName)) {
+      throw new Error(`Douyin product SKU rules returned duplicate property name: ${propertyName}`);
+    }
+    seenProperties.add(propertyIdentity);
+    if (propertyId !== '0') seenPropertyIds.add(propertyId);
+    seenPropertyNames.add(propertyName);
+    const required = requiredAliasedRuleBoolean(
+      dimension,
+      SKU_RULE_REQUIRED_ALIASES,
+      'required flag',
+    );
+    const supportsCustomValues = requiredAliasedRuleBoolean(
+      dimension,
+      SKU_RULE_CUSTOM_VALUE_ALIASES,
+      'custom value flag',
+    );
+    const supportsRemark = requiredAliasedRuleBoolean(
+      dimension,
+      SKU_RULE_REMARK_ALIASES,
+      'remark flag',
+    );
+    const requiresPagedValues = requiredAliasedRuleBoolean(
+      dimension,
+      SKU_RULE_PAGED_VALUE_ALIASES,
+      'value paging flag',
+    );
+    const navigationProperties = parseRuleNavigationProperties(
+      aliasedRuleValue(dimension, SKU_RULE_NAVIGATION_ALIASES) ?? [],
+    );
+    const values = parseRuleValues(aliasedRuleValue(dimension, SKU_RULE_VALUE_ALIASES) ?? []);
+    const unsupportedReasons = complexRuleReasons(dimension, [
+      'property_id',
+      'property_name',
+      ...SKU_RULE_REQUIRED_ALIASES,
+      ...SKU_RULE_CUSTOM_VALUE_ALIASES,
+      ...SKU_RULE_REMARK_ALIASES,
+      ...SKU_RULE_PAGED_VALUE_ALIASES,
+      ...SKU_RULE_NAVIGATION_ALIASES,
+      ...SKU_RULE_VALUE_ALIASES,
+    ]);
+    if (requiresPagedValues) unsupportedReasons.push('paged SKU values are unsupported');
+    if (navigationProperties.length) {
+      unsupportedReasons.push('navigation or cascade SKU properties are unsupported');
+    }
+    return {
+      propertyId,
+      propertyName,
+      required,
+      supportsCustomValues,
+      supportsRemark,
+      requiresPagedValues,
+      navigationProperties,
+      values,
+      unsupportedReasons: uniqueStrings(unsupportedReasons),
+    };
+  });
+
+  const unsupportedReasons = complexRuleReasons(rule, [
+    ...SKU_RULE_MAX_DIMENSION_ALIASES,
+    ...SKU_RULE_MAX_COMBINATION_ALIASES,
+    ...SKU_RULE_MAX_VALUE_ALIASES,
+    ...SKU_RULE_REORDER_ALIASES,
+    ...SKU_RULE_CUSTOM_DIMENSION_ALIASES,
+    ...SKU_RULE_PICTURE_ALIASES,
+    ...SKU_RULE_DIMENSION_ALIASES,
+  ]);
+  if (
+    dimensions.length > maxDimensions ||
+    dimensions.some((dimension) => dimension.values.length > maxValuesPerDimension)
+  ) {
+    throw new Error('Douyin product SKU rules returned inconsistent limits');
+  }
+  if (maxDimensions > 3 || dimensions.length > 3) {
+    unsupportedReasons.push('more than 3 SKU dimensions are unsupported');
+  }
+  for (const dimension of dimensions) {
+    for (const reason of dimension.unsupportedReasons) {
+      unsupportedReasons.push(`${dimension.propertyName}: ${reason}`);
+    }
+  }
+  return {
+    maxDimensions,
+    maxCombinations,
+    maxValuesPerDimension,
+    supportsDimensionReordering,
+    supportsCustomDimensions,
+    allSkuPicturesRequired,
+    dimensions,
+    unsupportedReasons: uniqueStrings(unsupportedReasons),
+  };
+}
+
+function parseRuleNavigationProperties(
+  value: unknown,
+): PlatformProductSkuRules['dimensions'][number]['navigationProperties'] {
+  if (!Array.isArray(value)) {
+    throw new Error('Douyin product SKU rules returned invalid navigation properties');
+  }
+  const seen = new Set<string>();
+  return value.map((itemValue) => {
+    const item = recordValue(itemValue);
+    if (!item) throw new Error('Douyin product SKU rules returned invalid navigation properties');
+    assertOnlyKnownMeaningfulFields(
+      item,
+      new Set(['property_id', 'property_name']),
+      'Douyin product SKU navigation rule uses unsupported field',
+    );
+    const propertyId = strictPlatformNumericId(item.property_id, 'navigation property ID');
+    if (seen.has(propertyId)) {
+      throw new Error(`Douyin product SKU rules returned duplicate property ID: ${propertyId}`);
+    }
+    seen.add(propertyId);
+    return {
+      propertyId,
+      propertyName: strictSkuText(item.property_name, 60, 'navigation property name'),
+    };
+  });
+}
+
+function parseRuleValues(value: unknown): PlatformProductSkuRules['dimensions'][number]['values'] {
+  if (!Array.isArray(value)) {
+    throw new Error('Douyin product SKU rules returned invalid values');
+  }
+  const seen = new Set<string>();
+  const seenNonCustomIds = new Set<string>();
+  const seenNames = new Set<string>();
+  return value.map((itemValue) => {
+    const item = recordValue(itemValue);
+    if (!item) throw new Error('Douyin product SKU rules returned an invalid value');
+    assertOnlyKnownMeaningfulFields(
+      item,
+      new Set(['value_id', 'value_name', 'name']),
+      'Douyin product SKU value rule uses unsupported field',
+    );
+    const valueId = strictPlatformNumericId(item.value_id, 'SKU value ID', true);
+    const valueName = strictSkuText(item.value_name ?? item.name, 100, 'SKU value name');
+    const identity = canonicalJson([valueId, valueName]);
+    if (seen.has(identity) || (valueId !== '0' && seenNonCustomIds.has(valueId))) {
+      throw new Error(`Douyin product SKU rules returned duplicate value ID: ${valueId}`);
+    }
+    if (valueId !== '0' && seenNames.has(valueName)) {
+      throw new Error(`Douyin product SKU rules returned duplicate value name: ${valueName}`);
+    }
+    seen.add(identity);
+    if (valueId !== '0') {
+      seenNonCustomIds.add(valueId);
+      seenNames.add(valueName);
+    }
+    return {
+      valueId,
+      valueName,
+    };
+  });
+}
+
+function requiredAliasedRuleInteger(
+  record: Record<string, unknown>,
+  aliases: readonly string[],
+  label: string,
+): number {
+  const numbers = aliasedRuleValues(record, aliases).map(optionalInteger);
+  if (
+    numbers.length === 0 ||
+    numbers.some((number) => number === null || number < 1 || number > 10_000) ||
+    new Set(numbers).size !== 1
+  ) {
+    throw new Error(`Douyin product SKU rules returned an invalid ${label}`);
+  }
+  return numbers[0]!;
+}
+
+function requiredAliasedRuleBoolean(
+  record: Record<string, unknown>,
+  aliases: readonly string[],
+  label: string,
+): boolean {
+  const values = aliasedRuleValues(record, aliases).map(booleanValue);
+  if (values.length === 0 || values.some((value) => value === null) || new Set(values).size !== 1) {
+    throw new Error(`Douyin product SKU rules returned an invalid ${label}`);
+  }
+  return values[0]!;
+}
+
+function aliasedRuleValues(record: Record<string, unknown>, aliases: readonly string[]): unknown[] {
+  return aliases.flatMap((alias) =>
+    Object.prototype.hasOwnProperty.call(record, alias) ? [record[alias]] : [],
+  );
+}
+
+function aliasedRuleValue(record: Record<string, unknown>, aliases: readonly string[]): unknown {
+  const values = aliasedRuleValues(record, aliases);
+  if (values.length > 1 && new Set(values.map(canonicalJson)).size !== 1) {
+    throw new Error('Douyin product SKU rules returned conflicting aliases');
+  }
+  return values[0];
+}
+
+function complexRuleReasons(
+  record: Record<string, unknown>,
+  knownKeys: readonly string[],
+): string[] {
+  const reasons: string[] = [];
+  const known = new Set(knownKeys);
+  for (const [key, value] of Object.entries(record)) {
+    if (!hasMeaningfulValue(value)) continue;
+    if (known.has(key)) continue;
+    if (/page_info|has_more|paging/i.test(key)) reasons.push('paged SKU rules are unsupported');
+    else if (/navigation|navigate|cascade|linkage/i.test(key)) {
+      reasons.push('navigation or cascade SKU properties are unsupported');
+    } else if (/measure|size.*template|template.*size/i.test(key)) {
+      reasons.push('measurement templates are unsupported');
+    } else if (/combination|legal.*sku|sku.*legal|mutual.*exclusion/i.test(key)) {
+      reasons.push('legal SKU combination constraints are unsupported');
+    } else {
+      reasons.push(`unrecognized SKU rule field ${key.slice(0, 100)} is unsupported`);
+    }
+  }
+  return uniqueStrings(reasons);
+}
+
+function buildSkuReplacementPayload(dto: ReplaceProductSkusDto): Record<string, unknown> {
+  const productId = positiveNumericId(dto.platformProductId, 'product ID');
+  if (dto.keepOffline !== true) {
+    throw new Error('Douyin SKU replacement must keep the product offline');
+  }
+  if (!Array.isArray(dto.dimensions) || dto.dimensions.length < 1 || dto.dimensions.length > 3) {
+    throw new Error('Douyin SKU replacement requires 1 to 3 dimensions');
+  }
+  if (!Array.isArray(dto.items) || dto.items.length < 1 || dto.items.length > 100) {
+    throw new Error('Douyin SKU replacement requires 1 to 100 SKUs');
+  }
+
+  const dimensions = new Map<
+    string,
+    {
+      propertyId: string;
+      propertyName: string;
+      values: Map<string, { valueId: string; valueName: string; remark: string | null }>;
+    }
+  >();
+  const nonCustomPropertyIds = new Set<string>();
+  const dimensionNames = new Set<string>();
+  const specValues = dto.dimensions.map((dimension) => {
+    const propertyId = strictPlatformNumericId(dimension.propertyId, 'SKU property ID', true);
+    const propertyName = strictSkuText(dimension.propertyName, 60, 'SKU property name');
+    const propertyIdentity = skuPropertyIdentity(propertyId, propertyName);
+    if (
+      dimensions.has(propertyIdentity) ||
+      (propertyId !== '0' && nonCustomPropertyIds.has(propertyId)) ||
+      dimensionNames.has(propertyName)
+    ) {
+      throw new Error('Douyin SKU replacement contains a duplicate property');
+    }
+    if (!Array.isArray(dimension.values) || !dimension.values.length) {
+      throw new Error('Douyin SKU replacement requires at least one value per dimension');
+    }
+    const values = new Map<string, { valueId: string; valueName: string; remark: string | null }>();
+    const nonCustomValueIds = new Set<string>();
+    const displayNames = new Set<string>();
+    const serializedValues = dimension.values.map((value) => {
+      const valueId = strictPlatformNumericId(value.valueId, 'SKU value ID', true);
+      const valueName = strictSkuText(value.valueName, 100, 'SKU value name');
+      const remark = optionalSkuText(value.remark, 100, 'SKU value remark');
+      const identity = skuValueIdentity(valueId, valueName, remark);
+      if (values.has(identity) || (valueId !== '0' && nonCustomValueIds.has(valueId))) {
+        throw new Error(`Douyin SKU replacement contains duplicate value ID: ${valueId}`);
+      }
+      const displayName = remark ?? valueName;
+      if (displayNames.has(displayName)) {
+        throw new Error(`Douyin SKU replacement contains duplicate display value: ${displayName}`);
+      }
+      values.set(identity, { valueId, valueName, remark });
+      if (valueId !== '0') nonCustomValueIds.add(valueId);
+      displayNames.add(displayName);
+      return {
+        value_id: valueId,
+        value_name: valueName,
+        ...(remark ? { remark } : {}),
+      };
+    });
+    dimensions.set(propertyIdentity, { propertyId, propertyName, values });
+    if (propertyId !== '0') nonCustomPropertyIds.add(propertyId);
+    dimensionNames.add(propertyName);
+    return { property_id: propertyId, property_name: propertyName, values: serializedValues };
+  });
+
+  const seenSkuIds = new Set<string>();
+  const seenSkuKeys = new Set<string>();
+  const seenCombinations = new Set<string>();
+  const specPrices = dto.items.map((item) => {
+    const platformSkuKey = strictExternalSkuId(item.platformSkuKey);
+    if (seenSkuKeys.has(platformSkuKey)) {
+      throw new Error(
+        `Douyin SKU replacement contains duplicate external SKU ID: ${platformSkuKey}`,
+      );
+    }
+    seenSkuKeys.add(platformSkuKey);
+    const platformSkuId =
+      item.platformSkuId === undefined
+        ? undefined
+        : strictPlatformNumericId(item.platformSkuId, 'SKU ID');
+    if (platformSkuId) {
+      if (seenSkuIds.has(platformSkuId)) {
+        throw new Error(`Douyin SKU replacement contains duplicate SKU ID: ${platformSkuId}`);
+      }
+      seenSkuIds.add(platformSkuId);
+    }
+    if (!Array.isArray(item.properties) || item.properties.length !== dimensions.size) {
+      throw new Error('Douyin SKU properties do not match the replacement dimensions');
+    }
+    const propertiesByIdentity = new Map(
+      item.properties.map((property) => [
+        skuPropertyIdentity(
+          strictPlatformNumericId(property.propertyId, 'SKU property ID', true),
+          strictSkuText(property.propertyName, 60, 'SKU property name'),
+        ),
+        property,
+      ]),
+    );
+    if (propertiesByIdentity.size !== item.properties.length) {
+      throw new Error('Douyin SKU replacement contains duplicate properties');
+    }
+    const properties = [...dimensions.values()].map((dimension) => {
+      const property = propertiesByIdentity.get(
+        skuPropertyIdentity(dimension.propertyId, dimension.propertyName),
+      );
+      const value = property
+        ? dimension.values.get(
+            skuValueIdentity(
+              strictPlatformNumericId(property.valueId, 'SKU value ID', true),
+              strictSkuText(property.valueName, 100, 'SKU value name'),
+              optionalSkuText(property.remark, 100, 'SKU value remark'),
+            ),
+          )
+        : undefined;
+      if (
+        !property ||
+        property.propertyName.trim() !== dimension.propertyName ||
+        !value ||
+        property.valueName.trim() !== value.valueName ||
+        property.remark !== value.remark
+      ) {
+        throw new Error('Douyin SKU property does not match the replacement dimensions');
+      }
+      return {
+        propertyId: dimension.propertyId,
+        valueId: value.valueId,
+        propertyName: dimension.propertyName,
+        valueName: value.valueName,
+        remark: value.remark,
+      };
+    });
+    const combination = canonicalJson(
+      properties.map((property) => [
+        property.propertyId,
+        property.propertyName,
+        property.valueId,
+        property.valueName,
+        property.remark,
+      ]),
+    );
+    if (seenCombinations.has(combination)) {
+      throw new Error('Douyin SKU replacement contains a duplicate property combination');
+    }
+    seenCombinations.add(combination);
+    if (typeof item.skuStatus !== 'boolean' || item.skuType !== 0) {
+      throw new Error('Douyin SKU replacement only supports ordinary SKUs');
+    }
+    const code = optionalSkuText(item.code, 128, 'SKU code');
+    const supplierId = optionalSkuText(item.supplierId, 128, 'supplier ID');
+    return {
+      ...(platformSkuId ? { sku_id: platformSkuId } : {}),
+      outer_sku_id: platformSkuKey,
+      sell_properties: properties.map((property) => ({
+        property_name: property.propertyName,
+        value_name: property.remark ?? property.valueName,
+      })),
+      price: positiveInteger(item.priceCents, 'SKU price in cents'),
+      stock_num: nonNegativeInteger(item.stock, 'SKU stock'),
+      sku_status: item.skuStatus,
+      sku_type: item.skuType,
+      code: code ?? '',
+      supplier_id: supplierId ?? '',
+      step_stock_num: nonNegativeInteger(item.stepStock, 'SKU step stock'),
+      barcodes: serializeSkuTextList(item.barcodes, 128, 'barcode'),
+      sku_picture_url: serializeSkuPictureUrls(item.skuPictureUrls),
+    };
+  });
+
+  return {
+    product_id: productId,
+    commit: true,
+    start_sale_type: 1,
+    spec_info: { spec_values: specValues },
+    spec_prices_v2: specPrices,
+  };
+}
+
+function strictSkuText(value: unknown, maxLength: number, label: string): string {
+  if (typeof value !== 'string') throw new Error(`Douyin ${label} is invalid`);
+  const text = value.trim();
+  if (!text || text.length > maxLength || /[\u0000-\u001f\u007f]/.test(text)) {
+    throw new Error(`Douyin ${label} is invalid`);
+  }
+  return text;
+}
+
+function optionalSkuText(value: unknown, maxLength: number, label: string): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  return strictSkuText(value, maxLength, label);
+}
+
+function parseSkuTextList(value: unknown, maxLength: number, label: string): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error(`Douyin SKU ${label} list is invalid`);
+  return uniqueStrictSkuTextList(value, maxLength, label);
+}
+
+function serializeSkuTextList(value: string[], maxLength: number, label: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`Douyin SKU ${label} list is invalid`);
+  return uniqueStrictSkuTextList(value, maxLength, label);
+}
+
+function uniqueStrictSkuTextList(value: unknown[], maxLength: number, label: string): string[] {
+  const result = value.map((item) => strictSkuText(item, maxLength, `SKU ${label}`));
+  if (new Set(result).size !== result.length) {
+    throw new Error(`Douyin SKU contains duplicate ${label}`);
+  }
+  return result;
+}
+
+function parseSkuPictureUrls(value: unknown): string[] {
+  if (value === undefined || value === null || value === '') return [];
+  const values = Array.isArray(value) ? value : [value];
+  return serializeSkuPictureUrls(values);
+}
+
+function serializeSkuPictureUrls(value: unknown[]): string[] {
+  if (!Array.isArray(value)) throw new Error('Douyin SKU picture URL list is invalid');
+  const urls = value.map((item) => strictSkuText(item, 2048, 'SKU picture URL'));
+  if (new Set(urls).size !== urls.length || urls.some((url) => !isHttpUrl(url))) {
+    throw new Error('Douyin SKU picture URL is invalid');
+  }
+  return urls;
+}
+
+function hasMeaningfulValue(value: unknown): boolean {
+  if (value === undefined || value === null || value === false || value === 0 || value === '') {
+    return false;
+  }
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value as object).length > 0;
+  return true;
+}
+
+function assertOnlyKnownMeaningfulFields(
+  record: Record<string, unknown>,
+  knownFields: ReadonlySet<string>,
+  message: string,
+): void {
+  for (const [key, value] of Object.entries(record)) {
+    if (hasMeaningfulValue(value) && !knownFields.has(key)) {
+      throw new Error(`${message}: ${key.slice(0, 100)}`);
+    }
+  }
 }
 
 function mapCategoryAttribute(value: unknown): CategoryAttr[] {
@@ -2226,6 +3152,12 @@ function boundedText(value: unknown, maxLength: number, label: string): string {
 }
 
 function strictExternalSkuId(value: unknown): string {
+  if (
+    (typeof value !== 'string' && typeof value !== 'number') ||
+    (typeof value === 'number' && !Number.isSafeInteger(value))
+  ) {
+    throw new Error('Douyin external SKU ID is invalid');
+  }
   const sourceSkuId = stringValue(value).trim();
   if (!sourceSkuId || sourceSkuId.length > 128 || /[\u0000-\u001f\u007f]/.test(sourceSkuId)) {
     throw new Error('Douyin external SKU ID is invalid');

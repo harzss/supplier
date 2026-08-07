@@ -1,21 +1,21 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type Redis from 'ioredis';
 import { PrismaService } from '../../common/prisma.module';
-import { REDIS_CLIENT } from '../../common/redis.module';
+import { RuntimeStateService } from '../../common/runtime-state.service';
 import { AlertService } from '../observability/alert.service';
 
 type DependencyStatus = { status: 'up' } | { status: 'down' };
 
-export const LATEST_REQUIRED_MIGRATION = '20260805040000_harden_workflow_check_null_semantics';
+export const LATEST_REQUIRED_MIGRATION = '20260807150000_add_runtime_state_store';
 
 export interface ReadinessResult {
   status: 'ready' | 'unavailable';
   service: 'supplier-bff';
   version: string;
+  revision?: string;
   checks: {
     database: DependencyStatus;
-    redis: DependencyStatus;
+    runtimeState: DependencyStatus;
   };
   timestamp: string;
   durationMs: number;
@@ -25,14 +25,16 @@ export interface ReadinessResult {
 export class HealthService {
   private readonly logger = new Logger(HealthService.name);
   private readonly timeoutMs: number;
+  private readonly revision: string | undefined;
 
   constructor(
     private readonly prisma: PrismaService,
-    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly runtimeState: RuntimeStateService,
     config: ConfigService,
     private readonly alerts: AlertService,
   ) {
     this.timeoutMs = config.get<number>('HEALTH_CHECK_TIMEOUT_MS') ?? 2_000;
+    this.revision = config.get<string>('SUPPLIER_GIT_SHA');
   }
 
   liveness() {
@@ -40,24 +42,29 @@ export class HealthService {
       status: 'ok' as const,
       service: 'supplier-bff' as const,
       version: '0.0.1',
+      revision: this.revision,
       timestamp: new Date().toISOString(),
     };
   }
 
   async readiness(): Promise<ReadinessResult> {
     const startedAt = Date.now();
-    const [database, redis] = await Promise.all([
+    const [database, runtimeState] = await Promise.all([
       this.check('database', () => this.checkDatabase()),
-      this.check('redis', () => this.redis.ping()),
+      this.check('runtime_state', () => this.runtimeState.ping()),
     ]);
-    const ready = database.status === 'up' && redis.status === 'up';
+    const ready = database.status === 'up' && runtimeState.status === 'up';
     void this.updateDependencyAlert('database', database);
-    void this.updateDependencyAlert('redis', redis);
+    void this.updateDependencyAlert('runtime_state', runtimeState);
+    if (runtimeState.status === 'up') {
+      void this.alerts.resolve('dependency.redis.down', { status: 'retired' });
+    }
     return {
       status: ready ? 'ready' : 'unavailable',
       service: 'supplier-bff',
       version: '0.0.1',
-      checks: { database, redis },
+      revision: this.revision,
+      checks: { database, runtimeState },
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
     };
@@ -78,7 +85,7 @@ export class HealthService {
   }
 
   private async updateDependencyAlert(
-    name: 'database' | 'redis',
+    name: 'database' | 'runtime_state',
     status: DependencyStatus,
   ): Promise<void> {
     const key = `dependency.${name}.down`;
@@ -90,7 +97,7 @@ export class HealthService {
       key,
       type: 'dependency',
       severity: 'critical',
-      summary: `${name === 'database' ? 'PostgreSQL' : 'Redis'} readiness 检查失败`,
+      summary: `${name === 'database' ? 'Supabase PostgreSQL' : 'PostgreSQL runtime state'} readiness 检查失败`,
       details: { status: 'down' },
     });
   }

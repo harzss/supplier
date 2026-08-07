@@ -30,6 +30,10 @@ const EXPECTED_ASSERTIONS = Object.freeze([
   'assert-workflow-check-constraints.sql',
   'assert-33-to-43-upgrade-data.sql',
 ]);
+const EXPECTED_FORWARD_ASSERTIONS = Object.freeze([
+  'assert-43-to-44-sku-edits.sql',
+  'assert-44-to-45-runtime-state.sql',
+]);
 const ARCHIVE_LIST = `
 ; local restore rehearsal fixture
 1; 1259 1 TABLE public _prisma_migrations postgres
@@ -38,15 +42,16 @@ const ARCHIVE_LIST = `
 4; 0 2 TABLE DATA public source_products postgres
 `;
 const PRISMA_MIGRATIONS_PATH = join(dirname(PRISMA_SCHEMA_PATH), 'migrations');
-const EXPECTED_MIGRATION_BASELINE = await readExpectedMigrationBaseline();
+const EXPECTED_MIGRATION_BASELINE = await readExpectedMigrationBaseline(33);
+const EXPECTED_HISTORICAL_MIGRATION_BASELINE = await readExpectedMigrationBaseline(43);
 
-async function readExpectedMigrationBaseline() {
+async function readExpectedMigrationBaseline(count) {
   const entries = await readdir(PRISMA_MIGRATIONS_PATH, { withFileTypes: true });
   const migrationNames = entries
     .filter((entry) => entry.isDirectory() && /^\d{14}_[a-z0-9_]+$/.test(entry.name))
     .map((entry) => entry.name)
     .sort()
-    .slice(0, 33);
+    .slice(0, count);
   return Promise.all(
     migrationNames.map(async (migrationName) => ({
       migrationName,
@@ -107,6 +112,14 @@ function rehearsalArgs(archive) {
 function assertionArgs() {
   return [
     'post-upgrade-assert',
+    `--confirm-database=${DATABASE}`,
+    `--confirm-container=${CONTAINER}`,
+  ];
+}
+
+function forwardRehearsalArgs() {
+  return [
+    'rehearse-forward-sku-edits',
     `--confirm-database=${DATABASE}`,
     `--confirm-container=${CONTAINER}`,
   ];
@@ -225,7 +238,7 @@ async function temporaryDirectory(context) {
   return directory;
 }
 
-test('accepts only rehearse, restore, and post-upgrade-assert with exact arguments', () => {
+test('accepts only the four closed restore operations with exact arguments', () => {
   assert.deepEqual(
     readRestoreRehearsalOptions([
       'rehearse',
@@ -259,6 +272,11 @@ test('accepts only rehearse, restore, and post-upgrade-assert with exact argumen
     confirmedContainer: CONTAINER,
     confirmedDatabase: DATABASE,
   });
+  assert.deepEqual(readRestoreRehearsalOptions(forwardRehearsalArgs()), {
+    action: 'rehearse-forward-sku-edits',
+    confirmedContainer: CONTAINER,
+    confirmedDatabase: DATABASE,
+  });
 
   for (const args of [
     [],
@@ -277,6 +295,7 @@ test('accepts only rehearse, restore, and post-upgrade-assert with exact argumen
     ['restore', '--archive=/private/tmp/staging.dump', `--confirm-database=${DATABASE}`],
     [...assertionArgs(), '--file=unsafe.sql'],
     ['post-upgrade-assert', `--confirm-database=${DATABASE}`],
+    [...forwardRehearsalArgs(), '--archive=/private/tmp/staging.dump'],
     ['psql', `--confirm-database=${DATABASE}`, `--confirm-container=${CONTAINER}`],
     ['post-upgrade-assert', `--confirm-database=${DATABASE}`, '--confirm-container=unsafe/name'],
   ]) {
@@ -734,6 +753,81 @@ test('runs restore, migration verification, and assertions against one fixed con
   for (const call of containerCalls.slice(1)) assert.equal(call.args.at(-1), CONTAINER_ID);
 
   const prismaCalls = operations.filter(({ command }) => command === process.execPath);
+  const historicalSchemaPath = prismaCalls[0].args.at(-1);
+  assert.notEqual(historicalSchemaPath, PRISMA_SCHEMA_PATH);
+  assert.match(historicalSchemaPath, /supplier-restore-migrations-43-[^/]+\/schema\.prisma$/);
+  assert.deepEqual(
+    prismaCalls.map(({ args }) => args),
+    [
+      [PRISMA_CLI_PATH, 'migrate', 'deploy', '--schema', historicalSchemaPath],
+      [PRISMA_CLI_PATH, 'migrate', 'status', '--schema', historicalSchemaPath],
+      [
+        PRISMA_CLI_PATH,
+        'migrate',
+        'diff',
+        '--exit-code',
+        '--from-schema-datasource',
+        historicalSchemaPath,
+        '--to-schema-datamodel',
+        historicalSchemaPath,
+      ],
+    ],
+  );
+  for (const call of prismaCalls) {
+    assert.deepEqual(call.options.env, {
+      DATABASE_URL: `postgresql://restore_user:local%3Ap%40ssword@127.0.0.1:5432/${DATABASE}?schema=public&connect_timeout=10&sslmode=disable`,
+      DIRECT_URL: `postgresql://restore_user:local%3Ap%40ssword@127.0.0.1:5432/${DATABASE}?schema=public&connect_timeout=10&sslmode=disable`,
+      LC_ALL: 'C',
+      PRISMA_HIDE_UPDATE_MESSAGE: '1',
+    });
+    assert.equal(call.options.timeout, 300_000);
+    assert.equal(call.options.cwd, REPOSITORY_ROOT);
+    assert.doesNotMatch(call.args.join(' '), /postgres(?:ql)?:\/\//);
+    assert.doesNotMatch(call.args.join(' '), new RegExp(PASSWORD));
+  }
+  await assert.rejects(readFile(historicalSchemaPath), { code: 'ENOENT' });
+});
+
+test('applies only migrations 44 and 45 to an exact local migration 43 baseline', async () => {
+  const fake = createFakeSpawn({
+    databaseProbes: [
+      { userObjectCount: 8, prismaMigrationTableExists: true },
+      { userObjectCount: 8, prismaMigrationTableExists: true },
+    ],
+    migrationBaseline: EXPECTED_HISTORICAL_MIGRATION_BASELINE,
+  });
+
+  const result = await runRestoreRehearsal({
+    args: forwardRehearsalArgs(),
+    environment: localEnvironment(),
+    spawnSync: fake.spawnSync,
+  });
+  const operations = fake.calls.filter(({ args }) => args[0] !== '--version');
+
+  assert.deepEqual(result, {
+    action: 'rehearse-forward-sku-edits',
+    database: DATABASE,
+    completedAssertions: EXPECTED_FORWARD_ASSERTIONS,
+    prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
+  });
+  assert.deepEqual(operations.map(describeOperation), [
+    ...FIRST_DOCKER_CHECKS,
+    'psql:database-check',
+    'psql:migration-baseline',
+    ...DOCKER_CHECKS,
+    'prisma:migrate deploy',
+    ...DOCKER_CHECKS,
+    'prisma:migrate status',
+    ...DOCKER_CHECKS,
+    'prisma:migrate diff',
+    ...DOCKER_CHECKS,
+    'psql:database-check',
+    ...DOCKER_CHECKS,
+    'psql:assert',
+    ...DOCKER_CHECKS,
+    'psql:assert',
+  ]);
+  const prismaCalls = operations.filter(({ command }) => command === process.execPath);
   assert.deepEqual(
     prismaCalls.map(({ args }) => args),
     [
@@ -751,18 +845,28 @@ test('runs restore, migration verification, and assertions against one fixed con
       ],
     ],
   );
-  for (const call of prismaCalls) {
-    assert.deepEqual(call.options.env, {
-      DATABASE_URL: `postgresql://restore_user:local%3Ap%40ssword@127.0.0.1:5432/${DATABASE}?schema=public&connect_timeout=10&sslmode=disable`,
-      DIRECT_URL: `postgresql://restore_user:local%3Ap%40ssword@127.0.0.1:5432/${DATABASE}?schema=public&connect_timeout=10&sslmode=disable`,
-      LC_ALL: 'C',
-      PRISMA_HIDE_UPDATE_MESSAGE: '1',
-    });
-    assert.equal(call.options.timeout, 300_000);
-    assert.equal(call.options.cwd, REPOSITORY_ROOT);
-    assert.doesNotMatch(call.args.join(' '), /postgres(?:ql)?:\/\//);
-    assert.doesNotMatch(call.args.join(' '), new RegExp(PASSWORD));
-  }
+  const assertionCall = operations.at(-1);
+  assert.equal(assertionCall.options.env.PGOPTIONS, '-c default_transaction_read_only=on');
+});
+
+test('refuses the forward migration unless the local database exactly matches migration 43', async () => {
+  const fake = createFakeSpawn({
+    databaseProbes: [{ userObjectCount: 8, prismaMigrationTableExists: true }],
+    migrationBaseline: EXPECTED_HISTORICAL_MIGRATION_BASELINE.slice(0, -1),
+  });
+
+  await assert.rejects(
+    runRestoreRehearsal({
+      args: forwardRehearsalArgs(),
+      environment: localEnvironment(),
+      spawnSync: fake.spawnSync,
+    }),
+    /exactly match the first 43 repository migrations/,
+  );
+  assert.equal(
+    fake.calls.some((call) => describeOperation(call) === 'prisma:migrate deploy'),
+    false,
+  );
 });
 
 test('refuses migration when the restored state or original container identity is lost', async (context) => {

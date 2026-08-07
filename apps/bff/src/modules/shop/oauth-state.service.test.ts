@@ -1,6 +1,6 @@
 import type { ConfigService } from '@nestjs/config';
-import type Redis from 'ioredis';
 import { describe, expect, it } from 'vitest';
+import type { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAuthConfigService } from './oauth-config.service';
 import { OAuthStateService, type OAuthResultData } from './oauth-state.service';
 
@@ -14,34 +14,38 @@ const SUCCESS_RESULT: OAuthResultData = {
   shopName: '测试店铺',
 };
 
-class FakeRedis {
+class FakeRuntimeState {
   readonly values = new Map<string, string>();
-  readonly setCalls: Array<{ key: string; args: unknown[] }> = [];
+  readonly storeCalls: Array<{ key: string; ttlMs: number }> = [];
   fail = false;
 
-  async set(key: string, value: string, ...args: unknown[]): Promise<'OK'> {
-    if (this.fail) throw new Error('redis down');
-    this.setCalls.push({ key, args });
+  async storeIfAbsent(key: string, value: string, ttlMs: number): Promise<boolean> {
+    if (this.fail) throw new Error('runtime state down');
+    if (this.values.has(key)) return false;
+    this.storeCalls.push({ key, ttlMs });
     this.values.set(key, value);
-    return 'OK';
+    return true;
   }
 
-  async getdel(key: string): Promise<string | null> {
-    if (this.fail) throw new Error('redis down');
+  async consume<T>(key: string): Promise<T | null> {
+    if (this.fail) throw new Error('runtime state down');
     const value = this.values.get(key) ?? null;
     this.values.delete(key);
-    return value;
+    return value as T | null;
   }
 }
 
-function makeService(redis = new FakeRedis()) {
+function makeService(runtimeState = new FakeRuntimeState()) {
   const values: Record<string, string> = {
     OAUTH_CALLBACK_ALLOWLIST: `${CALLBACK},${ALIBABA_1688_CALLBACK}`,
     OAUTH_STATE_TTL_SECONDS: '300',
   };
   const config = { get: (key: string) => values[key] } as unknown as ConfigService;
   const oauthConfig = new OAuthConfigService(config);
-  return { service: new OAuthStateService(redis as unknown as Redis, oauthConfig), redis };
+  return {
+    service: new OAuthStateService(runtimeState as unknown as RuntimeStateService, oauthConfig),
+    runtimeState,
+  };
 }
 
 describe('OAuthStateService', () => {
@@ -90,13 +94,16 @@ describe('OAuthStateService', () => {
     ).rejects.toThrow('OAuth state is invalid or expired');
   });
 
-  it('rejects an expired stored state even when Redis still returns it', async () => {
-    const { service, redis } = makeService();
+  it('rejects an expired stored state even when the state store still returns it', async () => {
+    const { service, runtimeState } = makeService();
     const state = await service.issue(42n, 'douyin', CALLBACK, RETURN_TO);
-    const [key, raw] = [...redis.values.entries()][0] ?? [];
+    const [key, raw] = [...runtimeState.values.entries()][0] ?? [];
     expect(key).toBeDefined();
     expect(raw).toBeDefined();
-    redis.values.set(key!, JSON.stringify({ ...JSON.parse(raw!), expiresAt: Date.now() - 1 }));
+    runtimeState.values.set(
+      key!,
+      JSON.stringify({ ...JSON.parse(raw!), expiresAt: Date.now() - 1 }),
+    );
 
     await expect(service.consume(state, 'douyin', CALLBACK)).rejects.toThrow(
       'OAuth state is invalid or expired',
@@ -118,12 +125,15 @@ describe('OAuthStateService', () => {
   });
 
   it('rejects a return target that is unsafe when the state is consumed', async () => {
-    const { service, redis } = makeService();
+    const { service, runtimeState } = makeService();
     const state = await service.issue(1n, 'douyin', CALLBACK, RETURN_TO);
-    const [key, raw] = [...redis.values.entries()][0] ?? [];
+    const [key, raw] = [...runtimeState.values.entries()][0] ?? [];
     expect(key).toBeDefined();
     expect(raw).toBeDefined();
-    redis.values.set(key!, JSON.stringify({ ...JSON.parse(raw!), returnTo: '//evil.example.com' }));
+    runtimeState.values.set(
+      key!,
+      JSON.stringify({ ...JSON.parse(raw!), returnTo: '//evil.example.com' }),
+    );
 
     await expect(service.consume(state, 'douyin', CALLBACK)).rejects.toThrow(
       'OAuth state is invalid or expired',
@@ -131,14 +141,14 @@ describe('OAuthStateService', () => {
   });
 
   it('falls back safely for a state issued before return targets were stored', async () => {
-    const { service, redis } = makeService();
+    const { service, runtimeState } = makeService();
     const state = await service.issue(1n, 'douyin', CALLBACK, RETURN_TO);
-    const [key, raw] = [...redis.values.entries()][0] ?? [];
+    const [key, raw] = [...runtimeState.values.entries()][0] ?? [];
     expect(key).toBeDefined();
     expect(raw).toBeDefined();
     const legacyPayload = JSON.parse(raw!);
     delete legacyPayload.returnTo;
-    redis.values.set(key!, JSON.stringify(legacyPayload));
+    runtimeState.values.set(key!, JSON.stringify(legacyPayload));
 
     const payload = await service.consume(state, 'douyin', CALLBACK);
 
@@ -146,33 +156,33 @@ describe('OAuthStateService', () => {
   });
 
   it('rejects a stored return target with a non-string type', async () => {
-    const { service, redis } = makeService();
+    const { service, runtimeState } = makeService();
     const state = await service.issue(1n, 'douyin', CALLBACK, RETURN_TO);
-    const [key, raw] = [...redis.values.entries()][0] ?? [];
+    const [key, raw] = [...runtimeState.values.entries()][0] ?? [];
     expect(key).toBeDefined();
     expect(raw).toBeDefined();
-    redis.values.set(key!, JSON.stringify({ ...JSON.parse(raw!), returnTo: 42 }));
+    runtimeState.values.set(key!, JSON.stringify({ ...JSON.parse(raw!), returnTo: 42 }));
 
     await expect(service.consume(state, 'douyin', CALLBACK)).rejects.toThrow(
       'OAuth state is invalid or expired',
     );
   });
 
-  it('fails closed when Redis is unavailable', async () => {
-    const { service, redis } = makeService();
-    redis.fail = true;
+  it('fails closed when runtime state is unavailable', async () => {
+    const { service, runtimeState } = makeService();
+    runtimeState.fail = true;
     await expect(service.issue(1n, 'douyin', CALLBACK)).rejects.toThrow(
       'OAuth state store is unavailable',
     );
   });
 
   it('issues a separate 256-bit one-time result token bound to the user and success result', async () => {
-    const { service, redis } = makeService();
+    const { service, runtimeState } = makeService();
     const state = await service.issue(42n, 'douyin', CALLBACK, RETURN_TO);
     const token = await service.issueResult(42n, SUCCESS_RESULT);
-    const resultSet = redis.setCalls.find((call) => call.key.startsWith('oauth:result:'));
-    expect(redis.setCalls.some((call) => call.key.startsWith('oauth:state:'))).toBe(true);
-    expect(resultSet?.args).toEqual(['EX', 300, 'NX']);
+    const resultSet = runtimeState.storeCalls.find((call) => call.key.startsWith('oauth:result:'));
+    expect(runtimeState.storeCalls.some((call) => call.key.startsWith('oauth:state:'))).toBe(true);
+    expect(resultSet?.ttlMs).toBe(300_000);
     const payload = await service.consumeResult(token, 42n);
 
     expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
@@ -222,14 +232,17 @@ describe('OAuthStateService', () => {
   });
 
   it('rejects an expired stored result', async () => {
-    const { service, redis } = makeService();
+    const { service, runtimeState } = makeService();
     const token = await service.issueResult(42n, SUCCESS_RESULT);
-    const [key, raw] = [...redis.values.entries()].find(([entryKey]) =>
+    const [key, raw] = [...runtimeState.values.entries()].find(([entryKey]) =>
       entryKey.startsWith('oauth:result:'),
     ) ?? [undefined, undefined];
     expect(key).toBeDefined();
     expect(raw).toBeDefined();
-    redis.values.set(key!, JSON.stringify({ ...JSON.parse(raw!), expiresAt: Date.now() - 1 }));
+    runtimeState.values.set(
+      key!,
+      JSON.stringify({ ...JSON.parse(raw!), expiresAt: Date.now() - 1 }),
+    );
 
     await expect(service.consumeResult(token, 42n)).rejects.toThrow(
       'OAuth result is invalid or expired',
@@ -237,8 +250,8 @@ describe('OAuthStateService', () => {
   });
 
   it('fails closed when the result store is unavailable', async () => {
-    const { service, redis } = makeService();
-    redis.fail = true;
+    const { service, runtimeState } = makeService();
+    runtimeState.fail = true;
 
     await expect(service.issueResult(42n, SUCCESS_RESULT)).rejects.toThrow(
       'OAuth result store is unavailable',

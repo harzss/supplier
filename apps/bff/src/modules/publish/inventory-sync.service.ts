@@ -20,7 +20,11 @@ import {
 } from '../shop/platform-adapter.factory';
 import { ShopTokenService } from '../shop/shop-token.service';
 import { PlatformProductLockService } from './platform-product-lock.service';
-import { OFFLINE_BATCH_ACTIONS, UNRESOLVED_OFFLINE_CODES } from './product-batch-fences';
+import {
+  OFFLINE_BATCH_ACTIONS,
+  UNRESOLVED_OFFLINE_CODES,
+  UNRESOLVED_SKU_CODES,
+} from './product-batch-fences';
 import { parseSourceBindingRoutes, SourceBindingValidationError } from './source-binding';
 
 const STALE_LOCK_MS = 5 * 60_000;
@@ -63,6 +67,7 @@ interface SourceBindingLike extends SourceBindingGuard {
   skuRoutes?: Prisma.JsonValue;
   sourceProduct?: {
     skuList: Prisma.JsonValue | null;
+    totalStock: number;
   };
 }
 
@@ -114,8 +119,16 @@ export class InventorySyncService {
           batchItems: {
             none: {
               status: { in: ['running', 'retry_wait', 'failed'] },
-              errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
-              task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+              OR: [
+                {
+                  errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
+                  task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+                },
+                {
+                  errorCode: { in: [...UNRESOLVED_SKU_CODES] },
+                  task: { action: 'edit_sku' },
+                },
+              ],
             },
           },
           ...(this.demoMode ? {} : { shop: runtimeShopWhere(this.demoMode) }),
@@ -136,8 +149,16 @@ export class InventorySyncService {
           batchItems: {
             none: {
               status: { in: ['running', 'retry_wait', 'failed'] },
-              errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
-              task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+              OR: [
+                {
+                  errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
+                  task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+                },
+                {
+                  errorCode: { in: [...UNRESOLVED_SKU_CODES] },
+                  task: { action: 'edit_sku' },
+                },
+              ],
             },
           },
           ...sourceBindingOwnershipWhere(sourceBindingGuard),
@@ -177,8 +198,16 @@ export class InventorySyncService {
           batchItems: {
             where: {
               status: { in: ['running', 'retry_wait', 'failed'] },
-              errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
-              task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+              OR: [
+                {
+                  errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
+                  task: { action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+                },
+                {
+                  errorCode: { in: [...UNRESOLVED_SKU_CODES] },
+                  task: { action: 'edit_sku' },
+                },
+              ],
             },
             take: 1,
             select: { id: true },
@@ -215,7 +244,7 @@ export class InventorySyncService {
             inventoryNextRunAt: new Date(Date.now() + 60_000),
             inventoryLockedAt: null,
             inventoryLockedBy: null,
-            inventorySyncError: '商品下架结果待核验，库存同步已暂停',
+            inventorySyncError: '商品平台写入结果待核验，库存同步已暂停',
           },
         });
         return 'stale';
@@ -781,8 +810,20 @@ function boundInventoryItems(
     throw error;
   }
   const sourceItems = sourceInventoryItems(binding.sourceProduct.skuList);
-  if (!sourceItems || routes.length === 0) {
+  if (routes.length === 0) {
     return { kind: 'sku_changed' };
+  }
+  if (!sourceItems) {
+    const defaultRoute = routes.length === 1 ? routes[0]! : null;
+    const totalStock = stockValue(binding.sourceProduct.totalStock);
+    return (binding.sourceProduct.skuList === null ||
+      (Array.isArray(binding.sourceProduct.skuList) &&
+        binding.sourceProduct.skuList.length === 0)) &&
+      defaultRoute?.sourceSpecId === null &&
+      defaultRoute.sourceSpecRequired === false &&
+      totalStock !== null
+      ? { kind: 'items', items: [{ sourceSkuId: defaultRoute.platformSkuKey, stock: totalStock }] }
+      : { kind: 'sku_changed' };
   }
 
   const sourceStock = new Map(sourceItems.map((item) => [item.sourceSkuId, item.stock]));

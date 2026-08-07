@@ -19,6 +19,7 @@ import test from 'node:test';
 
 import {
   AUDIT_STAGING_PATH,
+  EXPECTED_STAGING_FORWARD_MIGRATIONS,
   EXPECTED_STAGING_PENDING_MIGRATIONS,
   LIBPQ_BIN_DIR,
   PRISMA_CLI_PATH,
@@ -38,6 +39,10 @@ const EXPECTED_ASSERTION_BASENAMES = Object.freeze([
   'assert-public-schema-isolation.sql',
   'assert-workflow-check-constraints.sql',
   'assert-33-to-43-upgrade-data.sql',
+]);
+const FORWARD_ASSERTIONS = Object.freeze([
+  'assert-43-to-44-sku-edits.sql',
+  'assert-44-to-45-runtime-state.sql',
 ]);
 const ARCHIVE_LIST = `
 ; Archive created at 2026-08-05 00:00:00 UTC
@@ -110,7 +115,7 @@ async function temporaryDirectory(context) {
   return directory;
 }
 
-test('accepts only the three closed operations with exact arguments', () => {
+test('accepts only the four closed operations with exact arguments', () => {
   assert.deepEqual(
     readStagingLibpqOptions([
       'backup',
@@ -127,6 +132,13 @@ test('accepts only the three closed operations with exact arguments', () => {
     action: 'migrate-once',
     confirmedProjectRef: PROJECT_REF,
   });
+  assert.deepEqual(
+    readStagingLibpqOptions(['migrate-forward-once', `--confirm-project=${PROJECT_REF}`]),
+    {
+      action: 'migrate-forward-once',
+      confirmedProjectRef: PROJECT_REF,
+    },
+  );
   assert.deepEqual(
     readStagingLibpqOptions(['post-upgrade-assert', `--confirm-project=${PROJECT_REF}`]),
     { action: 'post-upgrade-assert', confirmedProjectRef: PROJECT_REF },
@@ -290,6 +302,126 @@ test('runs the full read-only audit and exact 34-to-43 status gate before migrat
     );
     assert.equal(call.args.join(' ').includes(PASSWORD), false);
   }
+});
+
+test('applies only migrations 44 and 45 from a verified 43 baseline and runs forward checks', async (context) => {
+  const directory = await temporaryDirectory(context);
+  const safeDotenv = join(directory, '.env');
+  await writeFile(
+    safeDotenv,
+    'DATABASE_URL="postgresql://safe.invalid/database"\nDIRECT_URL="postgresql://safe.invalid/database"\n',
+  );
+  const calls = [];
+  let statusCalls = 0;
+  const spawnSync = (command, args, options) => {
+    calls.push({ command, args, options });
+    if (args[0] === AUDIT_STAGING_PATH) return successfulResult();
+    if (args[1] === 'migrate' && args[2] === 'status') {
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        return successfulResult({
+          status: 1,
+          stdout:
+            '45 migrations found in prisma/migrations\n' +
+            'Following migrations have not yet been applied:\n' +
+            `${EXPECTED_STAGING_FORWARD_MIGRATIONS.join('\n')}\n`,
+        });
+      }
+      return successfulResult({ stdout: 'Database schema is up to date!\n' });
+    }
+    if (args[1] === 'migrate' && args[2] === 'deploy') return successfulResult();
+    if (args[1] === 'migrate' && args[2] === 'diff') return successfulResult();
+    if (args[1] === 'db' && args[2] === 'execute') return successfulResult();
+    throw new Error(`Unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  const result = await runStagingLibpq({
+    args: ['migrate-forward-once', `--confirm-project=${PROJECT_REF}`],
+    environment: stagingEnvironment(),
+    platform: 'linux',
+    prismaDotenvCandidates: [safeDotenv],
+    spawnSync,
+  });
+
+  assert.deepEqual(result, {
+    action: 'migrate-forward-once',
+    projectRef: PROJECT_REF,
+    verifiedMigrationCount: 2,
+    completedAssertions: FORWARD_ASSERTIONS,
+    prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
+  });
+  assert.deepEqual(
+    calls.map(({ args }) => args.slice(0, 3).join(' ')),
+    [
+      `${AUDIT_STAGING_PATH} --allow-pending`,
+      `${PRISMA_CLI_PATH} migrate status`,
+      `${PRISMA_CLI_PATH} migrate deploy`,
+      `${PRISMA_CLI_PATH} migrate status`,
+      `${PRISMA_CLI_PATH} migrate diff`,
+      `${PRISMA_CLI_PATH} db execute`,
+      `${PRISMA_CLI_PATH} db execute`,
+    ],
+  );
+  const assertionCalls = calls.slice(-FORWARD_ASSERTIONS.length);
+  assert.deepEqual(
+    assertionCalls.map(({ args }) => args),
+    FORWARD_ASSERTIONS.map((assertion) => [
+      PRISMA_CLI_PATH,
+      'db',
+      'execute',
+      '--file',
+      join(dirname(PRISMA_SCHEMA_PATH), '..', 'scripts', assertion),
+      '--schema',
+      PRISMA_SCHEMA_PATH,
+    ]),
+  );
+  for (const assertionCall of assertionCalls) {
+    assert.equal(assertionCall.options.env.PGOPTIONS, undefined);
+    assert.deepEqual(Object.keys(assertionCall.options.env).sort(), [
+      'DATABASE_URL',
+      'DIRECT_URL',
+      'LC_ALL',
+      'PRISMA_HIDE_UPDATE_MESSAGE',
+    ]);
+    assert.equal(assertionCall.options.timeout, 60_000);
+  }
+});
+
+test('refuses the forward migration unless Prisma reports exactly migrations 44 and 45 pending', async (context) => {
+  const directory = await temporaryDirectory(context);
+  const safeDotenv = join(directory, '.env');
+  await writeFile(safeDotenv, 'DATABASE_URL="postgresql://safe.invalid/database"\n');
+  const calls = [];
+  const spawnSync = (command, args, options) => {
+    calls.push({ command, args, options });
+    if (args[0] === AUDIT_STAGING_PATH) return successfulResult();
+    if (args[1] === 'migrate' && args[2] === 'status') {
+      return successfulResult({
+        status: 1,
+        stdout:
+          '45 migrations found in prisma/migrations\n' +
+          'Following migrations have not yet been applied:\n' +
+          `${EXPECTED_STAGING_PENDING_MIGRATIONS.at(-1)}\n` +
+          `${EXPECTED_STAGING_FORWARD_MIGRATIONS.join('\n')}\n`,
+      });
+    }
+    throw new Error(`Unexpected command: ${command} ${args.join(' ')}`);
+  };
+
+  await assert.rejects(
+    runStagingLibpq({
+      args: ['migrate-forward-once', `--confirm-project=${PROJECT_REF}`],
+      environment: stagingEnvironment(),
+      platform: 'linux',
+      prismaDotenvCandidates: [safeDotenv],
+      spawnSync,
+    }),
+    /did not report the expected pending migration suffix/,
+  );
+  assert.equal(
+    calls.some(({ args }) => args[2] === 'deploy'),
+    false,
+  );
 });
 
 test('refuses migrate-once outside the verified Linux maintenance runtime', async () => {

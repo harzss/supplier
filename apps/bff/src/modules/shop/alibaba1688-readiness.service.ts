@@ -1,8 +1,7 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type Redis from 'ioredis';
-import { REDIS_CLIENT } from '../../common/redis.module';
 import { PrismaService } from '../../common/prisma.module';
+import { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAuthConfigService } from './oauth-config.service';
 
 export interface Alibaba1688ReadinessCheck {
@@ -33,12 +32,15 @@ export class Alibaba1688ReadinessService {
     private readonly config: ConfigService,
     private readonly oauthConfig: OAuthConfigService,
     private readonly prisma: PrismaService,
-    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly runtimeState: RuntimeStateService,
   ) {}
 
   async get(userId: bigint): Promise<Alibaba1688ReadinessView> {
-    const checks = this.configChecks();
-    const [buyer, unstructuredOrders, unmappedOrderItems] = await Promise.all([
+    const [runtimeStateReady, buyer, unstructuredOrders, unmappedOrderItems] = await Promise.all([
+      this.runtimeState.ping().then(
+        () => true,
+        () => false,
+      ),
       this.prisma.shop.findFirst({
         where: {
           userId,
@@ -91,6 +93,7 @@ export class Alibaba1688ReadinessService {
         },
       }),
     ]);
+    const checks = this.configChecks(runtimeStateReady);
     const buyerReady =
       !!buyer && buyer.status === 'active' && !!buyer.accessTokenEnc && !!buyer.refreshTokenEnc;
     checks.push({
@@ -140,7 +143,7 @@ export class Alibaba1688ReadinessService {
     };
   }
 
-  private configChecks(): Alibaba1688ReadinessCheck[] {
+  private configChecks(runtimeStateReady: boolean): Alibaba1688ReadinessCheck[] {
     const credentials = ['ALIBABA_1688_APP_KEY', 'ALIBABA_1688_APP_SECRET'];
     const missingCredentials = credentials.filter((key) => !this.hasValue(key));
     const callbackUri = this.value('ALIBABA_1688_OAUTH_REDIRECT_URI');
@@ -148,12 +151,11 @@ export class Alibaba1688ReadinessService {
       !!callbackUri && safeCheck(() => this.oauthConfig.assertAllowedCallback(callbackUri));
     const resultRedirectReady = safeCheck(() => this.oauthConfig.buildResultRedirect({}));
     const encryptionReady = this.hasValue('ENCRYPTION_KEY');
-    const redisReady = this.redis.status === 'ready';
     const securityMissing = [
       ...(callbackReady ? [] : ['OAuth 回调白名单']),
       ...(resultRedirectReady ? [] : ['Web 返回地址']),
       ...(encryptionReady ? [] : ['ENCRYPTION_KEY']),
-      ...(redisReady ? [] : ['Redis state 存储']),
+      ...(runtimeStateReady ? [] : ['Supabase runtime state 存储']),
     ];
     const paymentMode = this.value('ALIBABA_1688_PAYMENT_MODE');
     const purchaseEnabled = this.value('ALIBABA_1688_PURCHASE_ENABLED') === 'true';

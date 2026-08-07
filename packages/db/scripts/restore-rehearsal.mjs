@@ -5,17 +5,24 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from 'node:fs';
 import {
   chmod as nodeChmod,
+  mkdir as nodeMkdir,
   mkdtemp as nodeMkdtemp,
   open as nodeOpen,
   readdir as nodeReaddir,
+  readFile as nodeReadFile,
   rm as nodeRm,
+  writeFile as nodeWriteFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { assertSafePrismaDotenvCandidates, PRISMA_DOTENV_CANDIDATES } from './audit-staging.mjs';
-import { EXPECTED_STAGING_PENDING_MIGRATIONS, inspectBackupArchiveList } from './staging-libpq.mjs';
+import {
+  EXPECTED_STAGING_FORWARD_MIGRATIONS,
+  EXPECTED_STAGING_PENDING_MIGRATIONS,
+  inspectBackupArchiveList,
+} from './staging-libpq.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const packageDir = dirname(dirname(scriptPath));
@@ -36,6 +43,20 @@ const WORKFLOW_CHECK_ASSERTION_PATH = join(
   'postgres',
   'assert-workflow-check-constraints.sql',
 );
+const SKU_EDIT_FORWARD_ASSERTION_PATH = join(
+  packageDir,
+  'scripts',
+  'assert-43-to-44-sku-edits.sql',
+);
+const RUNTIME_STATE_FORWARD_ASSERTION_PATH = join(
+  packageDir,
+  'scripts',
+  'assert-44-to-45-runtime-state.sql',
+);
+const FORWARD_ASSERTION_PATHS = Object.freeze([
+  SKU_EDIT_FORWARD_ASSERTION_PATH,
+  RUNTIME_STATE_FORWARD_ASSERTION_PATH,
+]);
 const POST_UPGRADE_ASSERTIONS = Object.freeze([
   join(REPOSITORY_ROOT, 'infra', 'postgres', 'assert-public-schema-isolation.sql'),
   WORKFLOW_CHECK_ASSERTION_PATH,
@@ -98,6 +119,8 @@ SELECT coalesce(
 FROM public._prisma_migrations;
 `.trim();
 const RESTORED_MIGRATION_COUNT = 33;
+const HISTORICAL_UPGRADE_MIGRATION_COUNT =
+  RESTORED_MIGRATION_COUNT + EXPECTED_STAGING_PENDING_MIGRATIONS.length;
 const ARCHIVE_CHILD_FD = 3;
 const ARCHIVE_CHILD_PATH = `/dev/fd/${ARCHIVE_CHILD_FD}`;
 const ARCHIVE_COPY_BUFFER_BYTES = 64 * 1024;
@@ -111,11 +134,16 @@ const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const USAGE =
   'Usage: restore-rehearsal.mjs rehearse --archive=<absolute.dump> --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>' +
   '\n   or: restore-rehearsal.mjs restore --archive=<absolute.dump> --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>' +
+  '\n   or: restore-rehearsal.mjs rehearse-forward-sku-edits --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>' +
   '\n   or: restore-rehearsal.mjs post-upgrade-assert --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>';
 
 export function readRestoreRehearsalOptions(args) {
   const action = args[0];
-  if (!['rehearse', 'restore', 'post-upgrade-assert'].includes(action)) throw new Error(USAGE);
+  if (
+    !['rehearse', 'restore', 'rehearse-forward-sku-edits', 'post-upgrade-assert'].includes(action)
+  ) {
+    throw new Error(USAGE);
+  }
 
   const confirmations = args.slice(1).filter((arg) => arg.startsWith('--confirm-database='));
   const containers = args.slice(1).filter((arg) => arg.startsWith('--confirm-container='));
@@ -142,7 +170,7 @@ export function readRestoreRehearsalOptions(args) {
   ) {
     throw new Error('--confirm-container must match supplier-restore-*-pg17 exactly.');
   }
-  if (action === 'post-upgrade-assert') {
+  if (action === 'post-upgrade-assert' || action === 'rehearse-forward-sku-edits') {
     return { action, confirmedContainer, confirmedDatabase };
   }
 
@@ -218,24 +246,42 @@ export async function runRestoreRehearsal({
       const restoreResult = runRestore(configuration, spawnSync, dockerTarget, stableArchive);
       if (configuration.action === 'restore') return restoreResult;
 
-      await runPrismaDeploy(
-        configuration,
-        spawnSync,
-        dockerTarget,
-        readMigrationDirectory,
-        prismaDotenvCandidates,
-      );
-      await runPrismaStatus(configuration, spawnSync, dockerTarget, prismaDotenvCandidates);
-      await runPrismaDiff(configuration, spawnSync, dockerTarget, prismaDotenvCandidates);
-      assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
-      assertConnectedDatabase(configuration, spawnSync, 'restored');
-      const assertionResult = runPostUpgradeAssertions(configuration, spawnSync, dockerTarget);
-      return {
-        ...restoreResult,
-        action: configuration.action,
-        completedAssertions: assertionResult.completedAssertions,
-        prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
-      };
+      const historicalWorkspace = await prepareHistoricalMigrationWorkspace(readMigrationDirectory);
+      try {
+        await runPrismaDeploy(
+          configuration,
+          spawnSync,
+          dockerTarget,
+          readMigrationDirectory,
+          prismaDotenvCandidates,
+          historicalWorkspace.schemaPath,
+        );
+        await runPrismaStatus(
+          configuration,
+          spawnSync,
+          dockerTarget,
+          prismaDotenvCandidates,
+          historicalWorkspace.schemaPath,
+        );
+        await runPrismaDiff(
+          configuration,
+          spawnSync,
+          dockerTarget,
+          prismaDotenvCandidates,
+          historicalWorkspace.schemaPath,
+        );
+        assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
+        assertConnectedDatabase(configuration, spawnSync, 'restored');
+        const assertionResult = runPostUpgradeAssertions(configuration, spawnSync, dockerTarget);
+        return {
+          ...restoreResult,
+          action: configuration.action,
+          completedAssertions: assertionResult.completedAssertions,
+          prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
+        };
+      } finally {
+        await nodeRm(historicalWorkspace.directory, { force: true, recursive: true });
+      }
     } finally {
       await disposeStableArchive(stableArchive);
     }
@@ -243,7 +289,20 @@ export async function runRestoreRehearsal({
 
   assertLibpq17('psql', spawnSync);
   const dockerTarget = assertDockerRestoreTarget(configuration, spawnSync);
-  assertConnectedDatabase(configuration, spawnSync, 'any');
+  assertConnectedDatabase(
+    configuration,
+    spawnSync,
+    configuration.action === 'rehearse-forward-sku-edits' ? 'restored' : 'any',
+  );
+  if (configuration.action === 'rehearse-forward-sku-edits') {
+    return runForwardSkuEditRehearsal(
+      configuration,
+      spawnSync,
+      dockerTarget,
+      readMigrationDirectory,
+      prismaDotenvCandidates,
+    );
+  }
   assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
   return runPostUpgradeAssertions(configuration, spawnSync, dockerTarget);
 }
@@ -616,6 +675,7 @@ async function runPrismaDeploy(
   dockerTarget,
   readMigrationDirectory,
   prismaDotenvCandidates,
+  schemaPath = PRISMA_SCHEMA_PATH,
 ) {
   assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
   assertConnectedDatabase(configuration, spawnSync, 'restored');
@@ -624,10 +684,100 @@ async function runPrismaDeploy(
   await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
   const result = spawnSync(
     process.execPath,
-    [PRISMA_CLI_PATH, 'migrate', 'deploy', '--schema', PRISMA_SCHEMA_PATH],
+    [PRISMA_CLI_PATH, 'migrate', 'deploy', '--schema', schemaPath],
     prismaCommandOptions(configuration.prismaEnvironment),
   );
   assertCommandSucceeded('prisma migrate deploy', result);
+}
+
+async function runForwardSkuEditRehearsal(
+  configuration,
+  spawnSync,
+  dockerTarget,
+  readMigrationDirectory,
+  prismaDotenvCandidates,
+) {
+  await assertHistoricalUpgradeBaseline(configuration, spawnSync, readMigrationDirectory);
+  assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
+  await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
+  const deployResult = spawnSync(
+    process.execPath,
+    [PRISMA_CLI_PATH, 'migrate', 'deploy', '--schema', PRISMA_SCHEMA_PATH],
+    prismaCommandOptions(configuration.prismaEnvironment),
+  );
+  assertCommandSucceeded('prisma migrate deploy', deployResult);
+
+  await runPrismaStatus(configuration, spawnSync, dockerTarget, prismaDotenvCandidates);
+  await runPrismaDiff(configuration, spawnSync, dockerTarget, prismaDotenvCandidates);
+  assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
+  assertConnectedDatabase(configuration, spawnSync, 'restored');
+  const assertionResult = runSkuEditForwardAssertion(configuration, spawnSync, dockerTarget);
+  return {
+    action: configuration.action,
+    database: configuration.database,
+    completedAssertions: assertionResult.completedAssertions,
+    prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
+  };
+}
+
+async function prepareHistoricalMigrationWorkspace(readMigrationDirectory) {
+  const migrationNames = await readRepositoryMigrationNames(readMigrationDirectory);
+  const directory = await nodeMkdtemp(join(tmpdir(), 'supplier-restore-migrations-43-'));
+  await nodeChmod(directory, 0o700);
+  try {
+    const migrationsPath = join(directory, 'migrations');
+    await nodeMkdir(migrationsPath, { mode: 0o700 });
+    const currentSchema = await nodeReadFile(PRISMA_SCHEMA_PATH, 'utf8');
+    const historicalSchema = historicalSchemaBeforeSkuEdits(currentSchema);
+    const schemaPath = join(directory, 'schema.prisma');
+    await nodeWriteFile(schemaPath, historicalSchema, { flag: 'wx', mode: 0o600 });
+    await copyRegularFile(
+      join(PRISMA_MIGRATIONS_PATH, 'migration_lock.toml'),
+      join(migrationsPath, 'migration_lock.toml'),
+    );
+    for (const migrationName of migrationNames.slice(0, HISTORICAL_UPGRADE_MIGRATION_COUNT)) {
+      const targetDirectory = join(migrationsPath, migrationName);
+      await nodeMkdir(targetDirectory, { mode: 0o700 });
+      await copyRegularFile(
+        join(PRISMA_MIGRATIONS_PATH, migrationName, 'migration.sql'),
+        join(targetDirectory, 'migration.sql'),
+      );
+    }
+    return { directory, schemaPath };
+  } catch (error) {
+    await nodeRm(directory, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+function historicalSchemaBeforeSkuEdits(currentSchema) {
+  const withoutRuntimeState = currentSchema.replace(/model RuntimeState \{[\s\S]*?\n\}\n\n/, '');
+  const fields =
+    '  skuSpecSnapshot            Json?                  @map("sku_spec_snapshot") @db.JsonB\n' +
+    '  skuSpecFingerprint         String?                @map("sku_spec_fingerprint") @db.VarChar(64)\n' +
+    '  skuSpecSyncedAt            DateTime?              @map("sku_spec_synced_at")\n';
+  const withoutFields = withoutRuntimeState.replace(fields, '');
+  const historical = withoutFields.replace('  edit_sku\n', '');
+  if (
+    withoutRuntimeState === currentSchema ||
+    withoutFields === withoutRuntimeState ||
+    historical === withoutFields
+  ) {
+    throw new Error('Current Prisma schema does not contain the expected migrations 44 and 45.');
+  }
+  return historical;
+}
+
+async function copyRegularFile(source, destination) {
+  const sourceHandle = await nodeOpen(source, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const sourceStat = await sourceHandle.stat();
+    if (!sourceStat.isFile())
+      throw new Error(`Repository migration file is not regular: ${source}`);
+    await nodeWriteFile(destination, await sourceHandle.readFile(), { flag: 'wx', mode: 0o600 });
+  } finally {
+    await sourceHandle.close();
+  }
 }
 
 async function assertRestoredMigrationBaseline(configuration, spawnSync, readMigrationDirectory) {
@@ -653,7 +803,38 @@ async function assertRestoredMigrationBaseline(configuration, spawnSync, readMig
   }
 }
 
+async function assertHistoricalUpgradeBaseline(configuration, spawnSync, readMigrationDirectory) {
+  const migrationNames = await readRepositoryMigrationNames(readMigrationDirectory);
+  const expectedMigrations = await readExpectedMigrationRecords(
+    migrationNames.slice(0, HISTORICAL_UPGRADE_MIGRATION_COUNT),
+  );
+  const result = spawnSync(
+    join(LIBPQ_BIN_DIR, 'psql'),
+    [
+      '--no-psqlrc',
+      '--no-password',
+      '--tuples-only',
+      '--no-align',
+      '--command',
+      RESTORED_MIGRATION_BASELINE_PROBE_SQL,
+    ],
+    commandOptions(configuration.readOnlyLibpqEnvironment, INSPECTION_TIMEOUT_MS),
+  );
+  assertCommandSucceeded('psql historical migration baseline check', result);
+  const baseline = parseJsonOutput('Historical migration baseline', result.stdout);
+  if (!sameRestoredMigrations(baseline, expectedMigrations)) {
+    throw new Error(
+      `Forward release target must exactly match the first ${HISTORICAL_UPGRADE_MIGRATION_COUNT} repository migrations by ordered name, checksum, and completed state.`,
+    );
+  }
+}
+
 async function readExpectedRestoredMigrations(readMigrationDirectory) {
+  const migrationNames = await readRepositoryMigrationNames(readMigrationDirectory);
+  return readExpectedMigrationRecords(migrationNames.slice(0, RESTORED_MIGRATION_COUNT));
+}
+
+async function readRepositoryMigrationNames(readMigrationDirectory) {
   const entries = await readMigrationDirectory(PRISMA_MIGRATIONS_PATH, { withFileTypes: true });
   const migrationDirectories = [];
   let hasMigrationLock = false;
@@ -674,16 +855,26 @@ async function readExpectedRestoredMigrations(readMigrationDirectory) {
   const migrationNames = migrationDirectories.map((entry) => entry.name).sort();
   if (
     migrationNames.length !==
-      RESTORED_MIGRATION_COUNT + EXPECTED_STAGING_PENDING_MIGRATIONS.length ||
+      HISTORICAL_UPGRADE_MIGRATION_COUNT + EXPECTED_STAGING_FORWARD_MIGRATIONS.length ||
     !sameStringArray(
-      migrationNames.slice(RESTORED_MIGRATION_COUNT),
+      migrationNames.slice(RESTORED_MIGRATION_COUNT, HISTORICAL_UPGRADE_MIGRATION_COUNT),
       EXPECTED_STAGING_PENDING_MIGRATIONS,
+    ) ||
+    !sameStringArray(
+      migrationNames.slice(HISTORICAL_UPGRADE_MIGRATION_COUNT),
+      EXPECTED_STAGING_FORWARD_MIGRATIONS,
     )
   ) {
-    throw new Error('Repository does not contain the exact 33-to-43 migration boundary.');
+    throw new Error(
+      'Repository does not contain the exact 33-to-43 and 43-to-45 migration boundaries.',
+    );
   }
+  return migrationNames;
+}
+
+async function readExpectedMigrationRecords(migrationNames) {
   return Promise.all(
-    migrationNames.slice(0, RESTORED_MIGRATION_COUNT).map(async (migrationName) => {
+    migrationNames.map(async (migrationName) => {
       const migration = await nodeOpen(
         join(PRISMA_MIGRATIONS_PATH, migrationName, 'migration.sql'),
         fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
@@ -726,18 +917,30 @@ function sameRestoredMigrations(actual, expected) {
   );
 }
 
-async function runPrismaStatus(configuration, spawnSync, dockerTarget, prismaDotenvCandidates) {
+async function runPrismaStatus(
+  configuration,
+  spawnSync,
+  dockerTarget,
+  prismaDotenvCandidates,
+  schemaPath = PRISMA_SCHEMA_PATH,
+) {
   assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
   await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
   const result = spawnSync(
     process.execPath,
-    [PRISMA_CLI_PATH, 'migrate', 'status', '--schema', PRISMA_SCHEMA_PATH],
+    [PRISMA_CLI_PATH, 'migrate', 'status', '--schema', schemaPath],
     prismaCommandOptions(configuration.prismaEnvironment),
   );
   assertCommandSucceeded('prisma migrate status', result);
 }
 
-async function runPrismaDiff(configuration, spawnSync, dockerTarget, prismaDotenvCandidates) {
+async function runPrismaDiff(
+  configuration,
+  spawnSync,
+  dockerTarget,
+  prismaDotenvCandidates,
+  schemaPath = PRISMA_SCHEMA_PATH,
+) {
   assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
   await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
   const result = spawnSync(
@@ -748,13 +951,34 @@ async function runPrismaDiff(configuration, spawnSync, dockerTarget, prismaDoten
       'diff',
       '--exit-code',
       '--from-schema-datasource',
-      PRISMA_SCHEMA_PATH,
+      schemaPath,
       '--to-schema-datamodel',
-      PRISMA_SCHEMA_PATH,
+      schemaPath,
     ],
     prismaCommandOptions(configuration.prismaEnvironment),
   );
   assertCommandSucceeded('prisma migrate diff', result);
+}
+
+function runSkuEditForwardAssertion(configuration, spawnSync, dockerTarget) {
+  const completedAssertions = [];
+  for (const assertionPath of FORWARD_ASSERTION_PATHS) {
+    assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
+    const result = spawnSync(
+      join(LIBPQ_BIN_DIR, 'psql'),
+      [
+        '--no-psqlrc',
+        '--no-password',
+        '--set=ON_ERROR_STOP=1',
+        '--file',
+        assertionPath,
+      ],
+      commandOptions(configuration.readOnlyLibpqEnvironment, ASSERTION_TIMEOUT_MS),
+    );
+    assertCommandSucceeded(`psql ${basename(assertionPath)}`, result);
+    completedAssertions.push(basename(assertionPath));
+  }
+  return { completedAssertions };
 }
 
 function runPostUpgradeAssertions(configuration, spawnSync, dockerTarget) {
@@ -912,6 +1136,12 @@ async function main() {
   if (result.action === 'rehearse') {
     console.log(
       `Local restore rehearsal passed: database=${result.database} archiveEntries=${result.archiveEntryCount} prismaChecks=${result.prismaChecks.length} assertions=${result.completedAssertions.length}.`,
+    );
+    return;
+  }
+  if (result.action === 'rehearse-forward-sku-edits') {
+    console.log(
+      `Local release forward rehearsal passed: database=${result.database} prismaChecks=${result.prismaChecks.length} assertions=${result.completedAssertions.length}.`,
     );
     return;
   }

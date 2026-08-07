@@ -1,11 +1,11 @@
-.PHONY: help install dev infra-up infra-down db-migrate db-migrate-deploy db-seed db-studio llm-test typecheck build release-check clean
+.PHONY: help install dev test-db-up test-db-down db-migrate db-migrate-deploy db-seed db-studio llm-test typecheck build release-check clean
 
 help:
 	@echo "Supplier — 常用命令"
 	@echo ""
 	@echo "  make install       安装依赖（pnpm install）"
-	@echo "  make infra-up      启动本地中间件（Postgres/Redis/ES/Milvus/Kafka）"
-	@echo "  make infra-down    停止本地中间件"
+	@echo "  make test-db-up    启动仅供隔离测试的临时 PostgreSQL"
+	@echo "  make test-db-down  停止隔离测试数据库"
 	@echo "  make db-migrate    创建 / 应用 Prisma 迁移（首次跑：make db-migrate name=init）"
 	@echo "  make db-migrate-deploy  仅应用已有迁移（生产发布）"
 	@echo "  make db-seed       写入演示种子数据"
@@ -20,14 +20,13 @@ help:
 install:
 	pnpm install
 
-infra-up:
-	docker compose -f infra/docker-compose.dev.yml up -d --wait
+test-db-up:
+	docker compose -f infra/docker-compose.dev.yml up -d --wait postgres
 
-infra-down:
-	docker compose -f infra/docker-compose.dev.yml down
+test-db-down:
+	docker compose -f infra/docker-compose.dev.yml down -v
 
 db-migrate:
-	pnpm db:dev:up
 	pnpm --filter @supplier/db exec prisma migrate dev $(if $(name),--name $(name),)
 
 db-migrate-deploy:

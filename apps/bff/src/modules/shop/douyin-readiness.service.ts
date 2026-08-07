@@ -1,9 +1,8 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Prisma } from '@supplier/db';
-import type Redis from 'ioredis';
-import { REDIS_CLIENT } from '../../common/redis.module';
 import { PrismaService } from '../../common/prisma.module';
+import { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAuthConfigService } from './oauth-config.service';
 
 export interface DouyinReadinessCheck {
@@ -32,12 +31,15 @@ export class DouyinReadinessService {
     private readonly config: ConfigService,
     private readonly oauthConfig: OAuthConfigService,
     private readonly prisma: PrismaService,
-    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly runtimeState: RuntimeStateService,
   ) {}
 
   async get(userId: bigint): Promise<DouyinReadinessView> {
-    const checks = this.configChecks();
-    const [shop, confirmedMapping, products] = await Promise.all([
+    const [runtimeStateReady, shop, confirmedMapping, products] = await Promise.all([
+      this.runtimeState.ping().then(
+        () => true,
+        () => false,
+      ),
       this.prisma.shop.findFirst({
         where: {
           userId,
@@ -74,6 +76,7 @@ export class DouyinReadinessService {
         select: { productId1688: true, title: true, attributes: true },
       }),
     ]);
+    const checks = this.configChecks(runtimeStateReady);
 
     const shopReady =
       !!shop && shop.status === 'active' && !!shop.accessTokenEnc && !!shop.refreshTokenEnc;
@@ -112,7 +115,7 @@ export class DouyinReadinessService {
     };
   }
 
-  private configChecks(): DouyinReadinessCheck[] {
+  private configChecks(runtimeStateReady: boolean): DouyinReadinessCheck[] {
     const credentials = ['DOUYIN_APP_KEY', 'DOUYIN_APP_SECRET', 'DOUYIN_SERVICE_ID'];
     const missingCredentials = credentials.filter((key) => !this.hasValue(key));
     const callbackUri = this.value('DOUYIN_OAUTH_REDIRECT_URI');
@@ -120,12 +123,11 @@ export class DouyinReadinessService {
       !!callbackUri && safeCheck(() => this.oauthConfig.assertAllowedCallback(callbackUri));
     const resultRedirectReady = safeCheck(() => this.oauthConfig.buildResultRedirect({}));
     const encryptionReady = this.hasValue('ENCRYPTION_KEY');
-    const redisReady = this.redis.status === 'ready';
     const securityMissing = [
       ...(callbackReady ? [] : ['OAuth 回调白名单']),
       ...(resultRedirectReady ? [] : ['Web 返回地址']),
       ...(encryptionReady ? [] : ['ENCRYPTION_KEY']),
-      ...(redisReady ? [] : ['Redis state 存储']),
+      ...(runtimeStateReady ? [] : ['Supabase runtime state 存储']),
     ];
 
     return [

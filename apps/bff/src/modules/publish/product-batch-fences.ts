@@ -6,3 +6,7 @@ export const UNRESOLVED_OFFLINE_CODES = [
 ] as const;
 
 export const OFFLINE_BATCH_ACTIONS = ['offline', 'cleanup'] as const;
+
+export const SKU_WRITE_STARTED_CODE = 'SKU_WRITE_STARTED';
+export const SKU_RESULT_UNKNOWN_CODE = 'SKU_RESULT_UNKNOWN';
+export const UNRESOLVED_SKU_CODES = [SKU_WRITE_STARTED_CODE, SKU_RESULT_UNKNOWN_CODE] as const;

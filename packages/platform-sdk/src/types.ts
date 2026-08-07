@@ -79,6 +79,108 @@ export interface PlatformProductInventoryState extends PlatformProductState {
   }>;
 }
 
+export interface PlatformProductSkuPropertyValue {
+  propertyId: string;
+  propertyName: string;
+  valueId: string;
+  valueName: string;
+  remark: string | null;
+}
+
+export interface PlatformProductSkuItem {
+  /** Platform generated SKU identifier. Existing rows must preserve it during replacement. */
+  platformSkuId: string;
+  /** Stable merchant SKU key, corresponding to Douyin outer_sku_id. */
+  platformSkuKey: string;
+  properties: PlatformProductSkuPropertyValue[];
+  priceCents: number;
+  stock: number;
+  skuStatus: boolean;
+  skuType: 0 | 1 | 10;
+  code: string | null;
+  supplierId: string | null;
+  stepStock: number;
+  barcodes: string[];
+  skuPictureUrls: string[];
+}
+
+export interface PlatformProductSkuState extends PlatformProductState {
+  categoryId: string;
+  productType: number;
+  startSaleType: 0 | 1;
+  items: PlatformProductSkuItem[];
+}
+
+export interface PlatformProductSkuRuleValue {
+  valueId: string;
+  valueName: string;
+}
+
+export interface PlatformProductSkuRuleDimension {
+  propertyId: string;
+  propertyName: string;
+  required: boolean;
+  supportsCustomValues: boolean;
+  supportsRemark: boolean;
+  requiresPagedValues: boolean;
+  navigationProperties: Array<{ propertyId: string; propertyName: string }>;
+  values: PlatformProductSkuRuleValue[];
+  /** Complex rule features that a caller must not silently ignore. */
+  unsupportedReasons: string[];
+}
+
+export interface PlatformProductSkuRules {
+  maxDimensions: number;
+  maxCombinations: number;
+  maxValuesPerDimension: number;
+  supportsDimensionReordering: boolean;
+  supportsCustomDimensions: boolean;
+  allSkuPicturesRequired: boolean;
+  dimensions: PlatformProductSkuRuleDimension[];
+  unsupportedReasons: string[];
+}
+
+export interface PlatformProductSkuRulesQuery {
+  categoryId: string;
+  standardBrandId?: string;
+  spuId?: string;
+}
+
+export interface ReplaceProductSkuDimension {
+  propertyId: string;
+  propertyName: string;
+  values: Array<{
+    valueId: string;
+    valueName: string;
+    remark?: string;
+  }>;
+}
+
+export interface ReplaceProductSkuItem {
+  /** Required for retained rows and omitted only for newly-created platform SKUs. */
+  platformSkuId?: string;
+  platformSkuKey: string;
+  properties: PlatformProductSkuPropertyValue[];
+  priceCents: number;
+  stock: number;
+  skuStatus: boolean;
+  skuType: 0 | 1 | 10;
+  code: string | null;
+  supplierId: string | null;
+  stepStock: number;
+  barcodes: string[];
+  skuPictureUrls: string[];
+}
+
+/** Full SKU-set replacement. Omitted existing rows are deleted by the platform. */
+export interface ReplaceProductSkusDto {
+  platformProductId: string;
+  /** SKU structure edits are only safe while the product remains non-saleable. */
+  keepOffline: true;
+  dimensions: ReplaceProductSkuDimension[];
+  items: ReplaceProductSkuItem[];
+}
+
 /** The request may have reached the platform, but its final mutation result is unknown. */
 export class PlatformMutationResultUnknownError extends Error {
   constructor(message: string) {

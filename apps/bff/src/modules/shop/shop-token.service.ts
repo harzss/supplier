@@ -1,5 +1,4 @@
 import {
-  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -13,11 +12,9 @@ import {
   PlatformTokenRefreshRejectedError,
   type PlatformAdapter,
 } from '@supplier/platform-sdk';
-import type Redis from 'ioredis';
-import { randomUUID } from 'node:crypto';
 import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
-import { REDIS_CLIENT } from '../../common/redis.module';
+import { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAuthConfigService } from './oauth-config.service';
 import { AlertService } from '../observability/alert.service';
 
@@ -60,7 +57,7 @@ export class ShopTokenService {
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
     private readonly oauthConfig: OAuthConfigService,
-    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly runtimeState: RuntimeStateService,
     private readonly alerts: AlertService,
   ) {}
 
@@ -143,7 +140,7 @@ export class ShopTokenService {
         : shop.refreshTokenEnc,
       tokenExpireAt: tokenSet.expiresAt.toISOString(),
     };
-    await this.storePendingRefresh(shop, pending);
+    const recoveryStored = await this.storePendingRefresh(shop, pending);
 
     let updated: { count: number };
     try {
@@ -151,6 +148,9 @@ export class ShopTokenService {
     } catch (error) {
       this.logger.error(`店铺 ${shop.id} Token 刷新结果保存失败`);
       await this.raiseCredentialAlert(shop, 'token_refresh_persist', error, 'critical');
+      if (!recoveryStored && !(await this.storePendingRefresh(shop, pending))) {
+        await this.raiseCredentialAlert(shop, 'token_refresh_recovery_store', error, 'critical');
+      }
       throw new ServiceUnavailableException(REFRESH_RECOVERY_MESSAGE);
     }
     if (updated.count === 0) {
@@ -165,7 +165,7 @@ export class ShopTokenService {
   private async recoverPendingRefresh(shop: TokenShop): Promise<TokenShop> {
     let raw: string | null;
     try {
-      raw = await this.redis.get(this.refreshRecoveryKey(shop.id));
+      raw = await this.runtimeState.read<string>(this.refreshRecoveryKey(shop.id));
     } catch {
       this.logger.warn(`店铺 ${shop.id} Token 刷新恢复状态不可用`);
       throw new ServiceUnavailableException(REFRESH_RECOVERY_MESSAGE);
@@ -249,22 +249,29 @@ export class ShopTokenService {
     throw lastError;
   }
 
-  private async storePendingRefresh(shop: TokenShop, pending: PendingTokenRefresh): Promise<void> {
-    try {
-      await this.redis.set(
-        this.refreshRecoveryKey(shop.id),
-        JSON.stringify(pending),
-        'PX',
-        REFRESH_RECOVERY_TTL_MS,
-      );
-    } catch {
-      this.logger.error(`店铺 ${shop.id} Token 刷新恢复记录保存失败`);
+  private async storePendingRefresh(
+    shop: TokenShop,
+    pending: PendingTokenRefresh,
+  ): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await this.runtimeState.store(
+          this.refreshRecoveryKey(shop.id),
+          JSON.stringify(pending),
+          REFRESH_RECOVERY_TTL_MS,
+        );
+        return true;
+      } catch {
+        // Retry the same encrypted payload; the upsert is idempotent.
+      }
     }
+    this.logger.error(`店铺 ${shop.id} Token 刷新恢复记录保存失败`);
+    return false;
   }
 
   private async clearPendingRefresh(shopId: bigint): Promise<void> {
     try {
-      await this.redis.del(this.refreshRecoveryKey(shopId));
+      await this.runtimeState.remove(this.refreshRecoveryKey(shopId));
     } catch {
       this.logger.warn(`店铺 ${shopId} Token 刷新恢复记录清理失败`);
     }
@@ -331,16 +338,8 @@ export class ShopTokenService {
   }
 
   private async acquireRefreshLock(shopId: bigint): Promise<string | null> {
-    const value = randomUUID();
     try {
-      const stored = await this.redis.set(
-        `oauth:refresh:${shopId}`,
-        value,
-        'PX',
-        REFRESH_LOCK_TTL_MS,
-        'NX',
-      );
-      return stored === 'OK' ? value : null;
+      return await this.runtimeState.acquireLease(`oauth:refresh:${shopId}`, REFRESH_LOCK_TTL_MS);
     } catch {
       this.logger.warn(`店铺 ${shopId} Token 刷新锁不可用`);
       return null;
@@ -349,12 +348,7 @@ export class ShopTokenService {
 
   private async releaseRefreshLock(shopId: bigint, value: string): Promise<void> {
     try {
-      await this.redis.eval(
-        'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
-        1,
-        `oauth:refresh:${shopId}`,
-        value,
-      );
+      await this.runtimeState.releaseLease(`oauth:refresh:${shopId}`, value);
     } catch {
       this.logger.warn(`店铺 ${shopId} Token 刷新锁释放失败`);
     }
@@ -381,9 +375,11 @@ export class ShopTokenService {
       summary:
         failure === 'token_refresh_identity_mismatch'
           ? '店铺授权刷新返回了不同主体'
-          : severity === 'critical'
-            ? '店铺授权凭证无法解密'
-            : '店铺授权 Token 刷新失败',
+          : failure === 'token_refresh_persist' || failure === 'token_refresh_recovery_store'
+            ? '店铺授权刷新结果无法持久化'
+            : severity === 'critical'
+              ? '店铺授权凭证无法解密'
+              : '店铺授权 Token 刷新失败',
       details: {
         shopId: shop.id,
         userId: shop.userId,

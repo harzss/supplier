@@ -2,11 +2,10 @@ import { defineConfig, devices } from '@playwright/test';
 
 const webOrigin = 'http://127.0.0.1:3200';
 const bffOrigin = 'http://127.0.0.1:3201';
-const databaseUrl = 'postgresql://postgres:postgres@127.0.0.1:5432/supplier';
-const redisUrl = 'redis://127.0.0.1:6379';
+const databaseUrl =
+  process.env.SUPPLIER_E2E_DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:5432/supplier';
 process.env.DATABASE_URL = databaseUrl;
 process.env.DIRECT_URL = databaseUrl;
-process.env.REDIS_URL = redisUrl;
 const inheritedEnvironment = Object.fromEntries(
   Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
 );
@@ -46,7 +45,6 @@ export default defineConfig({
         CORS_ORIGINS: webOrigin,
         DATABASE_URL: databaseUrl,
         DIRECT_URL: databaseUrl,
-        REDIS_URL: redisUrl,
         PUBLISH_QUEUE_MODE: 'inline',
         DOUYIN_ORDER_SYNC_ENABLED: 'false',
         INVENTORY_SYNC_ENABLED: 'false',

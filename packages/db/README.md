@@ -13,12 +13,7 @@ cp packages/db/.env.example packages/db/.env
 # DIRECT_URL    → Direct connection (5432)，迁移用
 ```
 
-或本地 docker：
-
-```bash
-make infra-up   # 起 postgres:15
-# 在 .env 里把 DATABASE_URL 改为 postgresql://postgres:postgres@localhost:5432/supplier
-```
+日常开发和内部 staging 均直连 Supabase；仓库中的 Docker PostgreSQL 仅供隔离 CI / 恢复演练，不作为运行时数据源。
 
 ## 常用命令
 

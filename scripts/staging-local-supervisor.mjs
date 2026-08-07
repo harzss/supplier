@@ -5,6 +5,8 @@ import { access as nodeAccess } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { isCurrentBffReadinessResponse, optionalGitSha } from './bff-readiness.mjs';
+
 const scriptPath = fileURLToPath(import.meta.url);
 export const repositoryRoot = resolve(dirname(scriptPath), '..');
 
@@ -34,7 +36,9 @@ export function readSupervisorConfiguration(environment = process.env) {
   }
 
   const gatewayOrigin = exactHttpsOrigin(environment.STAGING_GATEWAY_URL, 'STAGING_GATEWAY_URL');
-  return { accountId, gatewayOrigin };
+  const expectedRevision = optionalGitSha(environment.SUPPLIER_GIT_SHA);
+  if (!expectedRevision) throw new Error('SUPPLIER_GIT_SHA is required');
+  return { accountId, gatewayOrigin, expectedRevision };
 }
 
 export function parseTryCloudflareOrigin(value) {
@@ -52,6 +56,7 @@ export async function waitForHttpReady(
     intervalMs = READY_INTERVAL_MS,
     delay = abortableDelay,
     signal,
+    expectedRevision,
   } = {},
 ) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -61,7 +66,7 @@ export async function waitForHttpReady(
         ? AbortSignal.any([signal, AbortSignal.timeout(5_000)])
         : AbortSignal.timeout(5_000);
       const response = await fetcher(url, { signal: requestSignal });
-      if (response.ok) return;
+      if (await isCurrentBffReadinessResponse(response, expectedRevision)) return;
     } catch (error) {
       if (signal?.aborted) throw new SupervisorStopped();
     }
@@ -133,7 +138,7 @@ export async function runStagingSupervisor({
   tunnelStartTimeoutMs = TUNNEL_START_TIMEOUT_MS,
   childStopTimeoutMs = CHILD_STOP_TIMEOUT_MS,
 } = {}) {
-  const { accountId, gatewayOrigin } = readSupervisorConfiguration(environment);
+  const { accountId, gatewayOrigin, expectedRevision } = readSupervisorConfiguration(environment);
   await Promise.all([
     access(join(root, BFF_ENV_FILE)),
     access(join(root, BFF_ENTRYPOINT)),
@@ -196,6 +201,7 @@ export async function runStagingSupervisor({
         intervalMs: readyIntervalMs,
         delay,
         signal: lifecycle.signal,
+        expectedRevision,
       }),
     );
     log(logger, 'Local BFF is ready; starting Quick Tunnel.');
@@ -237,6 +243,7 @@ export async function runStagingSupervisor({
         intervalMs: readyIntervalMs,
         delay,
         signal: lifecycle.signal,
+        expectedRevision,
       }),
     );
     log(logger, 'Staging gateway is ready; supervisor is monitoring child processes.');

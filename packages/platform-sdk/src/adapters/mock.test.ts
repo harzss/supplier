@@ -153,6 +153,160 @@ describe('MockPlatformAdapter', () => {
     ).resolves.toMatchObject({ title: '更新后的纯棉短袖T恤', state: 'online' });
   });
 
+  it('fully replaces SKU rows while preserving retained IDs and keeping read models coherent', async () => {
+    const adapter = createMockAdapter('douyin');
+    const published = await adapter.publishProduct('tok', {
+      ...sampleDto,
+      skus: [
+        {
+          sourceSkuId: 'sku-z',
+          specName: '黑色',
+          price: 32,
+          stock: 8,
+          attributes: {},
+        },
+        {
+          sourceSkuId: 'sku-a',
+          specName: '白色',
+          price: 29,
+          stock: 12,
+          attributes: {},
+        },
+      ],
+    });
+    const before = await adapter.getProductSkuState('tok', published.platformProductId);
+    const retained = before.items.find((item) => item.platformSkuKey === 'sku-a')!;
+    const removed = before.items.find((item) => item.platformSkuKey === 'sku-z')!;
+    const dimension = retained.properties[0]!;
+
+    await adapter.replaceProductSkus('tok', {
+      platformProductId: published.platformProductId,
+      keepOffline: true,
+      dimensions: [
+        {
+          propertyId: dimension.propertyId,
+          propertyName: dimension.propertyName,
+          values: [
+            {
+              valueId: dimension.valueId,
+              valueName: dimension.valueName,
+            },
+            { valueId: 'mock-value-green', valueName: '绿色' },
+          ],
+        },
+      ],
+      items: [
+        {
+          platformSkuId: retained.platformSkuId,
+          platformSkuKey: retained.platformSkuKey,
+          properties: retained.properties,
+          priceCents: 3090,
+          stock: 9,
+          skuStatus: true,
+          skuType: 0,
+          code: null,
+          supplierId: null,
+          stepStock: 0,
+          barcodes: [],
+          skuPictureUrls: [],
+        },
+        {
+          platformSkuKey: 'sku-new',
+          properties: [
+            {
+              propertyId: dimension.propertyId,
+              propertyName: dimension.propertyName,
+              valueId: 'mock-value-green',
+              valueName: '绿色',
+              remark: null,
+            },
+          ],
+          priceCents: 3390,
+          stock: 4,
+          skuStatus: true,
+          skuType: 0,
+          code: null,
+          supplierId: null,
+          stepStock: 0,
+          barcodes: [],
+          skuPictureUrls: ['https://img/new.jpg'],
+        },
+      ],
+    });
+
+    const after = await adapter.getProductSkuState('tok', published.platformProductId);
+    expect(after).toMatchObject({ state: 'offline', startSaleType: 1 });
+    expect(after.items.map((item) => item.platformSkuKey)).toEqual(['sku-a', 'sku-new']);
+    expect(after.items[0]?.platformSkuId).toBe(retained.platformSkuId);
+    expect(after.items[1]?.platformSkuId).toMatch(/^mock-sku-/);
+    expect(after.items.map((item) => item.platformSkuId)).not.toContain(removed.platformSkuId);
+    await expect(
+      adapter.getProductPrices('tok', published.platformProductId),
+    ).resolves.toMatchObject({
+      items: [
+        { sourceSkuId: 'sku-a', priceCents: 3090 },
+        { sourceSkuId: 'sku-new', priceCents: 3390 },
+      ],
+    });
+    await expect(
+      adapter.getProductInventory('tok', published.platformProductId),
+    ).resolves.toMatchObject({
+      items: [
+        { sourceSkuId: 'sku-a', stock: 9 },
+        { sourceSkuId: 'sku-new', stock: 4 },
+      ],
+    });
+
+    await adapter.updateProductPrice('tok', {
+      platformProductId: published.platformProductId,
+      sourceSkuId: 'sku-new',
+      priceCents: 3490,
+    });
+    await adapter.syncInventory('tok', {
+      platformProductId: published.platformProductId,
+      idempotencyKey: 'sku-replacement-stock',
+      items: [{ sourceSkuId: 'sku-new', stock: 2 }],
+    });
+    await expect(
+      adapter.getProductSkuState('tok', published.platformProductId),
+    ).resolves.toMatchObject({
+      items: [
+        expect.objectContaining({ platformSkuKey: 'sku-a' }),
+        expect.objectContaining({ platformSkuKey: 'sku-new', priceCents: 3490, stock: 2 }),
+      ],
+    });
+  });
+
+  it('rejects an existing mock SKU paired with a different platform ID', async () => {
+    const adapter = createMockAdapter('douyin');
+    const published = await adapter.publishProduct('tok', {
+      ...sampleDto,
+      skus: [{ sourceSkuId: 'sku-a', specName: '白色', price: 29, stock: 12, attributes: {} }],
+    });
+    const state = await adapter.getProductSkuState('tok', published.platformProductId);
+    const item = state.items[0]!;
+
+    await expect(
+      adapter.replaceProductSkus('tok', {
+        platformProductId: published.platformProductId,
+        keepOffline: true,
+        dimensions: [
+          {
+            propertyId: item.properties[0]!.propertyId,
+            propertyName: item.properties[0]!.propertyName,
+            values: [
+              {
+                valueId: item.properties[0]!.valueId,
+                valueName: item.properties[0]!.valueName,
+              },
+            ],
+          },
+        ],
+        items: [{ ...item, platformSkuId: 'wrong-platform-id' }],
+      }),
+    ).rejects.toThrow('do not match');
+  });
+
   it('rejects title updates for a mock product that was never published', async () => {
     const adapter = createMockAdapter('douyin');
 

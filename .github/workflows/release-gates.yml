@@ -42,7 +42,6 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/supplier
       DIRECT_URL: postgresql://postgres:postgres@127.0.0.1:5432/supplier
-      REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -53,7 +52,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm db:dev:up
+      - run: pnpm db:test:up
       - run: pnpm --filter @supplier/bff... build
       - run: pnpm db:migrate:deploy
       - run: pnpm db:seed
@@ -101,18 +100,17 @@ jobs:
           set -euo pipefail
           docker network create supplier-ci
           cleanup() {
-            docker rm -f supplier-web-ci supplier-bff-ci supplier-redis-ci supplier-postgres-ci >/dev/null 2>&1 || true
+            docker rm -f supplier-web-ci supplier-bff-ci supplier-postgres-ci >/dev/null 2>&1 || true
             docker network rm supplier-ci >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
           docker run -d --name supplier-postgres-ci --network supplier-ci \
-            -e POSTGRES_USER=supplier -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=supplier \
+            --network-alias db.abcdefghijklmnopqrst.supabase.co \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=postgres \
             postgres:15-alpine
-          docker run -d --name supplier-redis-ci --network supplier-ci redis:7-alpine
-
           for attempt in $(seq 1 30); do
-            if docker exec supplier-postgres-ci pg_isready -U supplier -d supplier >/dev/null 2>&1; then break; fi
+            if docker exec supplier-postgres-ci pg_isready -U postgres -d postgres >/dev/null 2>&1; then break; fi
             if [ "$attempt" = 30 ]; then docker logs supplier-postgres-ci; exit 1; fi
             sleep 1
           done
@@ -121,46 +119,49 @@ jobs:
           # The clean PostgreSQL smoke database must model that prerequisite so
           # the immutable, already-applied security migration keeps its checksum.
           docker exec -i supplier-postgres-ci \
-            psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
+            psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
             < infra/postgres/init-supabase-roles.sql
 
           docker run --rm --network supplier-ci \
-            -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
-            -e DIRECT_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            -e DATABASE_URL=postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres \
+            -e DIRECT_URL=postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres \
             supplier-migrate:${IMAGE_TAG}
 
           docker run --rm --network supplier-ci \
-            -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
-            -e DIRECT_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            -e DATABASE_URL=postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres \
+            -e DIRECT_URL=postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres \
             supplier-migrate:${IMAGE_TAG} \
             migrate status --schema node_modules/@supplier/db/prisma/schema.prisma
 
           docker run --rm --network supplier-ci \
-            -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
-            -e DIRECT_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            -e DATABASE_URL=postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres \
+            -e DIRECT_URL=postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres \
             supplier-migrate:${IMAGE_TAG} \
             migrate diff --exit-code \
-            --from-url postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
+            --from-url postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres \
             --to-schema-datamodel node_modules/@supplier/db/prisma/schema.prisma
 
           docker exec -i supplier-postgres-ci \
-            psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
+            psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
             < infra/postgres/assert-public-schema-isolation.sql
 
           docker exec -i supplier-postgres-ci \
-            psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
+            psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
             < infra/postgres/assert-workflow-check-constraints.sql
 
           docker exec -i supplier-postgres-ci \
-            psql -v ON_ERROR_STOP=1 -U supplier -d supplier \
-            < infra/postgres/assert-33-to-43-upgrade-data.sql
+            psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+            < packages/db/scripts/assert-43-to-44-sku-edits.sql
+
+          docker exec -i supplier-postgres-ci \
+            psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+            < packages/db/scripts/assert-44-to-45-runtime-state.sql
 
           docker run -d --name supplier-bff-ci --network supplier-ci -p 3101:3001 \
             -e NODE_ENV=production -e AUTH_MODE=supabase \
-            -e SUPABASE_URL=https://auth.ci.example \
+            -e SUPABASE_URL=https://abcdefghijklmnopqrst.supabase.co \
             -e SUPABASE_JWT_SECRET=ci-jwt-secret-that-is-longer-than-thirty-two \
-            -e DATABASE_URL=postgresql://supplier:secret@supplier-postgres-ci:5432/supplier \
-            -e REDIS_URL=redis://supplier-redis-ci:6379 \
+            -e DATABASE_URL=postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres \
             -e ENCRYPTION_KEY=ci-encryption-key-that-is-longer-than-thirty-two \
             -e OPERATIONS_TOKEN=ci-operations-token-that-is-longer-than-thirty-two \
             -e ALERT_WEBHOOK_URL=https://alerts.ci.example/hooks/supplier \

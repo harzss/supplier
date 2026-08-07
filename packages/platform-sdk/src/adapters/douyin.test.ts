@@ -5,6 +5,7 @@ import {
   PlatformTokenRefreshRejectedError,
   PlatformTokenRefreshRetryableError,
   type AdapterConfig,
+  type ReplaceProductSkusDto,
 } from '../types';
 import { DouyinAdapter } from './douyin';
 
@@ -14,6 +15,154 @@ const CONFIG: AdapterConfig = {
   customerMobile: '4001234567',
   serviceId: 'service-123',
   redirectUri: 'https://supplier.example.com/api/shops/oauth/douyin/callback',
+};
+
+const BASIC_PRODUCT_SKU_DETAIL = {
+  product_id: '998877',
+  category_leaf_id: '12345',
+  product_type: 0,
+  start_sale_type: 1,
+  status: 1,
+  check_status: 3,
+  spec_prices: [
+    {
+      sku_id: '7002',
+      outer_sku_id: 'sku-z',
+      sell_properties: [
+        {
+          property_id: '10',
+          property_name: '颜色',
+          value_id: '102',
+          value_name: '黑色',
+          remark: '',
+        },
+        {
+          property_id: '20',
+          property_name: '尺码',
+          value_id: '202',
+          value_name: 'L',
+        },
+      ],
+      price: 3290,
+      stock_num: 8,
+      sku_status: 1,
+      sku_type: 0,
+      code: 'code-z',
+      supplier_id: 'supplier-z',
+      step_stock_num: 1,
+      barcodes: ['690000000002'],
+      sku_picture_url: ['https://img.example/sku-z.jpg'],
+    },
+    {
+      sku_id: '7001',
+      outer_sku_id: 'sku-a',
+      sell_properties: [
+        {
+          property_id: '10',
+          property_name: '颜色',
+          value_id: '101',
+          value_name: '白色',
+        },
+        {
+          property_id: '20',
+          property_name: '尺码',
+          value_id: '201',
+          value_name: 'M',
+        },
+      ],
+      price: 2990,
+      stock_num: 12,
+      sku_status: true,
+      sku_type: 0,
+      code: '',
+      supplier_id: '',
+      step_stock_num: 0,
+      barcodes: [],
+      sku_picture_url: [],
+    },
+  ],
+};
+
+const BASIC_SKU_REPLACEMENT: ReplaceProductSkusDto = {
+  platformProductId: '998877',
+  keepOffline: true,
+  dimensions: [
+    {
+      propertyId: '10',
+      propertyName: '颜色',
+      values: [
+        { valueId: '101', valueName: '白色' },
+        { valueId: '102', valueName: '黑色', remark: '哑光' },
+      ],
+    },
+    {
+      propertyId: '20',
+      propertyName: '尺码',
+      values: [
+        { valueId: '201', valueName: 'M' },
+        { valueId: '202', valueName: 'L' },
+      ],
+    },
+  ],
+  items: [
+    {
+      platformSkuId: '7001',
+      platformSkuKey: 'sku-a',
+      properties: [
+        {
+          propertyId: '10',
+          propertyName: '颜色',
+          valueId: '101',
+          valueName: '白色',
+          remark: null,
+        },
+        {
+          propertyId: '20',
+          propertyName: '尺码',
+          valueId: '201',
+          valueName: 'M',
+          remark: null,
+        },
+      ],
+      priceCents: 3090,
+      stock: 9,
+      skuStatus: true,
+      skuType: 0,
+      code: null,
+      supplierId: null,
+      stepStock: 0,
+      barcodes: ['690000000001'],
+      skuPictureUrls: ['https://img.example/sku-a.jpg'],
+    },
+    {
+      platformSkuKey: 'sku-new',
+      properties: [
+        {
+          propertyId: '10',
+          propertyName: '颜色',
+          valueId: '102',
+          valueName: '黑色',
+          remark: '哑光',
+        },
+        {
+          propertyId: '20',
+          propertyName: '尺码',
+          valueId: '202',
+          valueName: 'L',
+          remark: null,
+        },
+      ],
+      priceCents: 3390,
+      stock: 4,
+      skuStatus: true,
+      skuType: 0,
+      code: 'new-code',
+      supplierId: 'supplier-new',
+      stepStock: 2,
+      barcodes: [],
+      skuPictureUrls: [],
+    },
+  ],
 };
 
 const BASIC_CHILD_ORDER = {
@@ -1017,6 +1166,541 @@ describe('DouyinAdapter', () => {
     );
 
     await expect(adapter.getProductInventory('access-token', '998877')).rejects.toThrow();
+  });
+
+  it('reads a complete draft-aware SKU state and stably sorts rows by merchant key', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ code: 10000, data: BASIC_PRODUCT_SKU_DETAIL }), {
+          status: 200,
+        }),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await expect(adapter.getProductSkuState('access-token', '998877')).resolves.toEqual({
+      state: 'offline',
+      status: 1,
+      checkStatus: 3,
+      categoryId: '12345',
+      productType: 0,
+      startSaleType: 1,
+      items: [
+        {
+          platformSkuId: '7001',
+          platformSkuKey: 'sku-a',
+          properties: [
+            {
+              propertyId: '10',
+              propertyName: '颜色',
+              valueId: '101',
+              valueName: '白色',
+              remark: null,
+            },
+            {
+              propertyId: '20',
+              propertyName: '尺码',
+              valueId: '201',
+              valueName: 'M',
+              remark: null,
+            },
+          ],
+          priceCents: 2990,
+          stock: 12,
+          skuStatus: true,
+          skuType: 0,
+          code: null,
+          supplierId: null,
+          stepStock: 0,
+          barcodes: [],
+          skuPictureUrls: [],
+        },
+        {
+          platformSkuId: '7002',
+          platformSkuKey: 'sku-z',
+          properties: [
+            {
+              propertyId: '10',
+              propertyName: '颜色',
+              valueId: '102',
+              valueName: '黑色',
+              remark: null,
+            },
+            {
+              propertyId: '20',
+              propertyName: '尺码',
+              valueId: '202',
+              valueName: 'L',
+              remark: null,
+            },
+          ],
+          priceCents: 3290,
+          stock: 8,
+          skuStatus: true,
+          skuType: 0,
+          code: 'code-z',
+          supplierId: 'supplier-z',
+          stepStock: 1,
+          barcodes: ['690000000002'],
+          skuPictureUrls: ['https://img.example/sku-z.jpg'],
+        },
+      ],
+    });
+    const [input, init] = fetcher.mock.calls[0]!;
+    expect(new URL(String(input)).pathname).toBe('/product/detail');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      product_id: '998877',
+      show_draft: 'true',
+    });
+  });
+
+  it('round-trips multiple custom dimension/value ID zero rows and 64-bit string IDs', async () => {
+    const customDetail = {
+      ...BASIC_PRODUCT_SKU_DETAIL,
+      spec_prices: [
+        {
+          ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[0],
+          sku_id: '90071992547409930001',
+          outer_sku_id: 'custom-red',
+          sell_properties: [
+            {
+              property_id: '0',
+              property_name: '颜色',
+              value_id: '0',
+              value_name: '其他',
+              remark: '定制红',
+            },
+            {
+              property_id: '0',
+              property_name: '尺码',
+              value_id: '0',
+              value_name: '其他',
+              remark: '定制小',
+            },
+          ],
+        },
+        {
+          ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[1],
+          sku_id: '90071992547409930002',
+          outer_sku_id: 'custom-blue',
+          sell_properties: [
+            {
+              property_id: '0',
+              property_name: '颜色',
+              value_id: '0',
+              value_name: '其他',
+              remark: '定制蓝',
+            },
+            {
+              property_id: '0',
+              property_name: '尺码',
+              value_id: '0',
+              value_name: '其他',
+              remark: '定制大',
+            },
+          ],
+        },
+      ],
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 10000, data: customDetail }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 10000, data: {} }), { status: 200 }),
+      );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    const state = await adapter.getProductSkuState('access-token', '998877');
+    expect(state.items.map((item) => item.platformSkuId)).toEqual([
+      '90071992547409930002',
+      '90071992547409930001',
+    ]);
+    const dimensions = state.items[0]!.properties.map((property, propertyIndex) => ({
+      propertyId: property.propertyId,
+      propertyName: property.propertyName,
+      values: state.items.map((item) => {
+        const value = item.properties[propertyIndex]!;
+        return {
+          valueId: value.valueId,
+          valueName: value.valueName,
+          ...(value.remark ? { remark: value.remark } : {}),
+        };
+      }),
+    }));
+    await adapter.replaceProductSkus('access-token', {
+      platformProductId: '998877',
+      keepOffline: true,
+      dimensions,
+      items: state.items,
+    });
+
+    const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
+    expect(body.spec_info.spec_values).toEqual([
+      {
+        property_id: '0',
+        property_name: '颜色',
+        values: [
+          { value_id: '0', value_name: '其他', remark: '定制蓝' },
+          { value_id: '0', value_name: '其他', remark: '定制红' },
+        ],
+      },
+      {
+        property_id: '0',
+        property_name: '尺码',
+        values: [
+          { value_id: '0', value_name: '其他', remark: '定制大' },
+          { value_id: '0', value_name: '其他', remark: '定制小' },
+        ],
+      },
+    ]);
+    expect(body.spec_prices_v2).toEqual([
+      expect.objectContaining({
+        sku_id: '90071992547409930002',
+        sell_properties: [
+          { property_name: '颜色', value_name: '定制蓝' },
+          { property_name: '尺码', value_name: '定制大' },
+        ],
+      }),
+      expect.objectContaining({
+        sku_id: '90071992547409930001',
+        sell_properties: [
+          { property_name: '颜色', value_name: '定制红' },
+          { property_name: '尺码', value_name: '定制小' },
+        ],
+      }),
+    ]);
+  });
+
+  it.each([
+    ['a missing SKU ID', [{ ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[0], sku_id: undefined }]],
+    [
+      'an unsafe numeric SKU ID',
+      [
+        {
+          ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[0],
+          sku_id: Number.MAX_SAFE_INTEGER + 1,
+        },
+      ],
+    ],
+    [
+      'duplicate SKU IDs',
+      [
+        BASIC_PRODUCT_SKU_DETAIL.spec_prices[0],
+        { ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[1], sku_id: '7002' },
+      ],
+    ],
+    [
+      'duplicate merchant SKU keys',
+      [
+        BASIC_PRODUCT_SKU_DETAIL.spec_prices[0],
+        { ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[1], outer_sku_id: 'sku-z' },
+      ],
+    ],
+    [
+      'duplicate property combinations',
+      [
+        BASIC_PRODUCT_SKU_DETAIL.spec_prices[0],
+        {
+          ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[1],
+          sell_properties: BASIC_PRODUCT_SKU_DETAIL.spec_prices[0].sell_properties,
+        },
+      ],
+    ],
+    [
+      'non-roundtrippable regional inventory',
+      [
+        {
+          ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[0],
+          region_stock_num: { '110000': 8 },
+        },
+      ],
+    ],
+    [
+      'an unknown meaningful side field',
+      [{ ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[0], future_side_field: 'must-preserve' }],
+    ],
+    [
+      'a non-roundtrippable SKU type',
+      [{ ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[0], sku_type: 1 }],
+    ],
+    [
+      'an unknown meaningful property field',
+      [
+        {
+          ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[0],
+          sell_properties: [
+            {
+              ...BASIC_PRODUCT_SKU_DETAIL.spec_prices[0]!.sell_properties[0],
+              future_property_constraint: true,
+            },
+          ],
+        },
+      ],
+    ],
+  ])('rejects a SKU readback with %s', async (_label, specPrices) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: { ...BASIC_PRODUCT_SKU_DETAIL, spec_prices: specPrices },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(adapter.getProductSkuState('access-token', '998877')).rejects.toThrow();
+  });
+
+  it('strictly parses SKU update rules and exposes complex platform blockers', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: {
+              product_spec_rule: {
+                max_spec_num: 3,
+                max_sku_num: 100,
+                max_spec_value_num: 50,
+                support_spec_sequence: true,
+                support_custom_spec: false,
+                sku_pic_need_all: true,
+                future_rule_constraint: { enabled: true },
+                spec_property_list: [
+                  {
+                    property_id: '10',
+                    property_name: '颜色',
+                    required: true,
+                    support_diy: false,
+                    remark_type: true,
+                    value_need_page: false,
+                    navigation_property_list: [],
+                    property_values: [
+                      { value_id: '101', value_name: '白色' },
+                      { value_id: '102', value_name: '黑色' },
+                    ],
+                  },
+                  {
+                    property_id: '20',
+                    property_name: '尺码',
+                    required: true,
+                    support_diy: false,
+                    remark_type: false,
+                    value_need_page: true,
+                    navigation_property_list: [{ property_id: '10', property_name: '颜色' }],
+                    property_values: [{ value_id: '201', value_name: 'M' }],
+                    measurement_template_id: '901',
+                    legal_combination_rule: { enabled: true },
+                  },
+                ],
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    const result = await adapter.getProductSkuRules('access-token', {
+      categoryId: '12345',
+      standardBrandId: '678',
+      spuId: '901',
+    });
+    expect(result).toMatchObject({
+      maxDimensions: 3,
+      maxCombinations: 100,
+      maxValuesPerDimension: 50,
+      supportsDimensionReordering: true,
+      supportsCustomDimensions: false,
+      allSkuPicturesRequired: true,
+    });
+    expect(result.dimensions[0]).toMatchObject({
+      propertyId: '10',
+      propertyName: '颜色',
+      required: true,
+      supportsRemark: true,
+      requiresPagedValues: false,
+      values: [
+        { valueId: '101', valueName: '白色' },
+        { valueId: '102', valueName: '黑色' },
+      ],
+    });
+    expect(result.dimensions[1]?.unsupportedReasons).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('paged'),
+        expect.stringContaining('navigation'),
+        expect.stringContaining('measurement'),
+        expect.stringContaining('combination'),
+      ]),
+    );
+    expect(result.unsupportedReasons).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('尺码'),
+        expect.stringContaining('future_rule_constraint'),
+      ]),
+    );
+    const [input, init] = fetcher.mock.calls[0]!;
+    expect(new URL(String(input)).pathname).toBe('/product/getProductUpdateRule');
+    expect(new URL(String(input)).searchParams.get('method')).toBe('product.getProductUpdateRule');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      category_id: 12345,
+      standard_brand_id: 678,
+      spu_id: 901,
+    });
+  });
+
+  it('rejects malformed SKU rule limits, booleans and duplicate values', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 10000,
+            data: {
+              product_spec_rule: {
+                max_spec_num: 3,
+                max_sku_num: 100,
+                max_spec_value_num: 50,
+                support_spec_sequence: 'maybe',
+                support_custom_spec: false,
+                sku_pic_need_all: false,
+                spec_property_list: [
+                  {
+                    property_id: '10',
+                    property_name: '颜色',
+                    required: true,
+                    support_diy: false,
+                    remark_type: false,
+                    value_need_page: false,
+                    property_values: [
+                      { value_id: '101', value_name: '白色' },
+                      { value_id: '101', value_name: '黑色' },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(
+      adapter.getProductSkuRules('access-token', { categoryId: '12345' }),
+    ).rejects.toThrow('reordering flag');
+  });
+
+  it('replaces the full SKU set with only the v2 structure fields', async () => {
+    const fetcher = vi.fn(
+      async () => new Response(JSON.stringify({ code: 10000, data: {} }), { status: 200 }),
+    );
+    const adapter = new DouyinAdapter(CONFIG, fetcher, () => 1_700_000_000_000);
+
+    await adapter.replaceProductSkus('access-token', BASIC_SKU_REPLACEMENT);
+
+    const [input, init] = fetcher.mock.calls[0]!;
+    const url = new URL(String(input));
+    const body = JSON.parse(String(init?.body));
+    expect(url.pathname).toBe('/product/editV2');
+    expect(url.searchParams.get('method')).toBe('product.editV2');
+    expect(body).toEqual({
+      commit: true,
+      product_id: '998877',
+      spec_info: {
+        spec_values: [
+          {
+            property_id: '10',
+            property_name: '颜色',
+            values: [
+              { value_id: '101', value_name: '白色' },
+              { remark: '哑光', value_id: '102', value_name: '黑色' },
+            ],
+          },
+          {
+            property_id: '20',
+            property_name: '尺码',
+            values: [
+              { value_id: '201', value_name: 'M' },
+              { value_id: '202', value_name: 'L' },
+            ],
+          },
+        ],
+      },
+      spec_prices_v2: [
+        {
+          barcodes: ['690000000001'],
+          code: '',
+          outer_sku_id: 'sku-a',
+          price: 3090,
+          sell_properties: [
+            { property_name: '颜色', value_name: '白色' },
+            { property_name: '尺码', value_name: 'M' },
+          ],
+          sku_id: '7001',
+          sku_picture_url: ['https://img.example/sku-a.jpg'],
+          sku_status: true,
+          sku_type: 0,
+          step_stock_num: 0,
+          stock_num: 9,
+          supplier_id: '',
+        },
+        {
+          barcodes: [],
+          code: 'new-code',
+          outer_sku_id: 'sku-new',
+          price: 3390,
+          sell_properties: [
+            { property_name: '颜色', value_name: '哑光' },
+            { property_name: '尺码', value_name: 'L' },
+          ],
+          sku_picture_url: [],
+          sku_status: true,
+          sku_type: 0,
+          step_stock_num: 2,
+          stock_num: 4,
+          supplier_id: 'supplier-new',
+        },
+      ],
+      start_sale_type: 1,
+    });
+    expect(body).not.toHaveProperty('specs');
+    expect(body).not.toHaveProperty('spec_prices');
+  });
+
+  it.each([
+    ['transport failure', vi.fn().mockRejectedValue(new Error('timeout'))],
+    ['HTTP 408', vi.fn().mockResolvedValue(new Response('timeout', { status: 408 }))],
+    ['HTTP 429', vi.fn().mockResolvedValue(new Response('limited', { status: 429 }))],
+    ['HTTP 500', vi.fn().mockResolvedValue(new Response('server error', { status: 500 }))],
+    [
+      'malformed success',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: {} }), { status: 200 })),
+    ],
+  ])('classifies an ambiguous SKU replacement %s as result unknown', async (_label, fetcher) => {
+    const adapter = new DouyinAdapter(CONFIG, fetcher);
+
+    await expect(
+      adapter.replaceProductSkus('access-token', BASIC_SKU_REPLACEMENT),
+    ).rejects.toBeInstanceOf(PlatformMutationResultUnknownError);
+  });
+
+  it.each([
+    ['HTTP 400', new Response('bad request', { status: 400 })],
+    [
+      'business rejection',
+      new Response(JSON.stringify({ code: 20000, sub_msg: 'marketing activity blocks edit' }), {
+        status: 200,
+      }),
+    ],
+  ])('keeps a definitive SKU replacement %s out of unknown recovery', async (_label, response) => {
+    const adapter = new DouyinAdapter(CONFIG, vi.fn().mockResolvedValue(response));
+    const result = adapter.replaceProductSkus('access-token', BASIC_SKU_REPLACEMENT);
+
+    await expect(result).rejects.toThrow();
+    await expect(result).rejects.not.toBeInstanceOf(PlatformMutationResultUnknownError);
   });
 
   it('maps product.detail audit status before the shop online status', async () => {

@@ -46,7 +46,7 @@ function readiness(status: ReadinessResult['status']): ReadinessResult {
     status,
     service: 'supplier-bff',
     version: '0.0.1',
-    checks: { database: { status: dependency }, redis: { status: dependency } },
+    checks: { database: { status: dependency }, runtimeState: { status: dependency } },
     timestamp: '2026-07-17T00:00:00.000Z',
     durationMs: 1,
   };

@@ -56,8 +56,9 @@ test('the 33-to-43 post-upgrade assertion is read-only and tracks the exact migr
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
+  const historicalMigrationNames = migrationNames.slice(0, 43);
   const diskManifest = await Promise.all(
-    migrationNames.map(async (name) => {
+    historicalMigrationNames.map(async (name) => {
       const migrationSql = await readFile(resolve(migrationsDir, name, 'migration.sql'));
       return {
         name,
@@ -70,7 +71,8 @@ test('the 33-to-43 post-upgrade assertion is read-only and tracks the exact migr
   );
   const sqlWithoutComments = sql.replace(/^\s*--.*$/gm, '');
 
-  assert.equal(migrationNames.length, 43);
+  assert.equal(historicalMigrationNames.length, 43);
+  assert.ok(migrationNames.length > historicalMigrationNames.length);
   assert.ok(manifestMatch);
   assert.deepEqual(JSON.parse(manifestMatch[1]), diskManifest);
   assert.match(sql, /^BEGIN TRANSACTION READ ONLY;$/m);
@@ -81,7 +83,8 @@ test('the 33-to-43 post-upgrade assertion is read-only and tracks the exact migr
   );
   assert.match(sql, /row_number\(\) OVER \(ORDER BY started_at, id\)/);
   assert.match(sql, /expected_history\.checksum IS DISTINCT FROM applied_history\.checksum/);
-  assert.match(releaseWorkflow, /infra\/postgres\/assert-33-to-43-upgrade-data\.sql/);
+  assert.match(releaseWorkflow, /packages\/db\/scripts\/assert-43-to-44-sku-edits\.sql/);
+  assert.match(releaseWorkflow, /packages\/db\/scripts\/assert-44-to-45-runtime-state\.sql/);
 });
 
 test('the post-upgrade assertion covers data backfills, strict CHECKs, and new-table RLS', async () => {

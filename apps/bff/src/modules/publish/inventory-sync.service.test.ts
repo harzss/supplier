@@ -54,6 +54,7 @@ function inventoryRecord(overrides: Record<string, unknown> = {}) {
       availability: 'available',
       inventoryFingerprint: FINGERPRINT,
       inventoryVersion: 4,
+      totalStock: 12,
       skuList: [
         { skuId: 'spec-white', stock: 12 },
         { skuId: 'spec-black', stock: 0 },
@@ -161,7 +162,12 @@ describe('InventorySyncService', () => {
           shop: { NOT: { platformShopId: { startsWith: 'demo-' } } },
           batchItems: {
             none: expect.objectContaining({
-              errorCode: { in: ['OFFLINE_WRITE_STARTED', 'OFFLINE_RESULT_UNKNOWN'] },
+              OR: expect.arrayContaining([
+                expect.objectContaining({
+                  errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+                  task: { action: 'edit_sku' },
+                }),
+              ]),
             }),
           },
         }),
@@ -201,6 +207,16 @@ describe('InventorySyncService', () => {
       2,
       expect.objectContaining({
         where: expect.objectContaining({
+          batchItems: {
+            none: expect.objectContaining({
+              OR: expect.arrayContaining([
+                expect.objectContaining({
+                  errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+                  task: { action: 'edit_sku' },
+                }),
+              ]),
+            }),
+          },
           sourceBindings: {
             some: expect.objectContaining({
               ...BINDING_GUARD,
@@ -212,12 +228,13 @@ describe('InventorySyncService', () => {
     );
   });
 
-  it('releases a claimed inventory job when an offline result still needs verification', async () => {
+  it('releases a claimed inventory job when a SKU mutation still needs verification', async () => {
     const syncInventory = vi.fn();
     const getProductInventory = vi.fn();
+    const findUnique = vi.fn().mockResolvedValue(inventoryRecord({ batchItems: [{ id: 51n }] }));
     const prisma = {
       publishedProduct: {
-        findUnique: vi.fn().mockResolvedValue(inventoryRecord({ batchItems: [{ id: 51n }] })),
+        findUnique,
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
     } as unknown as PrismaService;
@@ -236,11 +253,27 @@ describe('InventorySyncService', () => {
 
     expect(adapters.create).not.toHaveBeenCalled();
     expect(syncInventory).not.toHaveBeenCalled();
+    expect(findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: expect.objectContaining({
+          batchItems: expect.objectContaining({
+            where: expect.objectContaining({
+              OR: expect.arrayContaining([
+                expect.objectContaining({
+                  errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+                  task: { action: 'edit_sku' },
+                }),
+              ]),
+            }),
+          }),
+        }),
+      }),
+    );
     expect(prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           inventorySyncStatus: 'pending',
-          inventorySyncError: '商品下架结果待核验，库存同步已暂停',
+          inventorySyncError: '商品平台写入结果待核验，库存同步已暂停',
         }),
       }),
     );
@@ -378,6 +411,69 @@ describe('InventorySyncService', () => {
           },
         }),
         data: expect.objectContaining({
+          skuInventorySnapshot: { version: 1, items: desired },
+        }),
+      }),
+    );
+  });
+
+  it('syncs a default source route from the source total stock', async () => {
+    const record = boundInventoryRecord({
+      skuRoutes: [
+        {
+          platformSkuKey: 'stable-default',
+          sourceSpecId: null,
+          sourceSpecRequired: false,
+          sourceUnitCost: 12,
+          values: [],
+        },
+      ],
+      sourceProduct: {
+        availability: 'available',
+        inventoryFingerprint: FINGERPRINT,
+        inventoryVersion: 4,
+        totalStock: 20,
+        skuList: null,
+      },
+    });
+    const syncInventory = vi.fn().mockResolvedValue(undefined);
+    const getProductInventory = vi
+      .fn()
+      .mockResolvedValueOnce(platformInventory([['stable-default', 5]]))
+      .mockResolvedValueOnce(platformInventory([['stable-default', 20]]));
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const service = new InventorySyncService(
+      { get: vi.fn() } as unknown as ConfigService,
+      {
+        publishedProduct: {
+          findUnique: vi.fn().mockResolvedValue(record),
+          updateMany,
+        },
+      } as unknown as PrismaService,
+      {
+        create: vi.fn().mockReturnValue({
+          syncInventory,
+          getProductInventory,
+          offlineProduct: vi.fn(),
+        }),
+      } as unknown as PlatformAdapterFactory,
+      {} as ShopTokenService,
+      productLocks(),
+    );
+
+    await expect(service.execute(BOUND_JOB)).resolves.toBe('processed');
+
+    const desired = [{ sourceSkuId: 'stable-default', stock: 20 }];
+    expect(syncInventory).toHaveBeenCalledWith('mock-token', {
+      platformProductId: '998877',
+      idempotencyKey: inventoryKey(desired, BINDING_FINGERPRINT),
+      items: desired,
+    });
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          inventorySyncReason: 'stock_updated',
+          inventorySyncStatus: 'synced',
           skuInventorySnapshot: { version: 1, items: desired },
         }),
       }),

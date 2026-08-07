@@ -44,7 +44,7 @@ supplier/
 │   ├── llm-client/        # AI 模型调用与成本控制
 │   └── shared-types/      # 前后端共享类型
 ├── deploy/                # Cloudflare 等部署配置
-├── infra/                 # 本地基础设施
+├── infra/                 # 隔离测试与恢复演练基础设施
 ├── scripts/               # 验证、迁移和运维脚本
 └── docs/                  # 产品、工程与上线文档
 ```
@@ -53,4 +53,6 @@ supplier/
 
 具体环境变量和部署步骤见 [内部测试环境手册](docs/12-internal-staging.md)。常用命令以根目录 `package.json` 和各 workspace 的 `package.json` 为准。
 
-本地 PostgreSQL 必须通过 `pnpm db:dev:up` 或 `make infra-up` 启动并等待 healthy；这一步会为新旧数据卷幂等准备 Supabase 的 `anon` / `authenticated` 角色。创建或应用开发 migration 使用根目录 `pnpm db:migrate`（需要命名时使用 `make db-migrate name=...`），不要在容器刚启动时直接调用 package 内的 Prisma 命令绕过 readiness。
+日常开发、预览、staging 与 production 都直接使用托管 Supabase，不启动本机 PostgreSQL、Redis 或其他常驻中间件。`DATABASE_URL` 使用 Supabase transaction pooler，migration 使用同项目 `DIRECT_URL`；创建开发 migration 可执行根目录 `pnpm db:migrate`（需要命名时使用 `make db-migrate name=...`）。
+
+`pnpm db:test:up` / `make test-db-up` 只用于 CI、浏览器回归和恢复演练的可销毁隔离 PostgreSQL，数据位于 tmpfs，测试完成必须执行 `pnpm db:test:down` / `make test-db-down`；它不是开发或部署依赖，禁止被 staging/production 连接。

@@ -9,7 +9,7 @@ const CALLBACK = 'https://supplier.example.com/api/shops/oauth/alibaba_1688/call
 
 function makeService(
   values: Record<string, string>,
-  options: { buyer?: object; redisReady?: boolean } = {},
+  options: { buyer?: object; runtimeStateReady?: boolean } = {},
 ) {
   const config = { get: (key: string) => values[key] } as ConfigService;
   const prisma = {
@@ -18,7 +18,9 @@ function makeService(
     orderItem: { count: vi.fn().mockResolvedValue(0) },
   } as unknown as PrismaService;
   return new Alibaba1688ReadinessService(config, new OAuthConfigService(config), prisma, {
-    status: options.redisReady ? 'ready' : 'end',
+    ping: options.runtimeStateReady
+      ? vi.fn().mockResolvedValue(undefined)
+      : vi.fn().mockRejectedValue(new Error('runtime state unavailable')),
   } as never);
 }
 
@@ -44,7 +46,7 @@ describe('Alibaba1688ReadinessService', () => {
           refreshTokenEnc: 'refresh-enc',
           tokenExpireAt: new Date('2026-07-18T00:00:00.000Z'),
         },
-        redisReady: true,
+        runtimeStateReady: true,
       },
     );
 

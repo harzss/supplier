@@ -17,6 +17,7 @@ export function buildLaunchAgentPlist({
   nodePath,
   accountId,
   gatewayOrigin,
+  gitSha,
   homeDirectory,
   executablePath,
 }) {
@@ -28,6 +29,7 @@ export function buildLaunchAgentPlist({
     repoRoot,
     accountId,
     gatewayOrigin,
+    gitSha,
     homeDirectory,
     executablePath,
   };
@@ -54,6 +56,8 @@ export function buildLaunchAgentPlist({
     <string>${xmlEscape(accountId)}</string>
     <key>STAGING_GATEWAY_URL</key>
     <string>${xmlEscape(gatewayOrigin)}</string>
+    <key>SUPPLIER_GIT_SHA</key>
+    <string>${xmlEscape(gitSha)}</string>
     <key>HOME</key>
     <string>${xmlEscape(homeDirectory)}</string>
     <key>PATH</key>
@@ -90,7 +94,7 @@ export async function installLaunchAgent({
   launchctl = runLaunchctl,
 } = {}) {
   if (!Number.isInteger(uid) || uid < 0) throw new Error('A numeric user id is required');
-  const { accountId, gatewayOrigin } = readSupervisorConfiguration(environment);
+  const { accountId, gatewayOrigin, expectedRevision } = readSupervisorConfiguration(environment);
   const supervisorPath = join(repoRoot, 'scripts/staging-local-supervisor.mjs');
   const bffEnvironmentPath = join(repoRoot, 'apps/bff/.env.staging.local');
   const environmentFileStat = await statFile(bffEnvironmentPath);
@@ -117,6 +121,7 @@ export async function installLaunchAgent({
     nodePath,
     accountId,
     gatewayOrigin,
+    gitSha: expectedRevision,
     homeDirectory,
     executablePath,
   });

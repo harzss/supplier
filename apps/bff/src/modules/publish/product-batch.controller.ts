@@ -22,6 +22,14 @@ export class ProductBatchController {
     return this.batches.listCandidates(user, query);
   }
 
+  @Get('products/:publishedProductId/sku-edit-context')
+  skuEditContext(
+    @CurrentUser() user: CurrentUserType,
+    @Param('publishedProductId') publishedProductId: string,
+  ) {
+    return this.batches.getSkuEditContext(user, publishedProductId);
+  }
+
   @Post('previews')
   @AuditAction('product_batch.preview', 'product_batch_task')
   preview(@CurrentUser() user: CurrentUserType, @Body() dto: CreateProductBatchPreviewDto) {
@@ -94,5 +102,15 @@ export class ProductBatchController {
     @Param('itemId') itemId: string,
   ) {
     return this.batches.verifyOfflineResult(user, id, itemId);
+  }
+
+  @Post(':id/items/:itemId/verify-skus')
+  @AuditAction('product_batch.verify_skus', 'product_batch_item')
+  verifySkus(
+    @CurrentUser() user: CurrentUserType,
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+  ) {
+    return this.batches.verifySkuResult(user, id, itemId);
   }
 }

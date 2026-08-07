@@ -8,6 +8,7 @@ import {
   parseTryCloudflareOrigin,
   readSupervisorConfiguration,
   runStagingSupervisor,
+  waitForHttpReady,
   waitForTunnelOrigin,
 } from './staging-local-supervisor.mjs';
 import {
@@ -19,6 +20,7 @@ import {
 const ACCOUNT_ID = '0123456789abcdef0123456789abcdef';
 const GATEWAY_ORIGIN = 'https://supplier-staging.example.com';
 const TUNNEL_ORIGIN = 'https://quiet-river.trycloudflare.com';
+const GIT_SHA = 'a'.repeat(40);
 const ROOT = '/virtual/supplier';
 const WRANGLER_ENTRYPOINT = join(ROOT, 'node_modules/wrangler/bin/wrangler.js');
 
@@ -27,14 +29,18 @@ test('validates the public supervisor configuration', () => {
     readSupervisorConfiguration({
       CLOUDFLARE_ACCOUNT_ID: ` ${ACCOUNT_ID} `,
       STAGING_GATEWAY_URL: ` ${GATEWAY_ORIGIN} `,
+      SUPPLIER_GIT_SHA: GIT_SHA,
     }),
-    { accountId: ACCOUNT_ID, gatewayOrigin: GATEWAY_ORIGIN },
+    { accountId: ACCOUNT_ID, gatewayOrigin: GATEWAY_ORIGIN, expectedRevision: GIT_SHA },
   );
-
   for (const environment of [
     {},
     {
       CLOUDFLARE_ACCOUNT_ID: 'not-an-account',
+      STAGING_GATEWAY_URL: GATEWAY_ORIGIN,
+    },
+    {
+      CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
       STAGING_GATEWAY_URL: GATEWAY_ORIGIN,
     },
     {
@@ -49,8 +55,43 @@ test('validates the public supervisor configuration', () => {
       CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
       STAGING_GATEWAY_URL: `${GATEWAY_ORIGIN}?unexpected=true`,
     },
+    {
+      CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
+      STAGING_GATEWAY_URL: GATEWAY_ORIGIN,
+      SUPPLIER_GIT_SHA: 'short',
+    },
   ]) {
     assert.throws(() => readSupervisorConfiguration(environment));
+  }
+});
+
+test('rejects stale Redis readiness and mismatched build revisions', async () => {
+  for (const body of [
+    {
+      status: 'ready',
+      service: 'supplier-bff',
+      revision: GIT_SHA,
+      checks: { database: { status: 'up' }, redis: { status: 'up' } },
+    },
+    {
+      status: 'ready',
+      service: 'supplier-bff',
+      revision: 'b'.repeat(40),
+      checks: { database: { status: 'up' }, runtimeState: { status: 'up' } },
+    },
+  ]) {
+    await assert.rejects(
+      waitForHttpReady(
+        async () =>
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        'https://supplier-staging.example.com/api/health/ready',
+        { attempts: 1, expectedRevision: GIT_SHA },
+      ),
+      /readiness endpoint did not become ready/,
+    );
   }
 });
 
@@ -86,7 +127,7 @@ test('starts BFF, tunnel, Wrangler, and gateway checks in order without logging 
     spawn: children.spawn,
     fetcher: async (url) => {
       events.push(`fetch:${url}`);
-      return { ok: true };
+      return readyResponse(GIT_SHA);
     },
     logger: {
       info(message) {
@@ -180,7 +221,9 @@ test('rejects when either monitored process exits and cleans up its peer', async
           access: async () => {},
           spawn: children.spawn,
           fetcher: async (url, init) => {
-            if (url === 'http://127.0.0.1:3001/api/health/ready') return { ok: true };
+            if (url === 'http://127.0.0.1:3001/api/health/ready') {
+              return readyResponse(GIT_SHA);
+            }
             queueMicrotask(() => children[failure.child].exit(12));
             return pendingUntilAbort(init.signal);
           },
@@ -239,7 +282,7 @@ test('an aborted Wrangler process remains registered for forced cleanup', async 
       }
       throw new Error(`Unexpected command: ${command}`);
     },
-    fetcher: async () => ({ ok: true }),
+    fetcher: async () => readyResponse(GIT_SHA),
     logger: { info() {} },
     signal: controller.signal,
     readyAttempts: 1,
@@ -257,6 +300,7 @@ test('builds an escaped LaunchAgent plist with only public runtime configuration
     nodePath: '/node/with"quote',
     accountId: ACCOUNT_ID,
     gatewayOrigin: GATEWAY_ORIGIN,
+    gitSha: GIT_SHA,
     homeDirectory: "/virtual/user's-home",
     executablePath: '/node/bin:/usr/bin',
   });
@@ -267,6 +311,7 @@ test('builds an escaped LaunchAgent plist with only public runtime configuration
   assert.match(plist, /\/virtual\/user&apos;s-home/);
   assert.match(plist, /<key>SuccessfulExit<\/key>\s*<false\/>/);
   assert.match(plist, /<key>RunAtLoad<\/key>\s*<true\/>/);
+  assert.match(plist, new RegExp(GIT_SHA));
 });
 
 test('installs through injected filesystem and launchctl functions without persisting secrets', async () => {
@@ -331,6 +376,7 @@ test('installs through injected filesystem and launchctl functions without persi
   }
   assert.match(plist, new RegExp(ACCOUNT_ID));
   assert.match(plist, new RegExp(GATEWAY_ORIGIN));
+  assert.match(plist, new RegExp(GIT_SHA));
   assert.match(plist, /\/opt\/node\/bin:\/custom\/bin:/);
   assert.deepEqual(launchctlCalls, [
     [['bootout', 'gui/501', expectedPath], { allowFailure: true }],
@@ -396,8 +442,21 @@ function supervisorEnvironment() {
   return {
     CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
     STAGING_GATEWAY_URL: GATEWAY_ORIGIN,
+    SUPPLIER_GIT_SHA: GIT_SHA,
     PATH: '/usr/bin:/bin',
   };
+}
+
+function readyResponse(revision) {
+  return new Response(
+    JSON.stringify({
+      status: 'ready',
+      service: 'supplier-bff',
+      revision,
+      checks: { database: { status: 'up' }, runtimeState: { status: 'up' } },
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  );
 }
 
 function createHappyChildren(events) {

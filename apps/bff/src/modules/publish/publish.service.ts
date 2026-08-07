@@ -47,7 +47,12 @@ import { calculatePricing, pricingInput, pricingSnapshot, type PricingQuote } fr
 import { isPublishJobLeaseError, type PublishExecutionLease } from './publish-job-lease';
 import { publishMaxAttempts } from './publish-queue.config';
 import { PlatformProductLockService } from './platform-product-lock.service';
-import { OFFLINE_BATCH_ACTIONS, UNRESOLVED_OFFLINE_CODES } from './product-batch-fences';
+import {
+  OFFLINE_BATCH_ACTIONS,
+  UNRESOLVED_OFFLINE_CODES,
+  UNRESOLVED_SKU_CODES,
+} from './product-batch-fences';
+import { parseStoredProductSkuState, skuStateToPublishSkus } from './product-sku-state';
 import {
   PricingPreviewReceiptService,
   type PricingPreviewReceipt,
@@ -1757,6 +1762,10 @@ export class PublishService {
             errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
             task: { userId: user.userId, action: { in: [...OFFLINE_BATCH_ACTIONS] } },
           },
+          {
+            errorCode: { in: [...UNRESOLVED_SKU_CODES] },
+            task: { userId: user.userId, action: 'edit_sku' },
+          },
         ],
       },
       select: { id: true },
@@ -1837,8 +1846,10 @@ export class PublishService {
       ),
       record.sourceProduct.skuList,
     );
-    const baseEditSkus =
-      skuSnapshot[shop.platform]?.skus ?? defaultPublishSkus(Number(record.salePrice));
+    const storedSkuState = parseStoredProductSkuState(record.skuSpecSnapshot);
+    const baseEditSkus = storedSkuState
+      ? skuStateToPublishSkus(storedSkuState)
+      : (skuSnapshot[shop.platform]?.skus ?? defaultPublishSkus(Number(record.salePrice)));
     let confirmedPriceSnapshot = parsePublishedSkuPriceSnapshot(record.skuPriceSnapshot);
     let confirmedInventorySnapshot = parsePublishedSkuInventorySnapshot(
       record.skuInventorySnapshot,
@@ -1869,6 +1880,10 @@ export class PublishService {
             {
               errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
               task: { userId: user.userId, action: { in: [...OFFLINE_BATCH_ACTIONS] } },
+            },
+            {
+              errorCode: { in: [...UNRESOLVED_SKU_CODES] },
+              task: { userId: user.userId, action: 'edit_sku' },
             },
           ],
         },
@@ -2280,12 +2295,16 @@ export class PublishService {
             errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
             task: { userId: user.userId, action: { in: [...OFFLINE_BATCH_ACTIONS] } },
           },
+          {
+            errorCode: { in: [...UNRESOLVED_SKU_CODES] },
+            task: { userId: user.userId, action: 'edit_sku' },
+          },
         ],
       },
       select: { id: true },
     });
     if (unresolvedStatusMutation) {
-      throw new ConflictException('商品存在结果待核验的上下架操作，请先在原批量任务完成核验');
+      throw new ConflictException('商品存在结果待核验的平台写入，请先在原批量任务完成核验');
     }
     const platformLock = await this.platformProductLocks.acquire(record.id);
     try {
@@ -2317,12 +2336,16 @@ export class PublishService {
               errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
               task: { userId: user.userId, action: { in: [...OFFLINE_BATCH_ACTIONS] } },
             },
+            {
+              errorCode: { in: [...UNRESOLVED_SKU_CODES] },
+              task: { userId: user.userId, action: 'edit_sku' },
+            },
           ],
         },
         select: { id: true },
       });
       if (unresolvedStatusMutationAfterLock) {
-        throw new ConflictException('商品存在结果待核验的上下架操作，请先在原批量任务完成核验');
+        throw new ConflictException('商品存在结果待核验的平台写入，请先在原批量任务完成核验');
       }
       const adapter = this.adapters.create(current.shop);
       if (!adapter.getProductState) {

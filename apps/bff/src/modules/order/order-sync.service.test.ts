@@ -1,11 +1,11 @@
 import type { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
-import type Redis from 'ioredis';
 import { createHash } from 'node:crypto';
 import type { PlatformAdapterFactory } from '../shop/platform-adapter.factory';
 import type { ShopTokenService } from '../shop/shop-token.service';
 import { CryptoService } from '../../common/crypto.module';
 import type { PrismaService } from '../../common/prisma.module';
+import type { RuntimeStateService } from '../../common/runtime-state.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import type { AfterSaleService } from '../after-sale/after-sale.service';
 import { OrderSyncService } from './order-sync.service';
@@ -22,11 +22,12 @@ function runtimeConfig(overrides: Record<string, unknown> = {}): ConfigService {
   return { get: (key: string) => values[key] } as unknown as ConfigService;
 }
 
-function redis(setResult: 'OK' | null = 'OK'): Redis {
+function runtimeState(leaseToken: string | null = 'owned-token'): RuntimeStateService {
   return {
-    set: vi.fn().mockResolvedValue(setResult),
-    eval: vi.fn().mockResolvedValue(1),
-  } as unknown as Redis;
+    acquireLease: vi.fn().mockResolvedValue(leaseToken),
+    renewLease: vi.fn().mockResolvedValue(true),
+    releaseLease: vi.fn().mockResolvedValue(undefined),
+  } as unknown as RuntimeStateService;
 }
 
 function afterSales(materializeOrder = vi.fn().mockResolvedValue({ change: 'ignored' })) {
@@ -127,7 +128,7 @@ function sourceBindingHarness(
       }),
     } as unknown as PlatformAdapterFactory,
     runtimeConfig(),
-    redis(),
+    runtimeState(),
     afterSales(),
   );
   return {
@@ -142,14 +143,14 @@ function sourceBindingHarness(
 describe('OrderSyncService', () => {
   it('rejects legacy demo shops before acquiring a sync lock in supabase auth mode', async () => {
     const findFirst = vi.fn().mockResolvedValue(null);
-    const redisClient = redis();
+    const runtimeStateStore = runtimeState();
     const service = new OrderSyncService(
       { shop: { findFirst } } as unknown as PrismaService,
       new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
       {} as ShopTokenService,
       {} as PlatformAdapterFactory,
       runtimeConfig({ AUTH_MODE: 'supabase' }),
-      redisClient,
+      runtimeStateStore,
       afterSales(),
     );
 
@@ -162,7 +163,7 @@ describe('OrderSyncService', () => {
         NOT: { platformShopId: { startsWith: 'demo-' } },
       },
     });
-    expect(redisClient.set).not.toHaveBeenCalled();
+    expect(runtimeStateStore.acquireLease).not.toHaveBeenCalled();
   });
 
   it('refreshes one order and treats refund_status=1 as an active after-sale hold', async () => {
@@ -226,7 +227,7 @@ describe('OrderSyncService', () => {
         create: vi.fn().mockReturnValue({ listOrders: vi.fn(), getOrder }),
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(materializeOrder),
     );
 
@@ -244,7 +245,7 @@ describe('OrderSyncService', () => {
   });
 
   it('refuses an immediate order refresh while the same shop is being synchronized', async () => {
-    const redisClient = redis(null);
+    const runtimeStateStore = runtimeState(null);
     const getOrder = vi.fn();
     const service = new OrderSyncService(
       {
@@ -270,7 +271,7 @@ describe('OrderSyncService', () => {
         create: vi.fn().mockReturnValue({ listOrders: vi.fn(), getOrder }),
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redisClient,
+      runtimeStateStore,
       afterSales(),
     );
 
@@ -278,7 +279,7 @@ describe('OrderSyncService', () => {
       '该店铺订单正在同步，请稍后重试',
     );
     expect(getOrder).not.toHaveBeenCalled();
-    expect(redisClient.eval).not.toHaveBeenCalled();
+    expect(runtimeStateStore.releaseLease).not.toHaveBeenCalled();
   });
 
   it('rejects a mismatched order detail before writing another platform order', async () => {
@@ -340,7 +341,7 @@ describe('OrderSyncService', () => {
         create: vi.fn().mockReturnValue({ listOrders: vi.fn(), getOrder }),
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(),
     );
 
@@ -415,7 +416,7 @@ describe('OrderSyncService', () => {
         }),
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(),
     );
 
@@ -512,7 +513,7 @@ describe('OrderSyncService', () => {
       shopTokens,
       adapters,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(),
     );
 
@@ -797,7 +798,7 @@ describe('OrderSyncService', () => {
         }),
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(materializeOrder),
     );
 
@@ -872,7 +873,7 @@ describe('OrderSyncService', () => {
         }),
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(),
     );
 
@@ -1009,7 +1010,7 @@ describe('OrderSyncService', () => {
           }),
         } as unknown as PlatformAdapterFactory,
         runtimeConfig(),
-        redis(),
+        runtimeState(),
         afterSales(),
       );
 
@@ -1131,7 +1132,7 @@ describe('OrderSyncService', () => {
         }),
       } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(),
     );
 
@@ -1195,7 +1196,7 @@ describe('OrderSyncService', () => {
       { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(),
     );
 
@@ -1223,15 +1224,12 @@ describe('OrderSyncService', () => {
     const shopUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
     const transaction = vi.fn();
     const publishedProductFindMany = vi.fn();
-    const redisEval = vi
-      .fn()
-      .mockResolvedValueOnce(1)
-      .mockResolvedValueOnce(0)
-      .mockResolvedValueOnce(0);
-    const redisClient = {
-      set: vi.fn().mockResolvedValue('OK'),
-      eval: redisEval,
-    } as unknown as Redis;
+    const renewLease = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const runtimeStateStore = {
+      acquireLease: vi.fn().mockResolvedValue('owned-token'),
+      renewLease,
+      releaseLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as RuntimeStateService;
     const prisma = {
       shop: {
         findFirst: vi.fn().mockResolvedValue({
@@ -1268,7 +1266,7 @@ describe('OrderSyncService', () => {
       { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redisClient,
+      runtimeStateStore,
       afterSales(),
     );
 
@@ -1281,14 +1279,7 @@ describe('OrderSyncService', () => {
       where: { id: 9n, orderSyncAttemptAt: expect.any(Date) },
       data: expect.objectContaining({ orderSyncError: expect.stringContaining('执行权已失效') }),
     });
-    expect(redisEval).toHaveBeenNthCalledWith(
-      1,
-      expect.stringContaining('pexpire'),
-      1,
-      'orders:sync:9',
-      expect.any(String),
-      '900000',
-    );
+    expect(renewLease).toHaveBeenNthCalledWith(1, 'orders:sync:9', 'owned-token', 900_000);
   });
 
   it('fails without advancing the watermark when the configured page limit is exhausted', async () => {
@@ -1329,7 +1320,7 @@ describe('OrderSyncService', () => {
       { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig({ DOUYIN_ORDER_SYNC_MAX_PAGES: 1 }),
-      redis(),
+      runtimeState(),
       afterSales(),
     );
 
@@ -1389,7 +1380,7 @@ describe('OrderSyncService', () => {
       { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(),
+      runtimeState(),
       afterSales(),
     );
 
@@ -1435,7 +1426,7 @@ describe('OrderSyncService', () => {
       { getAccessToken: vi.fn() } as unknown as ShopTokenService,
       { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
       runtimeConfig(),
-      redis(null),
+      runtimeState(null),
       afterSales(),
     );
 

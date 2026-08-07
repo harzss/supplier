@@ -13,7 +13,7 @@ function makeService(
     shop?: object;
     confirmedMapping?: object;
     products?: object[];
-    redisReady?: boolean;
+    runtimeStateReady?: boolean;
   } = {},
 ) {
   const config = { get: (key: string) => values[key] } as ConfigService;
@@ -26,7 +26,9 @@ function makeService(
     sourceProduct: { findMany: vi.fn().mockResolvedValue(options.products ?? []) },
   } as unknown as PrismaService;
   return new DouyinReadinessService(config, oauthConfig, prisma, {
-    status: options.redisReady ? 'ready' : 'end',
+    ping: options.runtimeStateReady
+      ? vi.fn().mockResolvedValue(undefined)
+      : vi.fn().mockRejectedValue(new Error('runtime state unavailable')),
   } as never);
 }
 
@@ -61,7 +63,7 @@ describe('DouyinReadinessService', () => {
             title: '测试商品',
           },
         },
-        redisReady: true,
+        runtimeStateReady: true,
       },
     );
 

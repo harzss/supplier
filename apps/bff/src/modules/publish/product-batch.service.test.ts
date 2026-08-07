@@ -1,5 +1,6 @@
 import type { ConfigService } from '@nestjs/config';
 import { Prisma } from '@supplier/db';
+import type { PlatformProductSkuRules, PlatformProductSkuState } from '@supplier/platform-sdk';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
@@ -10,6 +11,7 @@ import type { PlatformAdapterFactory } from '../shop/platform-adapter.factory';
 import type { ShopTokenService } from '../shop/shop-token.service';
 import type { PlatformProductLockService } from './platform-product-lock.service';
 import { ProductBatchService, type ProductBatchExecutionRecord } from './product-batch.service';
+import { productSkuFingerprint, productSkuRuleFingerprint } from './product-sku-state';
 import { sourceBindingFingerprint, sourceBindingRoutesFingerprint } from './source-binding';
 
 const NOW = new Date('2026-08-04T08:00:00.000Z');
@@ -2182,7 +2184,11 @@ describe('ProductBatchService', () => {
         id: 51n,
         status: 'pending',
         attempts: 0,
-        task: { cancelRequestedAt: null, status: { in: ['queued', 'running'] } },
+        task: {
+          cancelRequestedAt: null,
+          status: { in: ['queued', 'running'] },
+          action: { not: 'edit_sku' },
+        },
       },
       data: expect.objectContaining({
         status: 'running',
@@ -4675,6 +4681,917 @@ describe('ProductBatchService', () => {
     expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
     expect(fixture.productLocks.release).toHaveBeenCalledWith(11n, 'product-lock');
   });
+
+  it('reads a stable SKU edit context twice and persists the complete platform snapshot', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const state = platformSkuState();
+    const rules = platformSkuRules();
+    const product = skuEditProduct(state);
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(product);
+    fixture.adapter.getProductSkuState.mockResolvedValue(state);
+    fixture.adapter.getProductSkuRules.mockResolvedValue(rules);
+
+    await expect(fixture.service.getSkuEditContext(USER, '11')).resolves.toMatchObject({
+      publishedProductId: '11',
+      expectedMutationRevision: 1,
+      expectedPlatformSkuFingerprint: productSkuFingerprint(state),
+      expectedRuleFingerprint: productSkuRuleFingerprint(rules),
+      editable: true,
+      blockers: [],
+      rows: [
+        {
+          rowId: 'existing:sku-a',
+          platformSkuId: '1001',
+          platformSkuKey: 'sku-a',
+          sourceSpecId: 'sku-a',
+          isNew: false,
+        },
+      ],
+    });
+
+    expect(fixture.adapter.getProductSkuState).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.publishedProduct.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 11n, mutationRevision: 1 }),
+        data: expect.objectContaining({
+          skuSpecSnapshot: expect.objectContaining({ version: 1, categoryId: 'cat-1001' }),
+          skuSpecFingerprint: productSkuFingerprint(state),
+          skuPriceSnapshot: expect.any(Object),
+          skuInventorySnapshot: expect.any(Object),
+        }),
+      }),
+    );
+  });
+
+  it('returns current strong-read dimensions separately from the complete platform rules', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const base = platformSkuState().items[0]!;
+    const state = platformSkuState({
+      items: [
+        {
+          ...base,
+          properties: [
+            {
+              propertyId: 'color',
+              propertyName: '颜色',
+              valueId: '0',
+              valueName: '自定义',
+              remark: '雾蓝',
+            },
+          ],
+        },
+        {
+          ...base,
+          platformSkuId: '1002',
+          platformSkuKey: 'sku-b',
+          properties: [
+            {
+              propertyId: 'color',
+              propertyName: '颜色',
+              valueId: '0',
+              valueName: '自定义',
+              remark: '月白',
+            },
+          ],
+          priceCents: 3990,
+          stock: 8,
+        },
+      ],
+    });
+    const rules = platformSkuRules({
+      maxDimensions: 2,
+      dimensions: [
+        {
+          propertyId: 'color',
+          propertyName: '颜色',
+          required: true,
+          supportsCustomValues: true,
+          supportsRemark: true,
+          requiresPagedValues: false,
+          navigationProperties: [],
+          values: [],
+          unsupportedReasons: [],
+        },
+        {
+          propertyId: 'material',
+          propertyName: '材质',
+          required: false,
+          supportsCustomValues: false,
+          supportsRemark: false,
+          requiresPagedValues: false,
+          navigationProperties: [],
+          values: [{ valueId: 'cotton', valueName: '棉' }],
+          unsupportedReasons: [],
+        },
+      ],
+    });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(skuEditProduct(state));
+    fixture.adapter.getProductSkuState.mockResolvedValue(state);
+    fixture.adapter.getProductSkuRules.mockResolvedValue(rules);
+
+    await expect(fixture.service.getSkuEditContext(USER, '11')).resolves.toMatchObject({
+      dimensions: [
+        {
+          propertyId: 'color',
+          propertyName: '颜色',
+          values: [
+            { valueId: '0', valueName: '自定义', remark: '雾蓝' },
+            { valueId: '0', valueName: '自定义', remark: '月白' },
+          ],
+        },
+      ],
+      rules: {
+        dimensions: [
+          expect.objectContaining({ propertyId: 'color', required: true }),
+          expect.objectContaining({ propertyId: 'material', required: false }),
+        ],
+      },
+    });
+  });
+
+  it('rejects an inconsistent cross-row SKU dimension order before persisting context', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const base = platformSkuState().items[0]!;
+    const properties = [
+      {
+        propertyId: 'color',
+        propertyName: '颜色',
+        valueId: 'white',
+        valueName: '白色',
+        remark: null,
+      },
+      {
+        propertyId: 'size',
+        propertyName: '尺码',
+        valueId: 'm',
+        valueName: 'M',
+        remark: null,
+      },
+    ];
+    const state = platformSkuState({
+      items: [
+        { ...base, properties },
+        {
+          ...base,
+          platformSkuId: '1002',
+          platformSkuKey: 'sku-b',
+          properties: [...properties].reverse(),
+        },
+      ],
+    });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(skuEditProduct(state));
+    fixture.adapter.getProductSkuState.mockResolvedValue(state);
+
+    await expect(fixture.service.getSkuEditContext(USER, '11')).rejects.toThrow(
+      '平台 SKU 规格结构不一致',
+    );
+
+    expect(fixture.adapter.getProductSkuRules).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects an SKU context when the two platform readbacks are not stable', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const state = platformSkuState();
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(skuEditProduct(state));
+    fixture.adapter.getProductSkuState.mockResolvedValueOnce(state).mockResolvedValueOnce(
+      platformSkuState({
+        items: state.items.map((item) => ({ ...item, priceCents: item.priceCents + 100 })),
+      }),
+    );
+
+    await expect(fixture.service.getSkuEditContext(USER, '11')).rejects.toThrow(
+      '平台 SKU 连续两次回读不一致',
+    );
+
+    expect(fixture.adapter.getProductSkuRules).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishedProduct.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('freezes existing SKU side fields and generates a deterministic key for a new SKU', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const state = platformSkuState();
+    const rules = platformSkuRules();
+    prepareSkuPreview(fixture, skuEditProduct(state), rules);
+    const target = skuTarget(state, rules, {
+      dimensions: [
+        {
+          propertyId: 'color',
+          propertyName: '颜色',
+          values: [
+            { valueId: 'white', valueName: '白色' },
+            { valueId: 'black', valueName: '黑色' },
+          ],
+        },
+      ],
+      rows: [
+        {
+          rowId: 'existing:sku-a',
+          isNew: false,
+          platformSkuId: '1001',
+          platformSkuKey: 'sku-a',
+          sourceSpecId: 'sku-a',
+          properties: state.items[0]!.properties,
+          priceCents: 2990,
+        },
+        {
+          rowId: 'new:black',
+          isNew: true,
+          sourceSpecId: 'sku-b',
+          properties: [
+            {
+              propertyId: 'color',
+              propertyName: '颜色',
+              valueId: 'black',
+              valueName: '黑色',
+              remark: null,
+            },
+          ],
+          priceCents: 3190,
+          skuPictureUrls: ['https://img.example.com/new-black.jpg'],
+        },
+      ],
+    });
+
+    await fixture.service.createPreview(USER, {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'edit_sku',
+      publishedProductIds: ['11'],
+      skuTargets: [target],
+    });
+
+    const desired =
+      fixture.prisma.productBatchTask.create.mock.calls[0]![0].data.items.create[0].desiredSnapshot;
+    const existing = desired.items.find((item: any) => item.platformSkuKey === 'sku-a');
+    const generated = desired.items.find((item: any) => item.sourceSpecId === 'sku-b');
+    const expectedKey = `supplier-${createHash('sha256')
+      .update(`${CLIENT_REQUEST_ID}:11:new:black`)
+      .digest('hex')
+      .slice(0, 48)}`;
+    expect(existing).toMatchObject({
+      platformSkuId: '1001',
+      platformSkuKey: 'sku-a',
+      priceCents: 2990,
+      stock: 7,
+      skuStatus: false,
+      skuType: 10,
+      code: 'legacy-code-a',
+      supplierId: 'platform-supplier-a',
+      stepStock: 2,
+      barcodes: ['barcode-a'],
+      skuPictureUrls: ['https://img.example.com/existing-a.jpg'],
+    });
+    expect(generated).toMatchObject({
+      platformSkuKey: expectedKey,
+      priceCents: 3190,
+      stock: 13,
+      skuStatus: true,
+      skuType: 0,
+      barcodes: [],
+      skuPictureUrls: ['https://img.example.com/new-black.jpg'],
+    });
+  });
+
+  it('rejects client price changes for an existing platform SKU', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const state = platformSkuState();
+    const rules = platformSkuRules();
+    prepareSkuPreview(fixture, skuEditProduct(state), rules);
+    const target = skuTarget(state, rules);
+    target.rows[0]!.priceCents += 1;
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_sku',
+        publishedProductIds: ['11'],
+        skuTargets: [target],
+      }),
+    ).rejects.toThrow('当前 SKU 编辑不能修改既有 SKU 价格');
+
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
+  });
+
+  it('requires each SKU row property to exactly match its declared custom dimension value', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const base = platformSkuState().items[0]!;
+    const state = platformSkuState({
+      items: [
+        {
+          ...base,
+          properties: [
+            {
+              propertyId: 'color',
+              propertyName: '颜色',
+              valueId: '0',
+              valueName: '自定义',
+              remark: '雾蓝',
+            },
+          ],
+        },
+      ],
+    });
+    const rules = platformSkuRules({
+      dimensions: [
+        {
+          ...platformSkuRules().dimensions[0]!,
+          supportsCustomValues: true,
+          supportsRemark: true,
+          values: [],
+        },
+      ],
+    });
+    prepareSkuPreview(fixture, skuEditProduct(state), rules);
+    const target = skuTarget(state, rules, {
+      dimensions: [
+        {
+          propertyId: 'color',
+          propertyName: '颜色',
+          values: [{ valueId: '0', valueName: '自定义', remark: '雾蓝' }],
+        },
+      ],
+      rows: [
+        {
+          rowId: 'existing:sku-a',
+          isNew: false,
+          platformSkuId: '1001',
+          platformSkuKey: 'sku-a',
+          sourceSpecId: 'sku-a',
+          properties: [
+            {
+              propertyId: 'color',
+              propertyName: '颜色',
+              valueId: '0',
+              valueName: '自定义',
+              remark: '月白',
+            },
+          ],
+          priceCents: 2990,
+        },
+      ],
+    });
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_sku',
+        publishedProductIds: ['11'],
+        skuTargets: [target],
+      }),
+    ).rejects.toThrow('目标 SKU 包含未在维度中声明的规格值');
+  });
+
+  it('previews two custom dimensions and multiple custom values with ID zero', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const state = platformSkuState();
+    const rules = platformSkuRules({
+      maxDimensions: 2,
+      supportsDimensionReordering: true,
+      supportsCustomDimensions: true,
+      dimensions: [],
+    });
+    prepareSkuPreview(fixture, skuEditProduct(state), rules);
+    const target = skuTarget(state, rules, {
+      dimensions: [
+        {
+          propertyId: '0',
+          propertyName: '色号',
+          values: [
+            { valueId: '0', valueName: '自定义', remark: '雾蓝' },
+            { valueId: '0', valueName: '自定义', remark: '月白' },
+          ],
+        },
+        {
+          propertyId: '0',
+          propertyName: '纹理',
+          values: [
+            { valueId: '0', valueName: '自定义', remark: '细纹' },
+            { valueId: '0', valueName: '自定义', remark: '粗纹' },
+          ],
+        },
+      ],
+      rows: [
+        {
+          rowId: 'existing:sku-a',
+          isNew: false,
+          platformSkuId: '1001',
+          platformSkuKey: 'sku-a',
+          sourceSpecId: 'sku-a',
+          properties: [
+            {
+              propertyId: '0',
+              propertyName: '色号',
+              valueId: '0',
+              valueName: '自定义',
+              remark: '雾蓝',
+            },
+            {
+              propertyId: '0',
+              propertyName: '纹理',
+              valueId: '0',
+              valueName: '自定义',
+              remark: '细纹',
+            },
+          ],
+          priceCents: 2990,
+        },
+        {
+          rowId: 'new:sku-b',
+          isNew: true,
+          sourceSpecId: 'sku-b',
+          properties: [
+            {
+              propertyId: '0',
+              propertyName: '色号',
+              valueId: '0',
+              valueName: '自定义',
+              remark: '月白',
+            },
+            {
+              propertyId: '0',
+              propertyName: '纹理',
+              valueId: '0',
+              valueName: '自定义',
+              remark: '粗纹',
+            },
+          ],
+          priceCents: 3990,
+        },
+      ],
+    });
+
+    await fixture.service.createPreview(USER, {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'edit_sku',
+      publishedProductIds: ['11'],
+      skuTargets: [target],
+    });
+
+    expect(
+      fixture.prisma.productBatchTask.create.mock.calls[0]![0].data.items.create[0].desiredSnapshot,
+    ).toMatchObject({
+      dimensions: [
+        { propertyId: '0', propertyName: '色号' },
+        { propertyId: '0', propertyName: '纹理' },
+      ],
+      items: [
+        expect.objectContaining({
+          properties: [
+            expect.objectContaining({ propertyId: '0', propertyName: '色号', remark: '雾蓝' }),
+            expect.objectContaining({ propertyId: '0', propertyName: '纹理', remark: '细纹' }),
+          ],
+        }),
+        expect.objectContaining({
+          properties: [
+            expect.objectContaining({ propertyId: '0', propertyName: '色号', remark: '月白' }),
+            expect.objectContaining({ propertyId: '0', propertyName: '纹理', remark: '粗纹' }),
+          ],
+        }),
+      ],
+    });
+  });
+
+  it('rejects conflicting names for the same official target property ID', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const state = platformSkuState();
+    const rules = platformSkuRules();
+    const target = skuTarget(state, rules, {
+      dimensions: [
+        {
+          propertyId: 'color',
+          propertyName: '颜色',
+          values: [{ valueId: 'white', valueName: '白色' }],
+        },
+        {
+          propertyId: 'color',
+          propertyName: '色号',
+          values: [{ valueId: 'white', valueName: '白色' }],
+        },
+      ],
+    });
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_sku',
+        publishedProductIds: ['11'],
+        skuTargets: [target],
+      }),
+    ).rejects.toThrow('逐项目标 SKU 必须有效');
+
+    expect(fixture.prisma.publishedProduct.findMany).not.toHaveBeenCalled();
+  });
+
+  it('keeps SKU preview disabled until the dedicated mutation flag is enabled', async () => {
+    const fixture = createFixture();
+    const state = platformSkuState();
+    const rules = platformSkuRules();
+
+    await expect(
+      fixture.service.createPreview(USER, {
+        clientRequestId: CLIENT_REQUEST_ID,
+        action: 'edit_sku',
+        publishedProductIds: ['11'],
+        skuTargets: [skuTarget(state, rules)],
+      }),
+    ).rejects.toThrow('SKU 编辑功能尚未启用');
+
+    expect(fixture.prisma.publishedProduct.findMany).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchTask.create).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh an SKU context while another platform mutation needs verification', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(skuEditProduct());
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue({ id: 61n });
+
+    await expect(fixture.service.getSkuEditContext(USER, '11')).rejects.toThrow(
+      '商品存在结果待核验的平台写入',
+    );
+
+    expect(fixture.productLocks.acquire).not.toHaveBeenCalled();
+    expect(fixture.adapter.getProductSkuState).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              errorCode: { in: ['TITLE_WRITE_STARTED', 'TITLE_RESULT_UNKNOWN'] },
+              task: { userId: 1n, action: 'edit_title' },
+            }),
+            expect.objectContaining({
+              errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+              task: { userId: 1n, action: 'edit_sku' },
+            }),
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it('rechecks the platform-mutation fence after taking the SKU context lock', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(skuEditProduct());
+    fixture.prisma.productBatchItem.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 61n });
+
+    await expect(fixture.service.getSkuEditContext(USER, '11')).rejects.toThrow(
+      '商品存在结果待核验的平台写入',
+    );
+
+    expect(fixture.productLocks.acquire).toHaveBeenCalledWith(11n);
+    expect(fixture.productLocks.release).toHaveBeenCalledWith(11n, 'product-lock');
+    expect(fixture.adapter.getProductSkuState).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['下架', () => executionRecord()],
+    ['上架', () => onlineExecutionRecord()],
+    ['改标题', () => titleExecutionRecord()],
+    ['改价', () => priceExecutionRecord()],
+    ['同步库存', () => inventoryExecutionRecord()],
+    ['换源', () => sourceChangeExecutionRecord()],
+    ['滞销清理', () => cleanupExecutionRecord()],
+  ])('blocks %s execution while an SKU write result is unresolved', async (_label, buildItem) => {
+    const fixture = createFixture();
+    const item = buildItem();
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 61n });
+
+    await expect(fixture.service.executeClaimed(item)).rejects.toThrow(
+      '同一商品存在结果待核验的 SKU 写入',
+    );
+
+    expect(fixture.adapters.create).not.toHaveBeenCalled();
+  });
+
+  it('strongly rereads existing SKU prices and side fields before replacement', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const prepared = await prepareSkuExecution(fixture);
+    const drifted = platformSkuState({
+      items: [
+        {
+          ...prepared.beforeState.items[0]!,
+          priceCents: prepared.beforeState.items[0]!.priceCents + 1,
+          code: 'platform-code-changed',
+        },
+      ],
+    });
+    fixture.adapter.getProductSkuState.mockResolvedValue(drifted);
+
+    await expect(fixture.service.executeClaimed(prepared.item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.getProductSkuState).toHaveBeenCalledTimes(2);
+    expect(fixture.adapter.replaceProductSkus).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ errorCode: 'PLATFORM_SKU_CHANGED' }),
+      }),
+    );
+  });
+
+  it('requires two matching offline SKU readbacks immediately before replacement', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const prepared = await prepareSkuExecution(fixture);
+    fixture.adapter.getProductSkuState
+      .mockResolvedValueOnce(prepared.beforeState)
+      .mockResolvedValueOnce({ ...prepared.beforeState, state: 'online', status: 0 });
+
+    await expect(fixture.service.executeClaimed(prepared.item)).rejects.toThrow(
+      '平台 SKU 连续两次回读不一致',
+    );
+
+    expect(fixture.adapter.replaceProductSkus).not.toHaveBeenCalled();
+  });
+
+  it('replays all retained side fields and commits only after stable target readback', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const prepared = await prepareSkuExecution(fixture);
+    fixture.adapter.getProductSkuState
+      .mockResolvedValueOnce(prepared.beforeState)
+      .mockResolvedValueOnce(prepared.beforeState)
+      .mockResolvedValueOnce(prepared.desiredState)
+      .mockResolvedValueOnce(prepared.desiredState);
+
+    await expect(fixture.service.executeClaimed(prepared.item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.replaceProductSkus).toHaveBeenCalledWith(
+      'shop-token',
+      expect.objectContaining({
+        platformProductId: '998877',
+        keepOffline: true,
+        items: [
+          expect.objectContaining({
+            platformSkuId: '1001',
+            platformSkuKey: 'sku-a',
+            priceCents: 2990,
+            stock: 7,
+            skuStatus: false,
+            skuType: 10,
+            code: 'legacy-code-a',
+            supplierId: 'platform-supplier-a',
+            stepStock: 2,
+            barcodes: ['barcode-a'],
+            skuPictureUrls: ['https://img.example.com/existing-a.jpg'],
+          }),
+        ],
+      }),
+    );
+    expect(fixture.adapter.getProductSkuState).toHaveBeenCalledTimes(4);
+    expect(fixture.prisma.publishedProductSourceBinding.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          sourceOfferId: '16880001',
+          sourceSupplierId: 'supplier-old',
+          sourceOnePieceDrop: true,
+        }),
+      }),
+    );
+  });
+
+  it('completes context, preview, and execution for a default single-SKU source', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const baseProduct = publishedProduct();
+    const state = platformSkuState({
+      items: [
+        {
+          ...platformSkuState().items[0]!,
+          properties: [],
+          stock: 20,
+        },
+      ],
+    });
+    const rules = platformSkuRules({
+      maxDimensions: 1,
+      supportsDimensionReordering: true,
+      supportsCustomDimensions: true,
+      dimensions: [],
+    });
+    const product = skuEditProduct(state, {
+      skuInventorySnapshot: inventorySnapshot([['sku-a', 20]]),
+      sourceProduct: {
+        ...baseProduct.sourceProduct,
+        skuList: null,
+        totalStock: 20,
+      },
+      sourceBindings: [
+        currentSourceBinding({
+          skuRoutes: [
+            {
+              platformSkuKey: 'sku-a',
+              sourceSpecId: null,
+              sourceSpecRequired: false,
+              sourceUnitCost: 10,
+              values: [],
+            },
+          ],
+        }),
+      ],
+    });
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(product);
+    fixture.adapter.getProductSkuState.mockResolvedValue(state);
+    fixture.adapter.getProductSkuRules.mockResolvedValue(rules);
+
+    const context = await fixture.service.getSkuEditContext(USER, '11');
+    expect(context).toMatchObject({
+      editable: true,
+      dimensions: [],
+      rows: [{ platformSkuKey: 'sku-a', sourceSpecId: null, stock: 20 }],
+      sourceSkus: [{ sourceSpecId: null, stock: 20, usedByPlatformSkuKey: 'sku-a' }],
+    });
+
+    prepareSkuPreview(fixture, product, rules);
+    await fixture.service.createPreview(USER, {
+      clientRequestId: CLIENT_REQUEST_ID,
+      action: 'edit_sku',
+      publishedProductIds: ['11'],
+      skuTargets: [
+        {
+          publishedProductId: '11',
+          expectedMutationRevision: context.expectedMutationRevision,
+          expectedPlatformSkuFingerprint: context.expectedPlatformSkuFingerprint,
+          expectedRuleFingerprint: context.expectedRuleFingerprint,
+          dimensions: [
+            {
+              propertyId: '0',
+              propertyName: '款式',
+              values: [{ valueId: '0', valueName: '自定义', remark: '默认款' }],
+            },
+          ],
+          rows: context.rows.map((row) => ({
+            rowId: row.rowId,
+            isNew: false,
+            platformSkuId: row.platformSkuId,
+            platformSkuKey: row.platformSkuKey,
+            sourceSpecId: row.sourceSpecId,
+            properties: [
+              {
+                propertyId: '0',
+                propertyName: '款式',
+                valueId: '0',
+                valueName: '自定义',
+                remark: '默认款',
+              },
+            ],
+            priceCents: row.priceCents,
+            skuPictureUrls: row.skuPictureUrls,
+          })),
+        },
+      ],
+    });
+    const created = fixture.prisma.productBatchTask.create.mock.calls[0]![0].data.items.create[0];
+    const baseItem = executionRecord();
+    const item = {
+      ...baseItem,
+      expectedMutationRevision: created.expectedMutationRevision,
+      beforeSnapshot: created.beforeSnapshot,
+      desiredSnapshot: created.desiredSnapshot,
+      task: { ...baseItem.task, action: 'edit_sku' },
+      publishedProduct: product,
+    } as ProductBatchExecutionRecord;
+    const desiredState = {
+      ...state,
+      items: created.desiredSnapshot.items,
+    } as PlatformProductSkuState;
+    fixture.prepareExecution(item);
+    fixture.prisma.publishedProduct.findFirst.mockResolvedValue(product);
+    fixture.adapter.getProductSkuState.mockReset();
+    fixture.adapter.getProductSkuState
+      .mockResolvedValueOnce(state)
+      .mockResolvedValueOnce(state)
+      .mockResolvedValueOnce(desiredState)
+      .mockResolvedValueOnce(desiredState);
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('processed');
+
+    expect(fixture.adapter.replaceProductSkus).toHaveBeenCalledWith(
+      'shop-token',
+      expect.objectContaining({
+        items: [expect.objectContaining({ platformSkuKey: 'sku-a', stock: 20 })],
+      }),
+    );
+    expect(fixture.prisma.publishedProductSourceBinding.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          skuRoutes: [
+            expect.objectContaining({
+              platformSkuKey: 'sku-a',
+              sourceSpecId: null,
+              sourceSpecRequired: false,
+            }),
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('rejects a damaged SKU snapshot that omits the frozen purchase identity', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const prepared = await prepareSkuExecution(fixture);
+    const beforeSnapshot = { ...(prepared.item.beforeSnapshot as Record<string, unknown>) };
+    delete beforeSnapshot.sourceSupplierId;
+    const damaged = { ...prepared.item, beforeSnapshot } as ProductBatchExecutionRecord;
+    fixture.prepareExecution(damaged);
+
+    await expect(fixture.service.executeClaimed(damaged)).rejects.toThrow(
+      'SKU 编辑快照不完整或已损坏',
+    );
+
+    expect(fixture.adapter.getProductSkuState).not.toHaveBeenCalled();
+    expect(fixture.adapter.replaceProductSkus).not.toHaveBeenCalled();
+  });
+
+  it('turns an unconfirmed post-write readback into a non-retryable SKU fence', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const prepared = await prepareSkuExecution(fixture);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.adapter.getProductSkuState
+      .mockResolvedValueOnce(prepared.beforeState)
+      .mockResolvedValueOnce(prepared.beforeState)
+      .mockRejectedValueOnce(new Error('readback unavailable'));
+
+    let failure: unknown;
+    try {
+      await fixture.service.executeClaimed(prepared.item);
+    } catch (error) {
+      failure = error;
+    }
+    await expect(fixture.service.failClaimedItem(prepared.item, failure)).resolves.toBe('failed');
+
+    expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          errorCode: { in: ['SKU_WRITE_STARTED', 'SKU_RESULT_UNKNOWN'] },
+        }),
+        data: expect.objectContaining({
+          status: 'failed',
+          errorCode: 'SKU_RESULT_UNKNOWN',
+        }),
+      }),
+    );
+  });
+
+  it('verifies a fenced SKU write with tenant-scoped stable readback', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    const prepared = await prepareSkuExecution(fixture);
+    const unknownItem = {
+      ...prepared.item,
+      status: 'failed',
+      errorCode: 'SKU_RESULT_UNKNOWN',
+      errorMessage: 'SKU 写入结果未知',
+      result: {
+        phase: 'platform_write_started',
+        skuWriteStartedAt: new Date(Date.now() - 60_000).toISOString(),
+      },
+      lockedAt: null,
+      lockedBy: null,
+      finishedAt: NOW,
+      task: { ...prepared.item.task, status: 'failed' },
+    } as ProductBatchExecutionRecord;
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(unknownItem);
+    fixture.prisma.productBatchItem.updateMany.mockResolvedValue({ count: 1 });
+    fixture.prisma.productBatchTask.findFirst.mockResolvedValue(
+      taskRecord({ action: 'edit_sku', status: 'succeeded', items: [unknownItem] }),
+    );
+    fixture.adapter.getProductSkuState.mockResolvedValue(prepared.desiredState);
+
+    await expect(fixture.service.verifySkuResult(USER, '41', '51')).resolves.toMatchObject({
+      taskId: '41',
+    });
+
+    expect(fixture.adapter.getProductSkuState).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.publishedProductSourceBinding.create).toHaveBeenCalledOnce();
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: { userId: 1n, action: 'edit_sku' },
+        }),
+      }),
+    );
+  });
+
+  it('does not expose another tenant SKU verification item', async () => {
+    const fixture = createFixture({ PRODUCT_BATCH_SKU_EDIT_ENABLED: 'true' });
+    fixture.prisma.productBatchItem.findFirst.mockResolvedValue(null);
+
+    await expect(fixture.service.verifySkuResult(USER, '41', '51')).rejects.toThrow(
+      '待核验的 SKU 批量条目不存在',
+    );
+
+    expect(fixture.productLocks.acquire).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: { userId: 1n, action: 'edit_sku' },
+        }),
+      }),
+    );
+  });
 });
 
 function createFixture(configOverrides: Record<string, string> = {}) {
@@ -4688,6 +5605,9 @@ function createFixture(configOverrides: Record<string, string> = {}) {
     getProductPrices: vi.fn(),
     syncInventory: vi.fn(),
     getProductInventory: vi.fn(),
+    getProductSkuState: vi.fn(),
+    getProductSkuRules: vi.fn(),
+    replaceProductSkus: vi.fn(),
   };
   const prisma = {
     $queryRaw: vi.fn().mockResolvedValue([]),
@@ -4717,6 +5637,7 @@ function createFixture(configOverrides: Record<string, string> = {}) {
     },
     publishedProduct: {
       count: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -5415,6 +6336,186 @@ function publishedProduct(overrides: Record<string, unknown> = {}) {
       syncedAt: NOW,
     },
     sourceBindings: [currentSourceBinding()],
+    ...overrides,
+  };
+}
+
+function platformSkuState(
+  overrides: Partial<PlatformProductSkuState> = {},
+): PlatformProductSkuState {
+  return {
+    state: 'offline',
+    status: 1,
+    checkStatus: 3,
+    categoryId: 'cat-1001',
+    productType: 0,
+    startSaleType: 0,
+    items: [
+      {
+        platformSkuId: '1001',
+        platformSkuKey: 'sku-a',
+        properties: [
+          {
+            propertyId: 'color',
+            propertyName: '颜色',
+            valueId: 'white',
+            valueName: '白色',
+            remark: null,
+          },
+        ],
+        priceCents: 2990,
+        stock: 5,
+        skuStatus: false,
+        skuType: 10,
+        code: 'legacy-code-a',
+        supplierId: 'platform-supplier-a',
+        stepStock: 2,
+        barcodes: ['barcode-a'],
+        skuPictureUrls: ['https://img.example.com/existing-a.jpg'],
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function platformSkuRules(
+  overrides: Partial<PlatformProductSkuRules> = {},
+): PlatformProductSkuRules {
+  return {
+    maxDimensions: 3,
+    maxCombinations: 100,
+    maxValuesPerDimension: 100,
+    supportsDimensionReordering: false,
+    supportsCustomDimensions: false,
+    allSkuPicturesRequired: false,
+    dimensions: [
+      {
+        propertyId: 'color',
+        propertyName: '颜色',
+        required: true,
+        supportsCustomValues: false,
+        supportsRemark: false,
+        requiresPagedValues: false,
+        navigationProperties: [],
+        values: [
+          { valueId: 'white', valueName: '白色' },
+          { valueId: 'black', valueName: '黑色' },
+        ],
+        unsupportedReasons: [],
+      },
+    ],
+    unsupportedReasons: [],
+    ...overrides,
+  };
+}
+
+function skuEditProduct(
+  state: PlatformProductSkuState = platformSkuState(),
+  overrides: Record<string, unknown> = {},
+) {
+  const storedState = { ...state, version: 1 as const };
+  return publishedProduct({
+    status: 'offline',
+    platformStatusRaw: 1,
+    platformCheckStatusRaw: 3,
+    skuSpecSnapshot: storedState,
+    skuSpecFingerprint: productSkuFingerprint(storedState),
+    skuSpecSyncedAt: new Date(),
+    task: { userId: 1n, skuSnapshot: null },
+    ...overrides,
+  });
+}
+
+function prepareSkuPreview(
+  fixture: ReturnType<typeof createFixture>,
+  product = skuEditProduct(),
+  rules = platformSkuRules(),
+) {
+  fixture.prisma.productBatchTask.findUnique.mockResolvedValue(null);
+  fixture.prisma.publishedProduct.findMany.mockResolvedValue([product]);
+  fixture.adapter.getProductSkuRules.mockResolvedValue(rules);
+  fixture.prisma.productBatchTask.create.mockImplementation(async ({ data }: any) =>
+    taskRecord({
+      action: 'edit_sku',
+      requestFingerprint: data.requestFingerprint,
+      items: data.items.create.map((item: any) => taskItem({ ...item, publishedProduct: product })),
+    }),
+  );
+  return { product, rules };
+}
+
+async function prepareSkuExecution(fixture: ReturnType<typeof createFixture>) {
+  const beforeState = platformSkuState();
+  const rules = platformSkuRules();
+  const product = skuEditProduct(beforeState);
+  prepareSkuPreview(fixture, product, rules);
+  await fixture.service.createPreview(USER, {
+    clientRequestId: CLIENT_REQUEST_ID,
+    action: 'edit_sku',
+    publishedProductIds: ['11'],
+    skuTargets: [skuTarget(beforeState, rules)],
+  });
+  const created = fixture.prisma.productBatchTask.create.mock.calls[0]![0].data.items.create[0];
+  const base = executionRecord();
+  const item = {
+    ...base,
+    expectedMutationRevision: created.expectedMutationRevision,
+    beforeSnapshot: created.beforeSnapshot,
+    desiredSnapshot: created.desiredSnapshot,
+    result: created.result ?? null,
+    errorCode: null,
+    errorMessage: null,
+    task: {
+      ...base.task,
+      action: 'edit_sku',
+      requestFingerprint: fingerprint('edit_sku', ['11']),
+    },
+    publishedProduct: product,
+  } as ProductBatchExecutionRecord;
+  const desired = created.desiredSnapshot as {
+    items: PlatformProductSkuState['items'];
+  };
+  const desiredState: PlatformProductSkuState = {
+    ...beforeState,
+    items: desired.items.map((entry) => ({ ...entry })),
+  };
+  fixture.prepareExecution(item);
+  fixture.prisma.publishedProduct.findFirst.mockResolvedValue(product);
+  return { item, product, beforeState, desiredState, rules };
+}
+
+function skuTarget(
+  state: PlatformProductSkuState,
+  rules: PlatformProductSkuRules,
+  overrides: Record<string, unknown> = {},
+) {
+  const existing = state.items[0]!;
+  return {
+    publishedProductId: '11',
+    expectedMutationRevision: 1,
+    expectedPlatformSkuFingerprint: productSkuFingerprint(state),
+    expectedRuleFingerprint: productSkuRuleFingerprint(rules),
+    dimensions: [
+      {
+        propertyId: 'color',
+        propertyName: '颜色',
+        values: [{ valueId: 'white', valueName: '白色' }],
+      },
+    ],
+    rows: [
+      {
+        rowId: `existing:${existing.platformSkuKey}`,
+        isNew: false,
+        platformSkuId: existing.platformSkuId,
+        platformSkuKey: existing.platformSkuKey,
+        sourceSpecId: 'sku-a',
+        properties: existing.properties.map((property) => ({
+          ...property,
+          ...(property.remark ? { remark: property.remark } : {}),
+        })),
+        priceCents: existing.priceCents,
+      },
+    ],
     ...overrides,
   };
 }

@@ -11,6 +11,7 @@ import {
 const BFF_ORIGIN = 'https://api.supplier.example.com';
 const WEB_ORIGIN = 'https://supplier.example.com';
 const OPERATIONS_TOKEN = 'operations-token-that-is-long-enough';
+const GIT_SHA = 'a'.repeat(40);
 
 test('accepts exact HTTPS deployment origins and defaults CORS to the Web origin', () => {
   assert.deepEqual(
@@ -18,9 +19,10 @@ test('accepts exact HTTPS deployment origins and defaults CORS to the Web origin
       BFF_URL: BFF_ORIGIN,
       WEB_URL: WEB_ORIGIN,
       OPERATIONS_TOKEN,
+      SUPPLIER_GIT_SHA: GIT_SHA,
       DEPLOY_VERIFY_TIMEOUT_MS: '1234',
     }),
-    configuration({ timeoutMs: 1234 }),
+    configuration({ expectedRevision: GIT_SHA, timeoutMs: 1234 }),
   );
 
   assert.deepEqual(
@@ -43,6 +45,7 @@ test('accepts exact HTTPS deployment origins and defaults CORS to the Web origin
     ['WEB_URL', 'http://supplier.example.com'],
     ['DEPLOY_VERIFY_CORS_ORIGIN', 'https://supplier.example.com/path'],
     ['OPERATIONS_TOKEN', 'short'],
+    ['SUPPLIER_GIT_SHA', 'short'],
     ['DEPLOY_VERIFY_TIMEOUT_MS', '99'],
     ['DEPLOY_VERIFY_TIMEOUT_MS', '30001'],
   ]) {
@@ -206,6 +209,7 @@ function configuration(overrides = {}) {
     webUrl: WEB_ORIGIN,
     corsOrigin: WEB_ORIGIN,
     operationsToken: OPERATIONS_TOKEN,
+    expectedRevision: undefined,
     timeoutMs: 5_000,
     ...overrides,
   };
@@ -216,7 +220,8 @@ function successfulResponses() {
     jsonResponse({ status: 'ok' }),
     jsonResponse({
       status: 'ready',
-      checks: { database: { status: 'up' }, redis: { status: 'up' } },
+      service: 'supplier-bff',
+      checks: { database: { status: 'up' }, runtimeState: { status: 'up' } },
     }),
     ...Array.from({ length: 4 }, () => new Response(null, { status: 404 })),
     ...Array.from({ length: 3 }, () => new Response(null, { status: 401 })),

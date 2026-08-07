@@ -694,14 +694,14 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 
 目标：阻止带已知 high/critical 生产漏洞的版本进入发布流程，并让每个 PR、主分支更新和每周定时任务自动执行代码与依赖安全扫描。
 
-| #   | 任务                                                                 | 状态              |
-| --- | -------------------------------------------------------------------- | ----------------- |
-| 1   | 建立 `pnpm audit --prod` 基线并归并直接漏洞来源                      | ✅ 完成           |
-| 2   | Next 15.5.22、Nest 11.1.28、Fastify 5.10 与兼容插件安全升级          | ✅ 完成           |
-| 3   | Sharp、PostCSS 与传递依赖安全升级，生产依赖审计清零                  | ✅ 完成           |
-| 4   | `audit:prod` 接入 `make release-check` 与 release-gates CI           | ✅ 完成           |
-| 5   | PR/main/weekly CodeQL 与生产依赖 SCA workflow                        | ✅ 完成           |
-| 6   | GitHub 首次运行、Code Scanning 可用性与 required checks/分支保护验收 | ⬜ 待 GitHub 配置 |
+| #   | 任务                                                                 | 状态                         |
+| --- | -------------------------------------------------------------------- | ---------------------------- |
+| 1   | 建立 `pnpm audit --prod` 基线并归并直接漏洞来源                      | ✅ 完成                      |
+| 2   | Next 15.5.22、Nest 11.1.28、Fastify 5.10 与兼容插件安全升级          | ✅ 完成                      |
+| 3   | Sharp、PostCSS 与传递依赖安全升级，生产依赖审计清零                  | ✅ 完成                      |
+| 4   | `audit:prod` 接入 `make release-check` 与 release-gates CI           | ✅ 完成                      |
+| 5   | PR/main/weekly CodeQL 与生产依赖 SCA workflow                        | ✅ 完成                      |
+| 6   | GitHub 首次运行、Code Scanning 可用性与 required checks/分支保护验收 | 🔄 CI 已验收，分支保护待配置 |
 
 ### 验收标准（M17）
 
@@ -710,7 +710,8 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 - [x] 当前 Next 15.5.22 与 Sharp 0.35.3 production build 通过；BFF 移除非业务必需的 static 插件，Nest 11 lint、typecheck 和 64 文件 / 338 项测试通过
 - [x] `make release-check` 全绿：lint 2/2、typecheck 14/14、测试任务 11/11（总计 209 项）、build 9/9、Prettier 与 `git diff --check` 通过
 - [x] release-gates 在安装依赖后执行生产 audit；security-scans 对 PR、main、`codex/internal-test-deploy` push、每周和手工触发运行依赖审计与 CodeQL
-- [ ] 在 GitHub 实际完成首次 security-scans，确认 Code Scanning 权限/套餐可用，并将 release/security checks 设为 main 分支 required
+- [x] GitHub Security scans #1 已完成 dependency audit 与 CodeQL，Code Scanning 权限可用
+- [ ] 将 release/security checks 设为 main 分支 required，并验收告警处置流程
 
 ## 23. M18 · 真实 1688 采购与一单多包闭环
 
@@ -1406,7 +1407,7 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 
 ## 54. 变更记录
 
-- 2026-08-07：完成 M86 / R1-03～R1-04 平台凭证、采购账号亲和性与 attempt fence 加固。1688 采购创建时固化 `buyerShopId`，远端创建结果不确定后的 `outOrderId` 恢复、付款状态与物流轮询只使用该原买家账号；已有采购缺少账号/远端单号、同一销售订单绑定多个买家账号、原账号失效或事务内绑定漂移时均 fail-closed。active 轮询以 `buyerShopId + attemptNo + outOrderId + orderId1688 + status + retryEligible + exceptionStatus + syncRevision` 和销售订单售后允许态原子认领，旧 attempt 迟到响应不能查询或覆盖新采购；下单结果已知或未知时若并发进入退款/售后，都会按原 attempt 原子复核，保留远端单号或原 `outOrderId` 并转为 `action_required`，不会误标已停止或覆盖 replacement attempt。抖店与 1688 Token refresh 新增明确拒绝与可重试错误分类：网络、408/425/429/5xx、畸形字段和未知业务错误保留店铺 active 并返回 503；1688 会解析非瞬时 4xx 的精确拒绝码，抖店会拒绝空主体、空白 Token 与越界有效期，只有明确 refresh credential 拒绝或有效且不同的刷新主体才标记 expired。定向验证覆盖 Platform SDK 204/204、1688 采购与 ShopToken 42/42；全仓测试 14/14 个任务共 1,301 项、typecheck 15/15、lint 2/2、build 9/9、运维脚本 92/92、生产依赖审计、Prettier 与 diff check 全部通过。尚未执行真实平台账号切换、真实 Token 失效和小额采购 E2E，因此 R1 与生产门禁状态不变。
+- 2026-08-07：完成 M86 / R1-03～R1-04 平台凭证、采购账号亲和性与 attempt fence 加固。1688 采购创建时固化 `buyerShopId`，远端创建结果不确定后的 `outOrderId` 恢复、付款状态与物流轮询只使用该原买家账号；已有采购缺少账号/远端单号、同一销售订单绑定多个买家账号、原账号失效或事务内绑定漂移时均 fail-closed。active 轮询以 `buyerShopId + attemptNo + outOrderId + orderId1688 + status + retryEligible + exceptionStatus + syncRevision` 和销售订单售后允许态原子认领，旧 attempt 迟到响应不能查询或覆盖新采购；下单结果已知或未知时若并发进入退款/售后，都会按原 attempt 原子复核，保留远端单号或原 `outOrderId` 并转为 `action_required`，不会误标已停止或覆盖 replacement attempt。抖店与 1688 Token refresh 新增明确拒绝与可重试错误分类：网络、408/425/429/5xx、畸形字段和未知业务错误保留店铺 active 并返回 503；1688 会解析非瞬时 4xx 的精确拒绝码，抖店会拒绝空主体、空白 Token 与越界有效期，只有明确 refresh credential 拒绝或有效且不同的刷新主体才标记 expired。定向验证覆盖 Platform SDK 204/204、1688 采购与 ShopToken 42/42；全仓测试 14/14 个任务共 1,301 项、typecheck 15/15、lint 2/2、build 9/9、运维脚本 92/92、生产依赖审计、Prettier 与 diff check 全部通过；提交 `2712995` 的 [Release Gates #35](https://github.com/harzss/supplier/actions/runs/31166983502) verify/browser/images 与 [Security scans #1](https://github.com/harzss/supplier/actions/runs/31166983544) dependency-audit/CodeQL 全绿。尚未执行真实平台账号切换、真实 Token 失效和小额采购 E2E，因此 R1 与生产门禁状态不变。
 
 - 2026-08-07：完成 M85 / R1-01 双账号租户隔离验收器的代码基座。新增固定读取权限为 `0600` 的 Web staging 配置，并把 Supabase 项目与 BFF 固定到当前公开 staging origin；同账号、非 UUID 身份、非公开 Key、错项目或错 Gateway 都在发送凭证/Token 前失败。验收器在任何写入前要求双方都没有目标收藏，随后对 A、B 依次执行收藏、己方回读、对方不可见、删除和对称验证。只有双方初始为空后才允许补偿删除；PUT 超时、网络错误或非 200 时不重试，最终仍逐账号执行 best-effort DELETE、回读、logout，并要求 refresh token 返回 400/401，但由于迟到提交可能晚于即时回读，这类结果会永久标记为清理未证明而不是误报成功。普通路径任一步无法证明也会失败，且输出不含邮箱、密码、Key、Token、用户 ID、商品编号或响应正文。同时加固单账号 Auth 验收器：password/refresh 的响应在完整性或状态断言前登记任何 access token，grant 超时、无 Token 的 5xx 和注销后 refresh 探针不确定均明确要求人工核对会话，错误目标在发送凭证前失败。定向 Auth/隔离测试 43/43、全体运维脚本 92/92、全仓测试 14/14 个任务共 1,249 项、typecheck 15/15、lint 2/2、build 9/9、Prettier 与 diff check 已通过。真实双账号尚未写入 staging 私有配置，也未执行本 smoke；当前动态证据范围只覆盖两个不同 Supabase 用户的当前 JWT 会话与 Favorites 双向不可见，不能宣称刷新前后内部映射、R1-01、其他业务域租户隔离或生产身份门禁完成。
 

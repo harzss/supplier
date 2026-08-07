@@ -184,6 +184,41 @@ test('starts BFF, tunnel, Wrangler, and gateway checks in order without logging 
   assert.deepEqual(children.tunnel.killSignals, ['SIGTERM']);
 });
 
+test('retries the fixed gateway independently without restarting healthy children', async () => {
+  const events = [];
+  const controller = new AbortController();
+  const children = createHappyChildren(events);
+  let gatewayAttempts = 0;
+
+  await runStagingSupervisor({
+    environment: supervisorEnvironment(),
+    root: ROOT,
+    access: async () => {},
+    spawn: children.spawn,
+    fetcher: async (url) => {
+      if (url === 'http://127.0.0.1:3001/api/health/ready') return readyResponse(GIT_SHA);
+      gatewayAttempts += 1;
+      return gatewayAttempts === 1 ? new Response(null, { status: 503 }) : readyResponse(GIT_SHA);
+    },
+    logger: {
+      info(message) {
+        if (message.includes('monitoring child processes'))
+          queueMicrotask(() => controller.abort());
+      },
+    },
+    signal: controller.signal,
+    readyAttempts: 1,
+    gatewayReadyAttempts: 2,
+    readyIntervalMs: 0,
+    tunnelStartTimeoutMs: 100,
+    childStopTimeoutMs: 20,
+  });
+
+  assert.equal(gatewayAttempts, 2);
+  assert.equal(children.calls.filter(({ command }) => command === 'cloudflared').length, 1);
+  assert.equal(children.calls.filter(({ args }) => args.includes('BFF_ORIGIN')).length, 1);
+});
+
 test('refuses to start when the repository-local Wrangler entrypoint is missing', async () => {
   let spawnCount = 0;
 

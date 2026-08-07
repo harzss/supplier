@@ -17,6 +17,7 @@ const BFF_ENTRYPOINT = 'apps/bff/dist/main.js';
 const GATEWAY_DIRECTORY = 'deploy/cloudflare/staging-gateway';
 const WRANGLER_ENTRYPOINT = 'node_modules/wrangler/bin/wrangler.js';
 const READY_ATTEMPTS = 90;
+const GATEWAY_READY_ATTEMPTS = Number.POSITIVE_INFINITY;
 const READY_INTERVAL_MS = 1_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
 const CHILD_STOP_TIMEOUT_MS = 5_000;
@@ -134,6 +135,7 @@ export async function runStagingSupervisor({
   logger = console,
   signal,
   readyAttempts = READY_ATTEMPTS,
+  gatewayReadyAttempts = GATEWAY_READY_ATTEMPTS,
   readyIntervalMs = READY_INTERVAL_MS,
   tunnelStartTimeoutMs = TUNNEL_START_TIMEOUT_MS,
   childStopTimeoutMs = CHILD_STOP_TIMEOUT_MS,
@@ -239,7 +241,10 @@ export async function runStagingSupervisor({
 
     await runStep(
       waitForHttpReady(fetcher, `${gatewayOrigin}/api/health/ready`, {
-        attempts: readyAttempts,
+        // A healthy BFF and Tunnel must stay stable while the fixed Gateway or
+        // the host's DNS path is temporarily unavailable. Child exit still
+        // wins the runStep race and causes launchd to restart the pair.
+        attempts: gatewayReadyAttempts,
         intervalMs: readyIntervalMs,
         delay,
         signal: lifecycle.signal,

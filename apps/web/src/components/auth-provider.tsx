@@ -12,6 +12,20 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import type { Session } from '@supabase/supabase-js';
 import {
+  ArrowRight,
+  CheckCircle,
+  CirclesFour,
+  EnvelopeSimple,
+  Key,
+  LockKey,
+  Package,
+  ShieldCheck,
+  Storefront,
+  Truck,
+  WarningCircle,
+  type Icon,
+} from '@phosphor-icons/react';
+import {
   clearPendingPasswordSetup,
   getPasswordSetupStorage,
   readPasswordSetupReason,
@@ -27,6 +41,7 @@ import {
   isSignupEnabled,
   setAccessToken,
 } from '../lib/supabase';
+import { Button } from '@/components/ui/button';
 
 interface AuthContextValue {
   session: Session | null;
@@ -207,26 +222,31 @@ export function AuthStatus({ compact = false }: { compact?: boolean }) {
   };
   if (compact) {
     return (
-      <button
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
+        className="h-11"
         onClick={() => void signOut()}
         aria-label={`退出账号 ${session.user.email ?? ''}`.trim()}
-        className="min-h-11 border border-[var(--line-strong)] bg-[var(--surface)] px-3 text-xs font-bold text-[var(--ink-soft)] transition hover:border-[var(--ink)]"
       >
         退出
-      </button>
+      </Button>
     );
   }
   return (
-    <div className="grid gap-2 border-t border-[#34403b] pt-3 text-xs text-[#9eaaa4]">
-      <span className="max-w-48 truncate">{session.user.email ?? '已登录'}</span>
-      <button
+    <div className="space-y-2">
+      <p className="truncate text-xs text-muted-foreground">{session.user.email ?? '已登录'}</p>
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
         onClick={() => void signOut()}
-        className="min-h-11 border border-[#56625c] px-3 py-2 font-medium text-[#dce3df] transition hover:border-white hover:text-white"
+        aria-label={`退出账号 ${session.user.email ?? ''}`.trim()}
+        className="h-11 w-full lg:h-8"
       >
         退出
-      </button>
+      </Button>
     </div>
   );
 }
@@ -251,7 +271,7 @@ function LoginStudio() {
       });
       setPending(false);
       if (result.error) {
-        setError(result.error.message);
+        setError(authErrorMessage(result.error, 'forgot'));
         return;
       }
       setMessage('密码重置邮件已发送，请通过邮件中的安全链接设置新密码。');
@@ -263,7 +283,7 @@ function LoginStudio() {
         : await supabase.auth.signUp({ email, password });
     setPending(false);
     if (result.error) {
-      setError(result.error.message);
+      setError(authErrorMessage(result.error, mode));
       return;
     }
     if (mode === 'signup' && !result.data.session) {
@@ -272,146 +292,201 @@ function LoginStudio() {
   };
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-[#f4f5f8] px-5 py-8 text-[#15171c] sm:px-8">
-      <div className="pointer-events-none absolute -left-40 -top-56 h-[34rem] w-[34rem] rounded-full bg-brand-200/45 blur-3xl" />
-      <div className="pointer-events-none absolute -bottom-64 -right-32 h-[38rem] w-[38rem] rounded-full bg-blue-100/70 blur-3xl" />
-      <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] max-w-6xl overflow-hidden rounded-3xl border border-black/5 bg-white shadow-[0_28px_90px_-40px_rgba(16,24,40,0.34)] lg:grid-cols-[1.06fr_0.94fr]">
-        <section className="relative flex flex-col justify-between overflow-hidden bg-[#121419] p-7 text-white sm:p-10">
-          <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-brand-500/25 blur-3xl" />
-          <div>
-            <p className="relative text-xs font-semibold text-brand-300">Supplier · Merchant OS</p>
-            <h1 className="relative mt-8 max-w-xl text-4xl font-semibold leading-[1.04] tracking-[-0.04em] sm:text-6xl">
-              从货源到订单，
-              <br />
-              每一步都可追溯。
-            </h1>
-            <p className="relative mt-7 max-w-lg text-sm leading-7 text-[#aab0bc] sm:text-base">
-              可信身份会隔离你的店铺、铺货任务、订单、收藏与模型密钥。登录后才会连接真实商家工作台。
-            </p>
-          </div>
-          <div className="relative mt-12 grid grid-cols-3 gap-2 text-[10px] font-medium text-[#aab0bc]">
-            {['Tenant isolated', 'Token verified', 'Audit ready'].map((item) => (
-              <span
-                key={item}
-                className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3"
-              >
-                {item}
-              </span>
-            ))}
-          </div>
-        </section>
+    <main className="auth-shell">
+      <aside className="auth-rail" aria-label="Supplier 产品信息">
+        <div className="auth-brand">
+          <span className="auth-brand-mark" aria-hidden="true">
+            <CirclesFour weight="fill" />
+          </span>
+          <span>
+            <strong>Supplier</strong>
+            <small>分销经营台</small>
+          </span>
+        </div>
 
-        <section className="flex items-center p-7 sm:p-10 lg:p-14">
-          <div className="w-full">
-            <div className="mb-8 flex items-end justify-between">
+        <div className="auth-rail-message">
+          <p>从货源到履约</p>
+          <strong>一处完成。</strong>
+          <span>让选品、铺货、订单和异常处理保持在同一条可追溯链路中。</span>
+        </div>
+
+        <div className="auth-rail-status">
+          <ShieldCheck aria-hidden="true" weight="duotone" />
+          <span>
+            <strong>邀请制内部测试</strong>
+            <small>身份与业务数据隔离</small>
+          </span>
+        </div>
+      </aside>
+
+      <section className="auth-stage">
+        <header className="auth-stage-header">
+          <span>1688 分销经营工作台</span>
+          <span className="auth-stage-environment">
+            <LockKey aria-hidden="true" weight="fill" />
+            安全访问
+          </span>
+        </header>
+
+        <div className="auth-stage-center">
+          <div className="auth-panel">
+            <div className="auth-panel-heading">
+              <span className="auth-panel-icon" aria-hidden="true">
+                {mode === 'forgot' ? <Key weight="duotone" /> : <LockKey weight="duotone" />}
+              </span>
               <div>
-                <p className="text-xs font-semibold text-brand-600">安全访问</p>
-                <h2 className="mt-1 text-3xl font-semibold tracking-[-0.025em]">
+                <h1>
                   {mode === 'signin'
-                    ? '进入工作台'
+                    ? '进入 Supplier'
                     : mode === 'signup'
                       ? '创建商家账号'
                       : '找回登录密码'}
-                </h2>
+                </h1>
+                <p>
+                  {mode === 'forgot'
+                    ? '输入受邀邮箱，我们会发送安全重置链接。'
+                    : '使用受邀邮箱登录你的内部测试工作区。'}
+                </p>
               </div>
             </div>
 
-            <form className="space-y-5" onSubmit={(event) => void submit(event)}>
-              <label className="grid gap-2 text-xs font-semibold text-zinc-700">
-                登录邮箱
-                <input
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  className="h-12 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-brand-500 focus:ring-4 focus:ring-brand-100"
-                />
+            <form className="auth-form" onSubmit={(event) => void submit(event)}>
+              <label className="auth-field">
+                <span>登录邮箱</span>
+                <span className="auth-input-wrap">
+                  <EnvelopeSimple aria-hidden="true" />
+                  <input
+                    type="email"
+                    autoComplete="email"
+                    required
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                  />
+                </span>
               </label>
               {mode !== 'forgot' ? (
-                <label className="grid gap-2 text-xs font-semibold text-zinc-700">
-                  密码
-                  <input
-                    type="password"
-                    autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
-                    required
-                    minLength={8}
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    className="h-12 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-brand-500 focus:ring-4 focus:ring-brand-100"
-                  />
+                <label className="auth-field">
+                  <span>密码</span>
+                  <span className="auth-input-wrap">
+                    <Key aria-hidden="true" />
+                    <input
+                      type="password"
+                      autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+                      required
+                      minLength={8}
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                    />
+                  </span>
                 </label>
               ) : null}
 
               {error ? (
-                <p className="border-l-2 border-red-600 pl-3 text-sm text-red-700">{error}</p>
+                <p className="auth-message is-error" role="alert">
+                  <WarningCircle aria-hidden="true" weight="fill" />
+                  {error}
+                </p>
               ) : null}
               {message ? (
-                <p className="border-l-2 border-green-700 pl-3 text-sm text-green-800">{message}</p>
+                <p className="auth-message is-success" role="status">
+                  <CheckCircle aria-hidden="true" weight="fill" />
+                  {message}
+                </p>
               ) : null}
 
-              <button
-                type="submit"
-                disabled={pending}
-                className="h-12 w-full rounded-xl bg-brand-600 text-sm font-semibold text-white shadow-[0_10px_24px_-14px_rgba(88,88,204,0.9)] transition hover:bg-brand-700 active:scale-[0.97] disabled:cursor-wait disabled:opacity-60"
-              >
-                {pending
-                  ? '处理中…'
-                  : mode === 'signin'
-                    ? '安全登录 →'
-                    : mode === 'signup'
-                      ? '注册并验证邮箱 →'
-                      : '发送重置邮件 →'}
+              <button type="submit" disabled={pending} className="auth-primary-action">
+                <span>
+                  {pending
+                    ? '处理中'
+                    : mode === 'signin'
+                      ? '进入工作台'
+                      : mode === 'signup'
+                        ? '注册并验证邮箱'
+                        : '发送重置邮件'}
+                </span>
+                <ArrowRight aria-hidden="true" weight="bold" />
               </button>
             </form>
 
-            {mode === 'signin' ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('forgot');
-                  setError(undefined);
-                  setMessage(undefined);
-                }}
-                className="mt-5 text-sm text-zinc-500 transition hover:text-brand-700"
-              >
-                忘记密码？
-              </button>
-            ) : null}
+            <div className="auth-panel-footer">
+              {mode === 'signin' ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('forgot');
+                    setError(undefined);
+                    setMessage(undefined);
+                  }}
+                >
+                  忘记密码
+                </button>
+              ) : null}
 
-            {isSignupEnabled && mode !== 'forgot' ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setMode((current) => (current === 'signin' ? 'signup' : 'signin'));
-                  setError(undefined);
-                  setMessage(undefined);
-                }}
-                className="mt-5 text-sm text-zinc-500 transition hover:text-brand-700"
-              >
-                {mode === 'signin' ? '首次使用？创建账号' : '已有账号？返回登录'}
-              </button>
-            ) : !isSignupEnabled && mode !== 'forgot' ? (
-              <p className="mt-5 text-sm text-zinc-500">内部测试仅限受邀账号登录。</p>
-            ) : null}
+              {isSignupEnabled && mode !== 'forgot' ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode((current) => (current === 'signin' ? 'signup' : 'signin'));
+                    setError(undefined);
+                    setMessage(undefined);
+                  }}
+                >
+                  {mode === 'signin' ? '创建账号' : '返回登录'}
+                </button>
+              ) : !isSignupEnabled && mode !== 'forgot' ? (
+                <p>
+                  <ShieldCheck aria-hidden="true" weight="fill" />
+                  内部测试仅限受邀账号
+                </p>
+              ) : null}
 
-            {mode === 'forgot' ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('signin');
-                  setError(undefined);
-                  setMessage(undefined);
-                }}
-                className="mt-5 text-sm text-zinc-500 transition hover:text-brand-700"
-              >
-                返回密码登录
-              </button>
-            ) : null}
+              {mode === 'forgot' ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('signin');
+                    setError(undefined);
+                    setMessage(undefined);
+                  }}
+                >
+                  返回密码登录
+                </button>
+              ) : null}
+            </div>
           </div>
-        </section>
-      </div>
+        </div>
+
+        <ol className="auth-workflow" aria-label="Supplier 经营流程">
+          <WorkflowStep icon={Storefront} title="货源管理" description="连接 1688" />
+          <WorkflowStep icon={Package} title="商品上架" description="发布到店铺" />
+          <WorkflowStep icon={CirclesFour} title="订单处理" description="订单与采购" />
+          <WorkflowStep icon={Truck} title="履约追踪" description="物流与售后" />
+        </ol>
+      </section>
     </main>
+  );
+}
+
+function WorkflowStep({
+  icon: IconComponent,
+  title,
+  description,
+}: {
+  icon: Icon;
+  title: string;
+  description: string;
+}) {
+  return (
+    <li>
+      <span className="auth-workflow-icon" aria-hidden="true">
+        <IconComponent weight="duotone" />
+      </span>
+      <span>
+        <strong>{title}</strong>
+        <small>{description}</small>
+      </span>
+      <ArrowRight className="auth-workflow-arrow" aria-hidden="true" />
+    </li>
   );
 }
 
@@ -443,57 +518,77 @@ function PasswordSetupStudio({
     });
     setPending(false);
     if (result.error) {
-      setError(result.error.message);
+      setError(authErrorMessage(result.error, 'password'));
       return;
     }
     onComplete();
   };
 
   return (
-    <main className="grid min-h-screen place-items-center bg-[#f4f5f8] p-6 text-[#15171c]">
-      <section className="w-full max-w-md rounded-3xl border border-black/5 bg-white p-7 shadow-[0_28px_90px_-40px_rgba(16,24,40,0.34)] sm:p-9">
-        <p className="text-xs font-semibold text-brand-600">
-          {reason === 'invite' ? '完成受邀账号' : '恢复账号访问'}
-        </p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-[-0.025em]">设置登录密码</h1>
-        <p className="mt-3 text-sm leading-6 text-zinc-500">
-          {email ? `${email} 已通过安全链接验证。` : '安全链接已验证。'}
-          设置密码后即可继续进入工作台。
-        </p>
-        <form className="mt-7 space-y-5" onSubmit={(event) => void submit(event)}>
-          <label className="grid gap-2 text-xs font-semibold text-zinc-700">
-            新密码
-            <input
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="h-12 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-brand-500 focus:ring-4 focus:ring-brand-100"
-            />
+    <main className="auth-utility-shell">
+      <div className="auth-utility-brand" aria-label="Supplier 分销经营台">
+        <span className="auth-brand-mark" aria-hidden="true">
+          <CirclesFour weight="fill" />
+        </span>
+        <span>
+          <strong>Supplier</strong>
+          <small>安全账号设置</small>
+        </span>
+      </div>
+      <section className="auth-panel auth-utility-panel">
+        <div className="auth-panel-heading">
+          <span className="auth-panel-icon" aria-hidden="true">
+            <Key weight="duotone" />
+          </span>
+          <div>
+            <p className="auth-utility-context">
+              {reason === 'invite' ? '完成受邀账号' : '恢复账号访问'}
+            </p>
+            <h1>设置登录密码</h1>
+            <p>
+              {email ? `${email} 已通过安全链接验证。` : '安全链接已验证。'}
+              设置密码后即可继续进入工作台。
+            </p>
+          </div>
+        </div>
+        <form className="auth-form" onSubmit={(event) => void submit(event)}>
+          <label className="auth-field">
+            <span>新密码</span>
+            <span className="auth-input-wrap">
+              <Key aria-hidden="true" />
+              <input
+                type="password"
+                autoComplete="new-password"
+                required
+                minLength={8}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </span>
           </label>
-          <label className="grid gap-2 text-xs font-semibold text-zinc-700">
-            再次输入
-            <input
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={confirmation}
-              onChange={(event) => setConfirmation(event.target.value)}
-              className="h-12 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none transition focus:border-brand-500 focus:ring-4 focus:ring-brand-100"
-            />
+          <label className="auth-field">
+            <span>再次输入</span>
+            <span className="auth-input-wrap">
+              <Key aria-hidden="true" />
+              <input
+                type="password"
+                autoComplete="new-password"
+                required
+                minLength={8}
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+              />
+            </span>
           </label>
           {error ? (
-            <p className="border-l-2 border-red-600 pl-3 text-sm text-red-700">{error}</p>
+            <p className="auth-message is-error" role="alert">
+              <WarningCircle aria-hidden="true" weight="fill" />
+              {error}
+            </p>
           ) : null}
-          <button
-            type="submit"
-            disabled={pending}
-            className="h-12 w-full rounded-xl bg-brand-600 text-sm font-semibold text-white transition hover:bg-brand-700 active:scale-[0.97] disabled:cursor-wait disabled:opacity-60"
-          >
-            {pending ? '保存中…' : '保存密码并进入工作台 →'}
+          <button type="submit" disabled={pending} className="auth-primary-action">
+            <span>{pending ? '保存中' : '保存密码并进入工作台'}</span>
+            <ArrowRight aria-hidden="true" weight="bold" />
           </button>
         </form>
       </section>
@@ -513,9 +608,15 @@ function clearAuthCallbackUrl(): void {
 
 function AuthLoading() {
   return (
-    <main className="grid min-h-screen place-items-center bg-[#f4f5f8] text-[#15171c]">
-      <div className="rounded-2xl border border-zinc-200 bg-white px-8 py-6 text-sm font-medium shadow-[0_18px_50px_-32px_rgba(16,24,40,0.4)]">
-        正在验证会话…
+    <main className="auth-utility-shell">
+      <div className="auth-utility-loading" role="status" aria-live="polite">
+        <span className="auth-panel-icon" aria-hidden="true">
+          <LockKey weight="duotone" />
+        </span>
+        <span>
+          <strong>正在验证会话</strong>
+          <small>安全确认完成后将自动进入工作台</small>
+        </span>
       </div>
     </main>
   );
@@ -523,12 +624,55 @@ function AuthLoading() {
 
 function AuthConfigurationError({ message }: { message: string }) {
   return (
-    <main className="grid min-h-screen place-items-center bg-[#f4f5f8] p-6 text-[#15171c]">
-      <div className="max-w-lg rounded-2xl border border-red-200 bg-white p-6 shadow-[0_18px_50px_-32px_rgba(16,24,40,0.4)]">
-        <p className="text-xs font-semibold text-red-700">Auth unavailable</p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">身份服务配置不完整</h1>
-        <p className="mt-4 text-sm leading-6 text-red-800">{message}</p>
-      </div>
+    <main className="auth-utility-shell">
+      <section className="auth-panel auth-utility-panel">
+        <div className="auth-panel-heading">
+          <span className="auth-panel-icon is-danger" aria-hidden="true">
+            <WarningCircle weight="duotone" />
+          </span>
+          <div>
+            <p className="auth-utility-context is-danger">身份服务不可用</p>
+            <h1>身份服务配置不完整</h1>
+            <p>{message}</p>
+          </div>
+        </div>
+      </section>
     </main>
   );
+}
+
+function authErrorMessage(
+  error: { message?: string; status?: number; code?: string },
+  context: 'signin' | 'signup' | 'forgot' | 'password',
+): string {
+  const message = error.message?.toLowerCase() ?? '';
+  const code = error.code?.toLowerCase() ?? '';
+
+  if (message.includes('invalid login credentials') || code.includes('invalid_credentials')) {
+    return '邮箱或密码不正确，请检查后重试。';
+  }
+  if (message.includes('email not confirmed') || code.includes('email_not_confirmed')) {
+    return '邮箱尚未完成验证，请先查看验证邮件。';
+  }
+  if (message.includes('already registered') || code.includes('user_already_exists')) {
+    return '该邮箱已注册，请直接登录或找回密码。';
+  }
+  if (message.includes('password') && (message.includes('least') || message.includes('short'))) {
+    return '密码至少需要 8 位，请重新设置。';
+  }
+  if (
+    error.status === 429 ||
+    message.includes('rate limit') ||
+    message.includes('too many requests')
+  ) {
+    return '操作过于频繁，请稍后再试。';
+  }
+  if (message.includes('fetch') || message.includes('network') || message.includes('connection')) {
+    return '身份服务暂时无法连接，请检查网络后重试。';
+  }
+
+  if (context === 'signin') return '登录暂时失败，请稍后重试。';
+  if (context === 'signup') return '账号创建暂时失败，请稍后重试。';
+  if (context === 'forgot') return '重置邮件暂时无法发送，请稍后重试。';
+  return '密码暂时无法保存，请稍后重试。';
 }

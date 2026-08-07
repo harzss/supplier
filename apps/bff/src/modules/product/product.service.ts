@@ -25,7 +25,7 @@ export interface ProductDto {
     profit: number;
     compliance: number;
     trend: number;
-    reason: unknown;
+    reason: string[];
   } | null;
   syncedAt: string;
 }
@@ -162,9 +162,16 @@ export function serializeProduct(
           profit: p.score.profitScore,
           compliance: p.score.complianceScore,
           trend: p.score.trendScore,
-          reason: p.score.reason,
+          reason: normalizeScoreReasons(p.score.reason),
         }
       : null,
     syncedAt: p.syncedAt.toISOString(),
   };
+}
+
+export function normalizeScoreReasons(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (reason): reason is string => typeof reason === 'string' && reason.trim().length > 0,
+  );
 }

@@ -1,6 +1,12 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
+import { FunnelSimple, X } from '@phosphor-icons/react';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import type { ProductFacets } from '@/lib/api';
 
 export interface AppliedProductFilters {
@@ -21,8 +27,8 @@ interface ProductFiltersProps {
 const PRICE_BANDS = [
   { label: '不限价格' },
   { label: '¥10 以下', priceMax: 10 },
-  { label: '¥10–30', priceMin: 10, priceMax: 30 },
-  { label: '¥30–50', priceMin: 30, priceMax: 50 },
+  { label: '¥10 至 30', priceMin: 10, priceMax: 30 },
+  { label: '¥30 至 50', priceMin: 30, priceMax: 50 },
   { label: '¥50 以上', priceMin: 50 },
 ] satisfies Array<{ label: string; priceMin?: number; priceMax?: number }>;
 
@@ -35,6 +41,8 @@ export function ProductFilters({
   onChange,
 }: ProductFiltersProps) {
   const [customError, setCustomError] = useState<string>();
+  const priceErrorId = useId();
+  const priceError = customError ?? rangeError;
   const hasFilters =
     Boolean(filters.categoryL1) || filters.priceMin !== undefined || filters.priceMax !== undefined;
   const categories = facets?.categories ?? [];
@@ -57,31 +65,48 @@ export function ProductFilters({
   };
 
   return (
-    <section className="ledger-panel mb-6 overflow-hidden text-[var(--ink)]">
-      <div className="flex flex-col gap-2 border-b border-[var(--line)] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+    <Card aria-label="商品筛选">
+      <CardHeader className="flex-row items-start justify-between gap-4 space-y-0 border-b p-4 sm:p-5">
         <div>
-          <h2 className="text-sm font-semibold">筛选商品</h2>
-          <p className="mt-0.5 text-xs text-[var(--muted)]">按类目和采购价缩小候选范围</p>
-        </div>
-        <p className="text-xs text-[var(--muted)] tabular-nums">
-          {facets?.priceRange
-            ? `当前采购价 ¥${formatPrice(facets.priceRange.min)}–¥${formatPrice(facets.priceRange.max)}`
-            : isLoading
-              ? '正在读取货源分布…'
-              : '暂无价格分布'}
-        </p>
-      </div>
-
-      <div className="grid min-w-0 lg:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
-        <div className="min-w-0 border-b border-[var(--line)] p-4 lg:border-b-0 lg:border-r">
-          <div className="mb-3 flex items-center justify-between gap-4">
-            <h3 className="text-xs font-semibold text-[var(--ink-soft)]">类目</h3>
-            <span className="text-xs text-[var(--muted)]">来自已打分货源</span>
+          <div className="flex items-center gap-2">
+            <FunnelSimple
+              className="size-4 text-muted-foreground"
+              weight="bold"
+              aria-hidden="true"
+            />
+            <CardTitle className="text-sm">筛选条件</CardTitle>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <p className="mt-1 text-xs text-muted-foreground">
+            {facets?.priceRange
+              ? `当前货源采购价 ¥${formatPrice(facets.priceRange.min)} 至 ¥${formatPrice(facets.priceRange.max)}`
+              : isLoading
+                ? '正在读取类目与价格分布'
+                : '暂无可用价格分布'}
+          </p>
+        </div>
+        {hasFilters ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={isPending}
+            onClick={() => {
+              setCustomError(undefined);
+              onChange({});
+            }}
+          >
+            <X aria-hidden="true" />
+            清空
+          </Button>
+        ) : null}
+      </CardHeader>
+
+      <CardContent className="space-y-5 p-4 sm:p-5">
+        <fieldset disabled={isPending} className="space-y-2">
+          <legend className="text-xs font-medium text-muted-foreground">类目</legend>
+          <div className="flex gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible">
             <FilterButton
               active={!filters.categoryL1}
-              disabled={isPending}
               onClick={() => onChange({ ...filters, categoryL1: undefined })}
             >
               全部
@@ -90,7 +115,6 @@ export function ProductFilters({
               <FilterButton
                 key={item.name}
                 active={filters.categoryL1 === item.name}
-                disabled={isPending}
                 onClick={() =>
                   onChange({
                     ...filters,
@@ -99,30 +123,31 @@ export function ProductFilters({
                 }
               >
                 {item.name}
-                {item.count ? <span className="ml-1 opacity-60">{item.count}</span> : null}
+                {item.count ? (
+                  <Badge variant="secondary" className="ml-1 border-0 px-1.5 py-0 font-normal">
+                    {item.count}
+                  </Badge>
+                ) : null}
               </FilterButton>
             ))}
             {isLoading && !categoryOptions.length ? (
-              <span className="text-sm text-[var(--muted)]">读取类目中…</span>
+              <span className="inline-flex h-11 items-center text-xs text-muted-foreground sm:h-9">
+                正在读取类目…
+              </span>
             ) : null}
           </div>
-        </div>
+        </fieldset>
 
-        <div className="min-w-0 p-4">
-          <h3 className="mb-3 text-xs font-semibold text-[var(--ink-soft)]">1688 采购价</h3>
-          <div className="flex flex-wrap gap-2">
+        <fieldset disabled={isPending} className="space-y-3">
+          <legend className="text-xs font-medium text-muted-foreground">采购价</legend>
+          <div className="flex gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible">
             {PRICE_BANDS.map((band) => (
               <FilterButton
                 key={band.label}
                 active={filters.priceMin === band.priceMin && filters.priceMax === band.priceMax}
-                disabled={isPending}
                 onClick={() => {
                   setCustomError(undefined);
-                  onChange({
-                    ...filters,
-                    priceMin: band.priceMin,
-                    priceMax: band.priceMax,
-                  });
+                  onChange({ ...filters, priceMin: band.priceMin, priceMax: band.priceMax });
                 }}
               >
                 {band.label}
@@ -132,86 +157,69 @@ export function ProductFilters({
 
           <form
             key={`${filters.priceMin ?? ''}-${filters.priceMax ?? ''}`}
-            className="mt-4 flex flex-wrap items-end gap-2"
+            className="flex flex-wrap items-end gap-2"
             onSubmit={applyCustomPrice}
+            aria-describedby={priceError ? priceErrorId : undefined}
           >
-            <PriceInput name="priceMin" label="最低价" defaultValue={filters.priceMin} />
-            <span className="pb-3 text-[var(--muted-light)]">—</span>
-            <PriceInput name="priceMax" label="最高价" defaultValue={filters.priceMax} />
-            <button
-              type="submit"
+            <PriceInput
+              name="priceMin"
+              label="最低价"
+              defaultValue={filters.priceMin}
               disabled={isPending}
-              className="primary-button h-11 min-h-11 py-0"
-            >
-              应用
-            </button>
+              invalid={Boolean(priceError)}
+              errorId={priceErrorId}
+            />
+            <span className="pb-3 text-xs text-muted-foreground">至</span>
+            <PriceInput
+              name="priceMax"
+              label="最高价"
+              defaultValue={filters.priceMax}
+              disabled={isPending}
+              invalid={Boolean(priceError)}
+              errorId={priceErrorId}
+            />
+            <Button type="submit" variant="secondary" className="h-11 sm:h-9" disabled={isPending}>
+              应用价格
+            </Button>
           </form>
-          {customError || rangeError ? (
-            <p className="mt-2 text-xs text-red-600">{customError ?? rangeError}</p>
+
+          {priceError ? (
+            <p id={priceErrorId} className="text-xs font-medium text-destructive" role="alert">
+              {priceError}
+            </p>
           ) : null}
-        </div>
-      </div>
+        </fieldset>
 
-      <div className="flex min-h-12 flex-wrap items-center gap-2 border-t border-[var(--line)] bg-[var(--surface-strong)] px-4 py-2 text-xs sm:px-5">
-        <span className="font-medium text-[var(--muted)]">已应用</span>
-        {!hasFilters ? <span className="text-[var(--ink-soft)]">全部货源</span> : null}
-        {filters.categoryL1 ? <ActiveTag>类目：{filters.categoryL1}</ActiveTag> : null}
-        {filters.priceMin !== undefined || filters.priceMax !== undefined ? (
-          <ActiveTag>
-            采购价：{filters.priceMin !== undefined ? `¥${formatPrice(filters.priceMin)}` : '不限'}
-            {' – '}
-            {filters.priceMax !== undefined ? `¥${formatPrice(filters.priceMax)}` : '不限'}
-          </ActiveTag>
+        {facets?.degraded ? (
+          <Alert variant="warning" role="status">
+            <AlertDescription>类目与价格分布暂时不可用，商品列表仍可继续浏览。</AlertDescription>
+          </Alert>
         ) : null}
-        {hasFilters ? (
-          <button
-            type="button"
-            disabled={isPending}
-            onClick={() => {
-              setCustomError(undefined);
-              onChange({});
-            }}
-            className="quiet-button ml-auto min-h-10 text-xs disabled:opacity-50"
-          >
-            清空筛选
-          </button>
-        ) : null}
-      </div>
-
-      {facets?.degraded ? (
-        <p className="border-t border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-700 sm:px-5">
-          类目与价格分布暂时不可用，商品列表仍可继续浏览。
-        </p>
-      ) : null}
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 
 function FilterButton({
   active,
-  disabled,
   onClick,
   children,
 }: {
   active: boolean;
-  disabled: boolean;
   onClick: () => void;
   children: React.ReactNode;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant={active ? 'default' : 'outline'}
+      size="sm"
       aria-pressed={active}
-      disabled={disabled}
       onClick={onClick}
-      className={`filter-chip min-h-10 rounded-full border px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${
-        active
-          ? 'border-brand-200 bg-brand-50 text-brand-700'
-          : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink-soft)]'
-      }`}
+      className="h-11 shrink-0 sm:h-9"
     >
       {children}
-    </button>
+    </Button>
   );
 }
 
@@ -219,17 +227,25 @@ function PriceInput({
   name,
   label,
   defaultValue,
+  disabled,
+  invalid,
+  errorId,
 }: {
   name: string;
   label: string;
   defaultValue?: number;
+  disabled: boolean;
+  invalid: boolean;
+  errorId: string;
 }) {
   return (
-    <label className="grid gap-1 text-[11px] font-medium text-[var(--muted)]">
+    <label className="grid min-w-0 flex-1 gap-1 text-xs font-medium text-muted-foreground sm:max-w-36">
       {label}
-      <span className="flex h-11 items-center rounded-lg border border-[var(--line-strong)] bg-[var(--surface)] px-2 focus-within:border-brand-500 focus-within:ring-2 focus-within:ring-brand-100">
-        <span className="mr-1 text-[var(--muted)]">¥</span>
-        <input
+      <span className="relative">
+        <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-muted-foreground">
+          ¥
+        </span>
+        <Input
           name={name}
           type="number"
           inputMode="decimal"
@@ -237,18 +253,13 @@ function PriceInput({
           max="1000000"
           step="0.01"
           defaultValue={defaultValue}
-          className="w-20 bg-transparent font-sans text-sm text-[var(--ink)] outline-none"
+          disabled={disabled}
+          aria-invalid={invalid}
+          aria-describedby={invalid ? errorId : undefined}
+          className="h-11 pl-7 tabular-nums sm:h-9"
         />
       </span>
     </label>
-  );
-}
-
-function ActiveTag({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="rounded-full border border-[var(--line)] bg-[var(--surface)] px-2.5 py-1">
-      {children}
-    </span>
   );
 }
 

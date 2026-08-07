@@ -4,7 +4,7 @@ import { Providers } from './providers';
 import { AppShell } from '@/components/app-shell';
 
 export const metadata: Metadata = {
-  title: 'Supplier — 更简单的 1688 分销经营工具',
+  title: 'Supplier - 更简单的 1688 分销经营工具',
   description: '连接 1688 货源、选品铺货、订单采购、物流售后与利润分析的一体化商家工作台。',
 };
 

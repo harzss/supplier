@@ -1,9 +1,17 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
-import { ProductService } from './product.service';
+import { normalizeScoreReasons, ProductService } from './product.service';
 
 describe('ProductService filters', () => {
+  it('normalizes untrusted score reason JSON before returning products', () => {
+    expect(normalizeScoreReasons(['趋势稳定', null, { text: '高转化' }, '', '库存充足'])).toEqual([
+      '趋势稳定',
+      '库存充足',
+    ]);
+    expect(normalizeScoreReasons({ text: 'not-an-array' })).toEqual([]);
+  });
+
   it('combines category and decimal price filters in one recommendation query', async () => {
     const findMany = vi.fn().mockResolvedValue([]);
     const service = new ProductService({ sourceProduct: { findMany } } as unknown as PrismaService);

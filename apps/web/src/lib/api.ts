@@ -61,6 +61,18 @@ export interface RecommendationQuery {
   limit?: number;
 }
 
+export interface SystemReadiness {
+  status: 'ready';
+  service: 'supplier-bff';
+  version: string;
+  checks: {
+    database: { status: 'up' };
+    redis: { status: 'up' };
+  };
+  timestamp: string;
+  durationMs: number;
+}
+
 export type BillingStatus = 'internal_beta' | 'unavailable';
 
 export interface PlanSummary {
@@ -1253,6 +1265,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  readiness(): Promise<SystemReadiness> {
+    return request('/health/ready');
+  },
+
   recommendations(query: RecommendationQuery = {}): Promise<RecommendationList> {
     const params = new URLSearchParams();
     if (query.categoryL1) params.set('categoryL1', query.categoryL1);

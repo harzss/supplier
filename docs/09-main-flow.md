@@ -5,7 +5,7 @@
 > [00-roadmap.md](./00-roadmap.md) 为唯一来源；能否上线以
 > [10-production-readiness.md](./10-production-readiness.md) 的 P0 门禁为准。
 >
-> 本文包含 M1～M83 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
+> 本文包含 M1～M84 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
 
 ## 1. 主流程定义（核心闭环）
 
@@ -22,7 +22,7 @@ flowchart LR
     I --> J[利润与经营复盘]
 ```
 
-## 2. 工程证据快照（截至 2026-08-06）
+## 2. 工程证据快照（截至 2026-08-07）
 
 | 环节                | 状态                            | 说明                                                                                                                                                                                                                          |
 | ------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1405,6 +1405,8 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 - [x] 全仓 lint/typecheck/test、Prisma 与格式门禁通过
 
 ## 54. 变更记录
+
+- 2026-08-07：完成 M84 / R0-03 shadcn 工作台部署与 staging 链路前向恢复。`dd648f1` 将应用壳、今日选品、筛选、候选决策台、首次铺货向导与移动 Sheet 迁移到 shadcn primitives，同时保留 URL 筛选、三路独立查询、收藏恢复、真实空/降级/错误状态、readiness 和发布“状态待核实”等业务契约。当前候选通过 1,249 项测试（BFF 808、Web 99、DB 78、Platform SDK 166、Crawler 62、Entitlements 14、LLM 8、Scoring 14）、15/15 typecheck、2/2 lint、9/9 build、生产依赖审计、Prisma、63 项运维脚本、7 项 Gateway、Prettier 与 diff check；[Release gates #32](https://github.com/harzss/supplier/actions/runs/31139134369) 的 verify/browser/images 全绿。Cloudflare 静态版本 `3c75d6ea-5444-49c2-ac50-47e2ff3990f4` 已部署，远端首页与本地产物哈希一致。部署时发现 2026-08-06 的孤儿 BFF 仍占用 3001；精确核对后前向清理，launchd 用当前构建接管并刷新 Quick Tunnel，最终本机/Gateway live/ready 200、18/18 部署 smoke、主要路由、旧商品 URL 301 和 prototype 404 均通过。R0-03 仍缺真实邮箱 Auth 生命周期、双租户和外部平台 E2E，状态不变；完整证据见 [2026-08-07 shadcn staging Web release](./evidence/2026-08-07-shadcn-staging-web-release.md)。
 
 - 2026-08-04：完成 M82 / R0-03 浏览器门禁与部署 CORS 预检加固。修复演示 seed 缺少 `supplierId` 导致 pricing-preview 400 的稳定失败，增加 publish-ready seed 后置校验和显式 E2E 响应诊断；部署验证新增 PUT/DELETE 两次正向 OPTIONS、恶意 Origin 负向探针、禁重定向和脱敏响应释放。当前本地全仓 1192/1192、运维 59/59、CORS 1/1、Chromium 1/1、typecheck、lint 与 BFF build 通过；[GitHub Release gates #23](https://github.com/harzss/supplier/actions/runs/30910322944) 已在提交 `a48fb43` 上完成 verify、browser、images 三个 job 全绿；该证据仅覆盖 CI 临时环境，未推送镜像，也未迁移或重部署 staging。
 

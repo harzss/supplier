@@ -457,9 +457,11 @@ pnpm deploy:verify
 
 ## 10. 当前未关闭项
 
-截至 2026-08-06，R0-02 已完成定向回填、43/43 migration、schema 与权限复核及停写后的最终备份。当前候选已重部署，Supabase 新式 Key、Cloudflare Web/Gateway 和部署 smoke 已复验；R0-03 仍因真实邮箱 Auth 流程和外部平台依赖未完成而保持进行中：
+截至 2026-08-07，R0-02 已完成定向回填、43/43 migration、schema 与权限复核及停写后的最终备份。`dd648f1` shadcn Web 候选已部署为 Cloudflare 版本 `3c75d6ea-5444-49c2-ac50-47e2ff3990f4`，固定 Web/Gateway 和部署 smoke 已复验；R0-03 仍因真实邮箱 Auth 流程和外部平台依赖未完成而保持进行中：
 
 当前候选的固定 Gateway + 固定 Cloudflare Web 通过 18 项部署验证，包括 live/ready、四个生产文档路由 404、三种鉴权拒绝、OAuth、运维状态/检查/指标、草稿 PUT/DELETE CORS 正向、恶意 Origin 负向 OPTIONS 和 Web 200。远端 Web URL 为 `https://supplier-staging-web.chenjie.workers.dev`，Web 与 Gateway 均返回 200；BFF 精确 CORS/OAuth 结果地址及 Supabase Site/Redirect URL 已回填。
+
+- 2026-08-07 当前候选通过 1,249 项测试、15/15 typecheck、2/2 lint、9/9 build、生产依赖审计、Prisma、63 项运维脚本、7 项 Gateway、Prettier、diff check 与 Cloudflare 无 binding dry-run；[Release gates #32](https://github.com/harzss/supplier/actions/runs/31139134369) 的 verify/browser/images 全绿。部署前发现 2026-08-06 的孤儿 BFF 仍以 `ppid=1` 占用 3001，SIGTERM 无效后只终止已核验的精确 PID；launchd 随后用当前构建接管、刷新 Quick Tunnel 与 Gateway，最终本机和固定 Gateway live/ready 均为 200。远端首页与本地静态产物 SHA256 同为 `ee6ed0a1ab856b4e2736bc3cae9688eca1a3cdd5830a1fa58306db7aa0894328`，主要路由、旧商品 URL 301 和废弃 prototype 404 通过。完整记录见 [2026-08-07 shadcn staging Web release](./evidence/2026-08-07-shadcn-staging-web-release.md)。
 
 - 初版 OpenNext 版本 `2cfa19b5-0b44-4081-a240-8c0737563922` 压缩上传为 953.71 KiB，但动态路由 CPU 实测 40ms，已被替换。2026-08-03 的历史静态版本 `7d15e88a-20bc-40c8-a255-4dae8dcd7e52` 包含 59 个纯静态 assets；当前候选已在 2026-08-06 重新部署并完成 Web/Gateway 200 与 18/18 复验。
 - 新式 `sb_secret_*` / `sb_publishable_*` 已用于 Auth admin、随机 Storage 上传/公开读取/删除及公开访问边界复验；Legacy API keys 已禁用，旧 HS256 signing key 已 revoked，撤销后的同组验证和部署 smoke 继续通过。

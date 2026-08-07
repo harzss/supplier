@@ -5,9 +5,9 @@
 > [00-roadmap.md](./00-roadmap.md) 为准，工程实现证据见
 > [09-main-flow.md](./09-main-flow.md)。
 >
-> **时效说明（2026-08-06）**：现有 Supabase 项目继续仅按 staging 管理，本次停写维护已完成。维护窗口最终一致性备份为 150239 bytes，SHA256 `c482ea5387c9fb6b5bb70ea1b8704af0ceacbae9161d820435d591d4ba39c30c`；精确的十条 mock `supplierId` 定向 backfill 已更新并锁内回读通过，第 34～43 个 migration 已由受控 Linux maintenance image 单次应用。迁移后审计为 43/43、live schema diff matched、41/41 public 表 RLS，`anon` / `authenticated` 的表、sequence 与默认 ACL 暴露均为 0。当前 Web、BFF/Gateway 和 readiness 已重部署，部署验证 18/18；新式 Supabase Key 切换完成，旧 legacy HS256 Key 撤销后重复验证仍通过。这些结果关闭的是 staging 维护与内部部署缺口，不是生产环境验收；生产数据库、真实 Auth 账号生命周期及真实平台 E2E 仍必须独立完成。
+> **时效说明（2026-08-07）**：现有 Supabase 项目继续仅按 staging 管理，本次停写维护已完成。维护窗口最终一致性备份为 150239 bytes，SHA256 `c482ea5387c9fb6b5bb70ea1b8704af0ceacbae9161d820435d591d4ba39c30c`；精确的十条 mock `supplierId` 定向 backfill 已更新并锁内回读通过，第 34～43 个 migration 已由受控 Linux maintenance image 单次应用。迁移后审计为 43/43、live schema diff matched、41/41 public 表 RLS，`anon` / `authenticated` 的表、sequence 与默认 ACL 暴露均为 0。`dd648f1` shadcn Web 已部署为 Cloudflare 版本 `3c75d6ea-5444-49c2-ac50-47e2ff3990f4`；遗留孤儿 BFF 清理后，当前 BFF/Gateway/readiness 与 18/18 smoke 复验通过。新式 Supabase Key 切换完成，旧 legacy HS256 Key 撤销后重复验证仍通过。这些结果关闭的是 staging 维护与内部部署缺口，不是生产环境验收；生产数据库、真实 Auth 账号生命周期及真实平台 E2E 仍必须独立完成。
 
-## 1. 当前结论（治理与技术证据截至 2026-08-06）
+## 1. 当前结论（治理与技术证据截至 2026-08-07）
 
 **结论不变：当前不能宣称生产可用或直接正式上架。** 真实抖店与 1688 小额订单 E2E、生产数据库、生产 Redis、目标云部署、监控告警、恢复演练、服务市场商业生命周期和法务合规仍需关闭 P0 门禁。以下内容保留为 M13～M67 的工程历史证据，不能替代新的目标环境验收。
 
@@ -102,7 +102,7 @@ M67 已将已发货物流修复改为持续租约：服务每 60 秒按 `repair 
 | API 防护               | ✅ 基座完成  | 全局 120 次/分钟限流；生产默认关闭 Swagger；仅允许显式 HTTPS CORS origin                                                                                                                     |
 | 优雅退出               | ✅ 基座完成  | Nest shutdown hooks、Prisma 断连、Redis `QUIT`/强制断连                                                                                                                                      |
 | 发布门禁               | ✅ 基座完成  | 代码检查、三镜像构建、migration、部署 smoke、非 root 与优雅退出均已纳入 CI                                                                                                                   |
-| 依赖与 SAST            | 🔄 CI 待验收 | 2026-08-04 联网生产依赖审计为 0 已知漏洞；本轮已修复 `fast-uri` 3.1.4 新增 high 公告；须让当前 SHA 的项目 audit/CodeQL 门禁通过                                                              |
+| 依赖与 SAST            | 🔄 CI 待验收 | `dd648f1` 生产依赖审计为 0 已知漏洞且 Release gates #32 全绿；`security-scans.yml` 只在 main、PR 或手动触发，当前 SHA 仍缺 CodeQL 证据                                                       |
 | 身份与租户隔离         | 🔄 P0 待验收 | 应用侧已验证 JWT、内部用户映射和数据隔离；staging 须完成真实邮件账号生命周期，生产 Auth 项目还须独立配置和验收                                                                               |
 | 真实抖店闭环           | 🔄 P0 阻塞   | 发布幂等恢复、状态同步、修正重提、订单、物流应用链路已通；须用测试店验收 `outer_product_id`、`quality_list`、`product.detail`、`editV2` 与物流                                               |
 | 真实 1688 货源         | 🔄 P0 待联调 | 搜索/详情 adapter 与持久批量采集应用侧已通；须验证方案订购、真实 buyer Token、配额/曝光回传，以及至少两个受控买家账号的价格和库存口径。未证明全局一致前不得配置 `global_offer` 或启用 worker |

@@ -11,6 +11,8 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 30_000;
 const STAGING_ENV_FILE = resolve('apps/web/.env.staging.local');
+const PINNED_SUPABASE_ORIGIN = 'https://bjeafpfffohtxqmfgtjq.supabase.co';
+const PINNED_BFF_ORIGIN = 'https://supplier-staging-gateway.chenjie.workers.dev';
 
 export async function readAuthSessionEnvironmentFile(path = STAGING_ENV_FILE) {
   let metadata;
@@ -52,6 +54,7 @@ export function readAuthSessionConfiguration(
     true,
   );
   const bffOrigin = requiredOrigin(environment.NEXT_PUBLIC_BFF_URL, 'NEXT_PUBLIC_BFF_URL');
+  assertPinnedOrigins(supabaseOrigin, bffOrigin);
   const anonKey = requireSupabasePublicApiKey(
     environment.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     'NEXT_PUBLIC_SUPABASE_ANON_KEY',
@@ -92,15 +95,20 @@ export function readAuthSessionConfiguration(
 }
 
 export async function verifySupabaseAuthSession(configuration, fetcher = fetch) {
+  assertPinnedOrigins(configuration.supabaseOrigin, configuration.bffOrigin);
   const { supabaseOrigin, bffOrigin, anonKey, email, password, previousPassword, timeoutMs } =
     configuration;
   const publicApiHeaders = supabasePublicApiKeyHeaders(anonKey);
   let logoutAccessToken;
   let logoutCompleted = false;
+  let passwordGrantAccepted = false;
+  let passwordGrantOutcomeUncertain = false;
+  let unexpectedRefreshSessionCleanupUnproven = false;
   let previousPasswordStatus;
 
   try {
     if (previousPassword) {
+      passwordGrantOutcomeUncertain = true;
       const previousPasswordGrant = await request(
         fetcher,
         `${supabaseOrigin}/auth/v1/token?grant_type=password`,
@@ -113,30 +121,18 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
         'Previous password grant',
       );
       previousPasswordStatus = previousPasswordGrant.status;
+      passwordGrantAccepted = previousPasswordStatus === 200;
+      passwordGrantOutcomeUncertain = ![200, 400, 401].includes(previousPasswordStatus);
       if (![400, 401].includes(previousPasswordStatus)) {
-        if (previousPasswordStatus === 200) {
-          const unexpectedAccessToken = await readAccessTokenForCleanup(previousPasswordGrant);
-          if (
-            !unexpectedAccessToken ||
-            !(await cleanupLogout(
-              fetcher,
-              supabaseOrigin,
-              anonKey,
-              unexpectedAccessToken,
-              timeoutMs,
-            ))
-          ) {
-            throw new Error(
-              'Previous password grant unexpectedly created a session. Cleanup logout could not be proven.',
-            );
-          }
-        }
+        logoutAccessToken = await readAccessTokenForCleanup(previousPasswordGrant);
         throw new Error(
           `Previous password grant: expected HTTP 400 or 401, got ${previousPasswordStatus}.`,
         );
       }
     }
 
+    passwordGrantAccepted = false;
+    passwordGrantOutcomeUncertain = true;
     const passwordGrant = await request(
       fetcher,
       `${supabaseOrigin}/auth/v1/token?grant_type=password`,
@@ -148,9 +144,11 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
       timeoutMs,
       'Password grant',
     );
-    assertStatus(passwordGrant, 200, 'Password grant');
-    const initialSession = await readSession(passwordGrant, 'Password grant');
-    logoutAccessToken = initialSession.accessToken;
+    passwordGrantAccepted = passwordGrant.status === 200;
+    passwordGrantOutcomeUncertain = ![200, 400, 401].includes(passwordGrant.status);
+    const initialSession = await readSession(passwordGrant, 'Password grant', (accessToken) => {
+      logoutAccessToken = accessToken;
+    });
 
     const initialProtected = await request(
       fetcher,
@@ -172,9 +170,9 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
       timeoutMs,
       'Refresh grant',
     );
-    assertStatus(refreshGrant, 200, 'Refresh grant');
-    const refreshedSession = await readSession(refreshGrant, 'Refresh grant');
-    logoutAccessToken = refreshedSession.accessToken;
+    const refreshedSession = await readSession(refreshGrant, 'Refresh grant', (accessToken) => {
+      logoutAccessToken = accessToken;
+    });
 
     const refreshedProtected = await request(
       fetcher,
@@ -201,6 +199,7 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
     assertStatus(logout, 204, 'Logout');
     logoutCompleted = true;
 
+    unexpectedRefreshSessionCleanupUnproven = true;
     const revokedRefreshGrant = await request(
       fetcher,
       `${supabaseOrigin}/auth/v1/token?grant_type=refresh_token`,
@@ -213,21 +212,21 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
       'Revoked refresh grant',
     );
     if (![400, 401].includes(revokedRefreshGrant.status)) {
-      if (revokedRefreshGrant.status === 200) {
-        const unexpectedAccessToken = await readAccessTokenForCleanup(revokedRefreshGrant);
-        if (
-          !unexpectedAccessToken ||
-          !(await cleanupLogout(fetcher, supabaseOrigin, anonKey, unexpectedAccessToken, timeoutMs))
-        ) {
-          throw new Error(
-            'Revoked refresh grant unexpectedly created a session. Cleanup logout could not be proven.',
-          );
-        }
+      const unexpectedAccessToken = await readAccessTokenForCleanup(revokedRefreshGrant);
+      if (unexpectedAccessToken) {
+        unexpectedRefreshSessionCleanupUnproven = !(await cleanupLogout(
+          fetcher,
+          supabaseOrigin,
+          anonKey,
+          unexpectedAccessToken,
+          timeoutMs,
+        ));
       }
       throw new Error(
         `Revoked refresh grant: expected HTTP 400 or 401, got ${revokedRefreshGrant.status}.`,
       );
     }
+    unexpectedRefreshSessionCleanupUnproven = false;
 
     const anonymousProtected = await request(
       fetcher,
@@ -249,12 +248,24 @@ export async function verifySupabaseAuthSession(configuration, fetcher = fetch) 
       anonymousProtectedStatus: anonymousProtected.status,
     };
   } catch (error) {
+    if (unexpectedRefreshSessionCleanupUnproven) {
+      throw new Error(
+        `${safeMessage(error)} Unexpected refresh session cleanup could not be proven.`,
+      );
+    }
     if (
       logoutAccessToken &&
       !logoutCompleted &&
       !(await cleanupLogout(fetcher, supabaseOrigin, anonKey, logoutAccessToken, timeoutMs))
     ) {
       throw new Error(`${safeMessage(error)} Cleanup logout could not be proven.`);
+    }
+    if (
+      !logoutCompleted &&
+      !logoutAccessToken &&
+      (passwordGrantAccepted || passwordGrantOutcomeUncertain)
+    ) {
+      throw new Error(`${safeMessage(error)} Session cleanup could not be proven.`);
     }
     throw error;
   }
@@ -276,13 +287,22 @@ function assertStatus(response, expectedStatus, label) {
   }
 }
 
-async function readSession(response, label) {
+async function readSession(response, label, registerAccessToken) {
   let body;
   try {
     body = await response.json();
   } catch {
-    throw new Error(`${label} returned invalid JSON.`);
+    if (response.status === 200) throw new Error(`${label} returned invalid JSON.`);
   }
+  if (
+    body &&
+    typeof body === 'object' &&
+    typeof body.access_token === 'string' &&
+    body.access_token.length > 0
+  ) {
+    registerAccessToken(body.access_token);
+  }
+  assertStatus(response, 200, label);
   if (
     !body ||
     typeof body !== 'object' ||
@@ -353,6 +373,15 @@ function requiredOrigin(rawValue, name, requireSupabaseProject = false) {
     throw new Error(`${name} must be an exact Supabase project origin.`);
   }
   return url.origin;
+}
+
+function assertPinnedOrigins(supabaseOrigin, bffOrigin) {
+  if (supabaseOrigin !== PINNED_SUPABASE_ORIGIN) {
+    throw new Error('NEXT_PUBLIC_SUPABASE_URL must match the pinned Auth staging project.');
+  }
+  if (bffOrigin !== PINNED_BFF_ORIGIN) {
+    throw new Error('NEXT_PUBLIC_BFF_URL must match the pinned Auth staging gateway.');
+  }
 }
 
 function requiredValue(value, name) {

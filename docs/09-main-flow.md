@@ -5,7 +5,7 @@
 > [00-roadmap.md](./00-roadmap.md) 为唯一来源；能否上线以
 > [10-production-readiness.md](./10-production-readiness.md) 的 P0 门禁为准。
 >
-> 本文包含 M1～M84 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
+> 本文包含 M1～M85 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
 
 ## 1. 主流程定义（核心闭环）
 
@@ -1405,6 +1405,8 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 - [x] 全仓 lint/typecheck/test、Prisma 与格式门禁通过
 
 ## 54. 变更记录
+
+- 2026-08-07：完成 M85 / R1-01 双账号租户隔离验收器的代码基座。新增固定读取权限为 `0600` 的 Web staging 配置，并把 Supabase 项目与 BFF 固定到当前公开 staging origin；同账号、非 UUID 身份、非公开 Key、错项目或错 Gateway 都在发送凭证/Token 前失败。验收器在任何写入前要求双方都没有目标收藏，随后对 A、B 依次执行收藏、己方回读、对方不可见、删除和对称验证。只有双方初始为空后才允许补偿删除；PUT 超时、网络错误或非 200 时不重试，最终仍逐账号执行 best-effort DELETE、回读、logout，并要求 refresh token 返回 400/401，但由于迟到提交可能晚于即时回读，这类结果会永久标记为清理未证明而不是误报成功。普通路径任一步无法证明也会失败，且输出不含邮箱、密码、Key、Token、用户 ID、商品编号或响应正文。同时加固单账号 Auth 验收器：password/refresh 的响应在完整性或状态断言前登记任何 access token，grant 超时、无 Token 的 5xx 和注销后 refresh 探针不确定均明确要求人工核对会话，错误目标在发送凭证前失败。定向 Auth/隔离测试 43/43、全体运维脚本 92/92、全仓测试 14/14 个任务共 1,249 项、typecheck 15/15、lint 2/2、build 9/9、Prettier 与 diff check 已通过。真实双账号尚未写入 staging 私有配置，也未执行本 smoke；当前动态证据范围只覆盖两个不同 Supabase 用户的当前 JWT 会话与 Favorites 双向不可见，不能宣称刷新前后内部映射、R1-01、其他业务域租户隔离或生产身份门禁完成。
 
 - 2026-08-07：完成 M84 / R0-03 shadcn 工作台部署与 staging 链路前向恢复。`dd648f1` 将应用壳、今日选品、筛选、候选决策台、首次铺货向导与移动 Sheet 迁移到 shadcn primitives，同时保留 URL 筛选、三路独立查询、收藏恢复、真实空/降级/错误状态、readiness 和发布“状态待核实”等业务契约。当前候选通过 1,249 项测试（BFF 808、Web 99、DB 78、Platform SDK 166、Crawler 62、Entitlements 14、LLM 8、Scoring 14）、15/15 typecheck、2/2 lint、9/9 build、生产依赖审计、Prisma、63 项运维脚本、7 项 Gateway、Prettier 与 diff check；[Release gates #32](https://github.com/harzss/supplier/actions/runs/31139134369) 的 verify/browser/images 全绿。Cloudflare 静态版本 `3c75d6ea-5444-49c2-ac50-47e2ff3990f4` 已部署，远端首页与本地产物哈希一致。部署时发现 2026-08-06 的孤儿 BFF 仍占用 3001；精确核对后前向清理，launchd 用当前构建接管并刷新 Quick Tunnel，最终本机/Gateway live/ready 200、18/18 部署 smoke、主要路由、旧商品 URL 301 和 prototype 404 均通过。R0-03 仍缺真实邮箱 Auth 生命周期、双租户和外部平台 E2E，状态不变；完整证据见 [2026-08-07 shadcn staging Web release](./evidence/2026-08-07-shadcn-staging-web-release.md)。
 

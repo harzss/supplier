@@ -42,6 +42,7 @@
     "audit:supabase-key-rotation": "node scripts/verify-supabase-key-rotation.mjs",
     "audit:supabase-auth-session": "node scripts/verify-supabase-auth-session.mjs",
     "audit:supabase-auth-password-transition": "node scripts/verify-supabase-auth-session.mjs --expect-previous-password-rejected",
+    "audit:supabase-tenant-isolation": "node scripts/verify-supabase-tenant-isolation.mjs",
     "staging:auth:invite": "node scripts/invite-staging-user.mjs",
     "deploy:verify": "node scripts/verify-deployment.mjs",
     "staging:supervise": "node scripts/staging-local-supervisor.mjs",

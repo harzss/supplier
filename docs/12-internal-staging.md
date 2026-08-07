@@ -405,7 +405,7 @@ pnpm audit:supabase-boundary:publishable
 pnpm audit:supabase-auth-session
 ```
 
-验证器依次检查密码登录、有效 JWT 访问、refresh token 换新会话、刷新后 JWT 访问、GoTrue 登出、刚刷新得到的 refresh token 再换会话必须返回 400/401，以及无 Token 访问 401；全程不输出邮箱、密码、Token 或响应正文。
+验证器把 Supabase 项目和 BFF 固定到当前 staging 公开 origin，依次检查密码登录、有效 JWT 访问、refresh token 换新会话、刷新后 JWT 访问、GoTrue 登出、刚刷新得到的 refresh token 再换会话必须返回 400/401，以及无 Token 访问 401；全程不输出邮箱、密码、Token 或响应正文。password/refresh grant 的非 200 响应如包含 access token，会先登记并尝试注销；若请求超时、网络失败、5xx 无可读 Token，或注销后的 refresh 探针结果不确定，命令会明确报告会话清理未证明。此时不要直接重跑；先在 Supabase Auth 中核对并撤销该专用测试账号的全部可疑会话，确认原请求已经终止后再验收。
 
 8. 在浏览器触发忘记密码，核对邮件和稳定 Web 回跳，并设置一个不同的新密码。随后把旧密码写入 `AUTH_TEST_PREVIOUS_PASSWORD`，把 `AUTH_TEST_PASSWORD` 更新为新密码，执行：
 
@@ -415,8 +415,30 @@ pnpm audit:supabase-auth-session
 
    转换验收先要求旧密码返回 400/401，再完整验证新密码会话；429、5xx、超时或网络错误都不能当作“旧密码已失效”。旧密码若意外成功，脚本仅清理该会话并失败，不继续新密码链路。脚本不会发送恢复邮件、点击链接或修改密码，不能替代浏览器验收。完成后立即从文件移除 `AUTH_TEST_EMAIL`、`AUTH_TEST_PASSWORD` 和 `AUTH_TEST_PREVIOUS_PASSWORD`。
 
-9. 确认无 Token 请求业务 API 返回 401，伪造 `x-user-id` 不生效。
-10. `/api/operations/*` 只接受独立 `OPERATIONS_TOKEN`。
+9. 再通过同一受控邀请流程准备第二个**专用测试账号**，两个账号和目标货源在整个验收窗口内都不得被浏览器、其他脚本或操作员并发使用；验证器的 logout 可能使同账号的其他 refresh 会话失效。两个账号都完成设密后，在 `apps/web/.env.staging.local` 临时加入两组凭证和一个专用于本次验收、双方都未收藏的现有货源编号：
+
+   ```env
+   AUTH_TENANT_A_EMAIL=replace-with-first-test-account
+   AUTH_TENANT_A_PASSWORD=replace-with-first-test-password
+   AUTH_TENANT_B_EMAIL=replace-with-second-test-account
+   AUTH_TENANT_B_PASSWORD=replace-with-second-test-password
+   AUTH_TENANT_TEST_PRODUCT_ID=replace-with-existing-product-id
+   ```
+
+   随后执行：
+
+   ```bash
+   pnpm audit:supabase-tenant-isolation
+   ```
+
+   验证器把 Supabase 项目和 BFF 固定到当前 staging 公开 origin，要求两个 Supabase 用户 ID 不同，并在任何写入前确认双方都没有收藏该商品；若已有收藏或无法证明初始为空，会停止且不删除预检时已有的数据。预检通过后，它依次验证 A 收藏仅 A 可见、删除后双方不可见，再对 B 做对称验证。该保护无法识别预检后的并发人工收藏，因此专用账号、专用货源和停写窗口是强制条件。
+
+   PUT 发生超时、网络错误、非 200 或其他不确定结果时绝不重试；脚本仍会执行双账号 DELETE、回读、logout 和 refresh token 失效检查，但迟到的服务端提交可能发生在即时回读之后，所以这条路径只算 best-effort 补偿，最终必须明确失败并报告清理未证明。客户端等待超过自身 timeout 也不是服务端完成栅栏；先从 BFF 请求日志或等价运行证据确认原请求已经终止，无法确认时保持失败且不要重跑。请求确认排空后，再分别登录两个账号人工移除该测试收藏，并在静默窗口后重复回读，确认无残留后才能重新验收。普通成功路径也会做最终双删除和回读，任一补偿或注销无法证明都会失败。输出不包含邮箱、密码、Key、Token、用户 ID、商品编号或响应正文。
+
+   该验收动态证明两个当前 JWT 会话使用不同 Supabase 用户且 Favorites 双向不可见；它不单独证明刷新前后稳定的 `sub → 内部用户` 映射，也不能替代订单、异常中心、售后等业务域的双租户 E2E。完成后立即移除上述五个临时变量。
+
+10. 确认无 Token 请求业务 API 返回 401，伪造 `x-user-id` 不生效。
+11. `/api/operations/*` 只接受独立 `OPERATIONS_TOKEN`。
 
 ## 9. 验收与平台开关
 

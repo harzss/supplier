@@ -28,10 +28,7 @@ test('migration 45 adds the private Supabase PostgreSQL runtime-state table', as
   assert.match(sql, /CONSTRAINT "runtime_states_mode_check"/);
   assert.match(sql, /CREATE INDEX "runtime_states_expires_at_idx"/);
   assert.match(sql, /ALTER TABLE "runtime_states" ENABLE ROW LEVEL SECURITY/);
-  assert.match(
-    sql,
-    /REVOKE ALL PRIVILEGES ON TABLE "runtime_states" FROM "anon", "authenticated"/,
-  );
+  assert.match(sql, /REVOKE ALL PRIVILEGES ON TABLE "runtime_states" FROM "anon", "authenticated"/);
   assert.doesNotMatch(sql, /GRANT\s+/i);
 });
 
@@ -42,6 +39,10 @@ test('Prisma models every runtime-state mode and the timestamptz expiry', async 
   assert.match(schema, /ownerToken\s+String\?\s+@map\("owner_token"\) @db\.Uuid/);
   assert.match(schema, /counterValue\s+Int\?\s+@map\("counter_value"\)/);
   assert.match(schema, /expiresAt\s+DateTime\s+@map\("expires_at"\) @db\.Timestamptz\(3\)/);
+  assert.match(
+    schema,
+    /updatedAt\s+DateTime\s+@default\(now\(\)\) @updatedAt @map\("updated_at"\) @db\.Timestamptz\(3\)/,
+  );
 });
 
 test('the dedicated assertion verifies exact migration order, shape and client isolation', async () => {

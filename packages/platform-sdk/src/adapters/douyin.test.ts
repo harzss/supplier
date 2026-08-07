@@ -1,6 +1,11 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { PlatformMutationResultUnknownError, type AdapterConfig } from '../types';
+import {
+  PlatformMutationResultUnknownError,
+  PlatformTokenRefreshRejectedError,
+  PlatformTokenRefreshRetryableError,
+  type AdapterConfig,
+} from '../types';
 import { DouyinAdapter } from './douyin';
 
 const CONFIG: AdapterConfig = {
@@ -263,6 +268,203 @@ describe('DouyinAdapter', () => {
     );
     expect(token.accessToken).toBe('new-access-token');
     expect(token.refreshToken).toBe('new-refresh-token');
+  });
+
+  it.each([
+    ['a string err_no', { err_no: '0' }],
+    ['an object code', { code: {} }],
+    [
+      'an unsafe numeric err_no',
+      { err_no: Number.MAX_SAFE_INTEGER + 1, message: 'invalid refresh token' },
+    ],
+  ])('classifies %s as a malformed retryable response', async (_label, result) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            ...result,
+            data: { access_token: 'access', expires_in: 7200, shop_id: '4463798' },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it.each([
+    [10001, 'invalid refresh token', PlatformTokenRefreshRejectedError],
+    [20001, 'service busy', PlatformTokenRefreshRetryableError],
+  ])('does not let err_no=0 mask code=%s', async (code, message, expectedError) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            err_no: 0,
+            code,
+            message,
+            data: { access_token: 'access', expires_in: 7200, shop_id: '4463798' },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(expectedError);
+  });
+
+  it.each([
+    ['an unsafe numeric shop subject', Number.MAX_SAFE_INTEGER + 1],
+    ['a whitespace-padded shop subject', ' 4463798'],
+    ['a zero-prefixed shop subject', '04463798'],
+    ['an overlong shop subject', '1'.repeat(65)],
+  ])('classifies %s as a retryable response', async (_label, shopId) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            err_no: 0,
+            data: { access_token: 'access', expires_in: 7200, shop_id: shopId },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it.each([
+    [Number.MAX_SAFE_INTEGER, String(Number.MAX_SAFE_INTEGER)],
+    ['1'.repeat(64), '1'.repeat(64)],
+  ])('accepts the valid shop subject %s', async (shopId, expectedShopId) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(
+          JSON.stringify({
+            err_no: 0,
+            data: { access_token: 'access', expires_in: 7200, shop_id: shopId },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).resolves.toMatchObject({
+      platformShopId: expectedShopId,
+    });
+  });
+
+  it('classifies a token refresh transport failure as retryable', async () => {
+    const adapter = new DouyinAdapter(CONFIG, async () => {
+      throw new Error('socket timeout');
+    });
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it.each([408, 425, 429, 500])('classifies token refresh HTTP %s as retryable', async (status) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(JSON.stringify({ err_no: 10001, message: 'invalid refresh token' }), {
+          status,
+        }),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it('classifies malformed and unknown token refresh responses as retryable', async () => {
+    const malformed = new DouyinAdapter(CONFIG, async () => new Response('{', { status: 200 }));
+    const unknown = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(JSON.stringify({ err_no: 20001, message: 'service busy' }), {
+          status: 200,
+        }),
+    );
+    const malformedFields = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(JSON.stringify({ err_no: 20001, message: {} }), {
+          status: 200,
+        }),
+    );
+
+    await expect(malformed.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+    await expect(unknown.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+    await expect(malformedFields.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it.each([200, 400])(
+    'classifies an explicit refresh credential rejection at HTTP %s as terminal',
+    async (status) => {
+      const adapter = new DouyinAdapter(
+        CONFIG,
+        async () =>
+          new Response(JSON.stringify({ err_no: 10001, message: 'invalid refresh token' }), {
+            status,
+          }),
+      );
+
+      await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+        PlatformTokenRefreshRejectedError,
+      );
+    },
+  );
+
+  it.each([
+    ['a blank shop subject', { access_token: 'access', expires_in: 7200, shop_id: '' }],
+    ['an invalid shop subject', { access_token: 'access', expires_in: 7200, shop_id: {} }],
+    ['an invalid numeric shop subject', { access_token: 'access', expires_in: 7200, shop_id: -1 }],
+    ['a blank access token', { access_token: ' ', expires_in: 7200, shop_id: '4463798' }],
+    [
+      'an invalid refresh token',
+      { access_token: 'access', refresh_token: {}, expires_in: 7200, shop_id: '4463798' },
+    ],
+    [
+      'an out-of-range expiry',
+      { access_token: 'access', expires_in: 31_536_001, shop_id: '4463798' },
+    ],
+  ])('classifies %s in a token refresh response as retryable', async (_label, data) => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () => new Response(JSON.stringify({ err_no: 0, data }), { status: 200 }),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it('keeps an authorization service outage retryable instead of expiring the credential', async () => {
+    const adapter = new DouyinAdapter(
+      CONFIG,
+      async () =>
+        new Response(JSON.stringify({ err_no: 20001, message: '授权服务暂时失效' }), {
+          status: 400,
+        }),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
   });
 
   it('publishes a product with canonical JSON and the official product.addV2 fields', async () => {

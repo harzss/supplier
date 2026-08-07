@@ -83,7 +83,17 @@ export interface SettledLogisticsRepairProposal {
 interface PreparedPurchase {
   purchase: Pick<
     PurchaseOrderGraph,
-    'id' | 'orderId' | 'outOrderId' | 'orderId1688' | 'status' | 'retryCount'
+    | 'id'
+    | 'orderId'
+    | 'buyerShopId'
+    | 'attemptNo'
+    | 'outOrderId'
+    | 'orderId1688'
+    | 'status'
+    | 'retryCount'
+    | 'retryEligible'
+    | 'syncRevision'
+    | 'exceptionStatus'
   >;
   items: GroupedPurchaseItem[];
   address: Alibaba1688CreateOrderInput['address'];
@@ -117,27 +127,12 @@ export class Alibaba1688PurchaseService {
       return { packages: [], requestId: null };
     }
 
-    const buyer = await this.prisma.shop.findFirst({
-      where: {
-        userId: user.userId,
-        platform: 'alibaba_1688',
-        role: 'buyer',
-        status: 'active',
-        accessTokenEnc: { not: null },
-        refreshTokenEnc: { not: null },
-        NOT: { platformShopId: { startsWith: 'demo-' } },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (!buyer) {
-      throw new ServiceUnavailableException('尚未授权可用的 1688 买家账号');
-    }
-
     const adapter = new Alibaba1688Adapter(this.oauthConfig.getPlatformConfig('alibaba_1688'));
-    const accessToken = await this.shopTokens.getAccessToken(buyer.id, user.userId);
 
     if (order.status === 'paid') {
-      await this.placeMissingPurchases(order, buyer.id, accessToken, adapter);
+      const buyerShopId = await this.resolvePurchaseBuyerShopId(user.userId, order);
+      const accessToken = await this.shopTokens.getAccessToken(buyerShopId, user.userId);
+      await this.placeMissingPurchases(order, buyerShopId, accessToken, adapter);
       const transitioned = await this.prisma.order.updateMany({
         where: {
           id: order.id,
@@ -173,13 +168,21 @@ export class Alibaba1688PurchaseService {
       return { packages: [], requestId: null };
     }
 
+    const buyerShopId = this.purchasingBuyerShopId(order);
+    const accessToken = await this.shopTokens.getAccessToken(buyerShopId, user.userId);
     for (const purchase of order.purchaseOrders) {
-      if (purchase.orderId1688) {
-        await this.syncPurchase(purchase, accessToken, adapter);
-      }
+      await this.syncPurchase(purchase, accessToken, adapter);
     }
 
     order = await this.loadOrder(user.userId, orderId);
+    if (
+      order.status !== 'purchasing' ||
+      isAfterSaleBlocked(order.afterSaleStatus, order.partialRefundDisposition) ||
+      order.purchaseOrders.some((purchase) => purchase.exceptionStatus === 'action_required')
+    ) {
+      return { packages: [], requestId: null };
+    }
+    this.purchasingBuyerShopId(order);
     const packages = buildPackages(order);
     return {
       packages,
@@ -334,6 +337,64 @@ export class Alibaba1688PurchaseService {
     }
   }
 
+  private async resolvePurchaseBuyerShopId(
+    userId: bigint,
+    order: PurchasingOrder,
+  ): Promise<bigint> {
+    const pinnedBuyerShopId = this.pinnedPurchaseBuyerShopId(order);
+    if (pinnedBuyerShopId !== null) return pinnedBuyerShopId;
+
+    const buyer = await this.prisma.shop.findFirst({
+      where: {
+        userId,
+        platform: 'alibaba_1688',
+        role: 'buyer',
+        status: 'active',
+        accessTokenEnc: { not: null },
+        refreshTokenEnc: { not: null },
+        NOT: { platformShopId: { startsWith: 'demo-' } },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    if (!buyer) {
+      throw new ServiceUnavailableException('尚未授权可用的 1688 买家账号');
+    }
+    return buyer.id;
+  }
+
+  private pinnedPurchaseBuyerShopId(order: PurchasingOrder): bigint | null {
+    if (order.purchaseOrders.length === 0) return null;
+    const buyerShopIds = new Set<bigint>();
+    for (const purchase of order.purchaseOrders) {
+      if (!purchase.buyerShopId) {
+        throw new ServiceUnavailableException(
+          '1688 采购单缺少原买家账号绑定，已停止自动处理以避免重复下单或错单',
+        );
+      }
+      buyerShopIds.add(purchase.buyerShopId);
+    }
+    if (buyerShopIds.size !== 1) {
+      throw new ServiceUnavailableException(
+        '同一销售订单绑定了多个 1688 买家账号，已停止自动处理以避免错单',
+      );
+    }
+    return [...buyerShopIds][0]!;
+  }
+
+  private purchasingBuyerShopId(order: PurchasingOrder): bigint {
+    const buyerShopId = this.pinnedPurchaseBuyerShopId(order);
+    if (buyerShopId === null) {
+      throw new ServiceUnavailableException('采购订单缺失，已停止自动履约');
+    }
+    if (order.purchaseOrders.some((purchase) => !purchase.orderId1688)) {
+      throw new ServiceUnavailableException(
+        '1688 采购单缺少远端订单绑定，已停止自动查询和物流回传',
+      );
+    }
+    return buyerShopId;
+  }
+
   private async loadOrder(userId: bigint, orderId: bigint): Promise<PurchasingOrder> {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, shop: { userId } },
@@ -422,46 +483,230 @@ export class Alibaba1688PurchaseService {
             '1688 恢复采购单商品明细与本地快照不一致，已停止自动处理',
           );
         }
-        const persisted = await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
-          tx.purchaseOrder.updateMany({
-            where: {
-              id: purchase.id,
-              OR: [{ orderId1688: null }, { orderId1688: remote.orderId }],
-            },
-            data: {
-              orderId1688: remote.orderId,
-              status: 'awaiting_payment',
-              failureReason: null,
-            },
-          }),
-        );
-        if (persisted.count !== 1) {
-          throw new ServiceUnavailableException(
-            '1688 采购单恢复结果与本地记录冲突，已停止自动处理',
-          );
-        }
+        await this.persistPlacedPurchase(purchase, remote.orderId);
       } catch (error) {
         try {
-          await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
-            tx.purchaseOrder.updateMany({
-              where: {
-                id: purchase.id,
-                orderId1688: null,
-                status: { in: ['pending', 'failed'] },
-              },
-              data: {
-                status: 'failed',
-                retryCount: { increment: 1 },
-                failureReason: safeFailure(error),
-              },
-            }),
-          );
+          await this.persistPurchaseFailure(purchase, error);
         } catch (persistenceError) {
           this.logger.error(`1688 采购失败状态保存失败：${safeFailure(persistenceError)}`);
         }
         throw error;
       }
     }
+  }
+
+  private async persistPlacedPurchase(
+    purchase: PreparedPurchase['purchase'],
+    remoteOrderId: string,
+  ): Promise<void> {
+    try {
+      const persisted = await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+        tx.purchaseOrder.updateMany({
+          where: preparedPurchaseWhere(purchase, false),
+          data: {
+            orderId1688: remoteOrderId,
+            status: 'awaiting_payment',
+            failureReason: null,
+            syncRevision: { increment: 1 },
+          },
+        }),
+      );
+      if (persisted.count === 1) return;
+    } catch {
+      // The remote ID is known, so fall through to the exact-attempt recovery transaction.
+    }
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const reconciled = await this.withPurchaseFactTransaction(async (tx) => {
+        const current = await tx.purchaseOrder.findUnique({
+          where: { id: purchase.id },
+          select: {
+            id: true,
+            orderId: true,
+            buyerShopId: true,
+            attemptNo: true,
+            outOrderId: true,
+            orderId1688: true,
+            status: true,
+            retryEligible: true,
+            syncRevision: true,
+            exceptionStatus: true,
+            exceptionRevision: true,
+            order: {
+              select: {
+                status: true,
+                afterSaleStatus: true,
+                partialRefundDisposition: true,
+              },
+            },
+          },
+        });
+        if (!current || !samePurchaseAttempt(current, purchase)) {
+          throw new ServiceUnavailableException(
+            '1688 采购单恢复结果与本地记录冲突，已停止自动处理',
+          );
+        }
+        if (current.orderId1688 && current.orderId1688 !== remoteOrderId) {
+          throw new ServiceUnavailableException(
+            '1688 采购单恢复结果与本地记录冲突，已停止自动处理',
+          );
+        }
+
+        const hold =
+          placedPurchaseHold(current.order) ??
+          (current.exceptionStatus === 'stopped' ? afterSalePlacementHold() : null);
+        if (current.orderId1688 === remoteOrderId && !hold) return true;
+        if (
+          current.orderId1688 === remoteOrderId &&
+          hold &&
+          current.exceptionStatus === 'action_required'
+        ) {
+          return true;
+        }
+
+        const updated = await tx.purchaseOrder.updateMany({
+          where: {
+            id: current.id,
+            orderId: current.orderId,
+            buyerShopId: current.buyerShopId,
+            attemptNo: current.attemptNo,
+            outOrderId: current.outOrderId,
+            orderId1688: current.orderId1688,
+            status: current.status,
+            retryEligible: current.retryEligible,
+            syncRevision: current.syncRevision,
+            exceptionStatus: current.exceptionStatus,
+            exceptionRevision: current.exceptionRevision,
+          },
+          data: {
+            ...(current.orderId1688
+              ? {}
+              : {
+                  orderId1688: remoteOrderId,
+                  status: 'awaiting_payment' as const,
+                  failureReason: null,
+                }),
+            syncRevision: { increment: 1 },
+            ...(hold
+              ? {
+                  retryEligible: false,
+                  exceptionStatus: 'action_required' as const,
+                  exceptionRevision: { increment: 1 },
+                  exceptionCode: hold.code,
+                  exceptionReason: hold.reason,
+                  exceptionDetectedAt: new Date(),
+                  exceptionResolvedAt: null,
+                  exceptionResolutionNote: null,
+                  reconciledCost: null,
+                }
+              : {}),
+          },
+        });
+        if (updated.count === 0) return false;
+        await this.afterSales.materializeOrder(tx, purchase.orderId);
+        return true;
+      });
+      if (reconciled) return;
+    }
+    throw new ServiceUnavailableException('1688 采购单恢复结果与本地记录冲突，已停止自动处理');
+  }
+
+  private async persistPurchaseFailure(
+    purchase: PreparedPurchase['purchase'],
+    error: unknown,
+  ): Promise<void> {
+    const failureReason = safeFailure(error);
+    try {
+      const persisted = await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+        tx.purchaseOrder.updateMany({
+          where: preparedPurchaseWhere(purchase, true),
+          data: {
+            status: 'failed',
+            retryCount: { increment: 1 },
+            failureReason,
+            syncRevision: { increment: 1 },
+          },
+        }),
+      );
+      if (persisted.count === 1) return;
+    } catch {
+      // Retry by rereading the exact attempt so a concurrent hold cannot hide an unknown result.
+    }
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const reconciled = await this.withPurchaseFactTransaction(async (tx) => {
+        const current = await tx.purchaseOrder.findUnique({
+          where: { id: purchase.id },
+          select: {
+            id: true,
+            orderId: true,
+            buyerShopId: true,
+            attemptNo: true,
+            outOrderId: true,
+            orderId1688: true,
+            status: true,
+            retryEligible: true,
+            syncRevision: true,
+            exceptionStatus: true,
+            exceptionRevision: true,
+            order: {
+              select: {
+                status: true,
+                afterSaleStatus: true,
+                partialRefundDisposition: true,
+              },
+            },
+          },
+        });
+        if (!current || !samePurchaseAttempt(current, purchase) || current.orderId1688) return true;
+        if (!['pending', 'failed'].includes(current.status)) return true;
+
+        const hold =
+          placedPurchaseHold(current.order) ??
+          (current.exceptionStatus === 'stopped' ? afterSalePlacementHold() : null);
+        if (!hold && current.exceptionStatus === 'action_required') return true;
+        const updated = await tx.purchaseOrder.updateMany({
+          where: {
+            id: current.id,
+            orderId: current.orderId,
+            buyerShopId: current.buyerShopId,
+            attemptNo: current.attemptNo,
+            outOrderId: current.outOrderId,
+            orderId1688: null,
+            status: current.status,
+            retryEligible: current.retryEligible,
+            syncRevision: current.syncRevision,
+            exceptionStatus: current.exceptionStatus,
+            exceptionRevision: current.exceptionRevision,
+          },
+          data: {
+            status: 'failed',
+            retryCount: { increment: 1 },
+            failureReason,
+            syncRevision: { increment: 1 },
+            ...(hold
+              ? {
+                  retryEligible: false,
+                  exceptionStatus: 'action_required' as const,
+                  exceptionRevision: { increment: 1 },
+                  exceptionCode: hold.code,
+                  exceptionReason:
+                    '1688 下单结果未知且销售订单售后状态已变化；请使用原外部订单号核对 1688 后再人工处置。',
+                  exceptionDetectedAt: new Date(),
+                  exceptionResolvedAt: null,
+                  exceptionResolutionNote: null,
+                  reconciledCost: null,
+                }
+              : {}),
+          },
+        });
+        if (updated.count === 0) return false;
+        await this.afterSales.materializeOrder(tx, purchase.orderId);
+        return true;
+      });
+      if (reconciled) return;
+    }
+    throw new ServiceUnavailableException('1688 采购失败状态与本地记录冲突，已停止自动处理');
   }
 
   private async preparePurchaseSnapshots(
@@ -511,6 +756,11 @@ export class Alibaba1688PurchaseService {
           (purchase) => purchase.supplierKey === supplierKey,
         );
         assertPurchaseItemsMatch(existing, items);
+        if (existing && existing.buyerShopId !== buyerShopId) {
+          throw new ServiceUnavailableException(
+            '1688 采购单已绑定其他买家账号，已停止自动恢复以避免重复下单',
+          );
+        }
         if (existing && existing.status !== 'pending' && existing.status !== 'failed') {
           continue;
         }
@@ -531,12 +781,16 @@ export class Alibaba1688PurchaseService {
             buyerShopId,
             supplierKey,
             outOrderId: `supplier-${orderId}-${supplierKey}`,
+            orderId1688: null,
+            attemptNo: 1,
             paymentMode: 'manual',
             purchaseCost: purchaseCost || null,
             status: 'pending',
+            retryEligible: false,
+            syncRevision: 0,
+            exceptionStatus: 'none',
           },
           update: {
-            buyerShopId,
             purchaseCost: purchaseCost || null,
             failureReason: null,
           },
@@ -619,15 +873,7 @@ export class Alibaba1688PurchaseService {
   ): Promise<void> {
     const claim = settledOrder
       ? await this.claimSettledPurchase(purchase)
-      : await this.withPurchaseFactTransaction(async (tx) => {
-          const updated = await tx.purchaseOrder.update({
-            where: { id: purchase.id },
-            data: { syncRevision: { increment: 1 } },
-            select: { syncRevision: true, status: true },
-          });
-          await this.afterSales.materializeOrder(tx, purchase.orderId);
-          return updated;
-        });
+      : await this.claimActivePurchase(purchase);
     if (!claim) return;
 
     let remote: Alibaba1688BuyerOrder;
@@ -656,8 +902,7 @@ export class Alibaba1688PurchaseService {
           );
         } else {
           await this.flagActivePurchase(
-            purchase.id,
-            purchase.orderId,
+            purchase,
             claim.syncRevision,
             PURCHASE_EXCEPTION_CODE.snapshotMismatch,
             error.message,
@@ -675,7 +920,7 @@ export class Alibaba1688PurchaseService {
         purchase.shipments.length === 0;
       await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
         tx.purchaseOrder.updateMany({
-          where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
+          where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder),
           data: {
             status: 'failed',
             purchaseCost: settledOrder
@@ -722,7 +967,7 @@ export class Alibaba1688PurchaseService {
     if (status !== 'shipped' && status !== 'received') {
       await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
         tx.purchaseOrder.updateMany({
-          where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
+          where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder),
           data: purchaseData,
         }),
       );
@@ -743,7 +988,7 @@ export class Alibaba1688PurchaseService {
       }
       await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
         tx.purchaseOrder.updateMany({
-          where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
+          where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder),
           data: purchaseData,
         }),
       );
@@ -764,8 +1009,7 @@ export class Alibaba1688PurchaseService {
           );
         } else {
           await this.flagActivePurchase(
-            purchase.id,
-            purchase.orderId,
+            purchase,
             claim.syncRevision,
             PURCHASE_EXCEPTION_CODE.logisticsMappingMismatch,
             error.message,
@@ -788,7 +1032,7 @@ export class Alibaba1688PurchaseService {
     }
     await this.withSerializableTransaction(async (tx) => {
       const persisted = await tx.purchaseOrder.updateMany({
-        where: ownedPurchaseWhere(purchase.id, claim.syncRevision, settledOrder),
+        where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder),
         data: {
           ...purchaseData,
           everShipped: true,
@@ -855,6 +1099,31 @@ export class Alibaba1688PurchaseService {
       : null;
   }
 
+  private async claimActivePurchase(
+    purchase: PurchaseOrderGraph,
+  ): Promise<{ syncRevision: number; status: PurchaseOrderGraph['status'] } | null> {
+    const claimed = await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
+      tx.purchaseOrder.updateMany({
+        where: {
+          id: purchase.id,
+          syncRevision: purchase.syncRevision,
+          attemptNo: purchase.attemptNo,
+          outOrderId: purchase.outOrderId,
+          orderId1688: purchase.orderId1688,
+          buyerShopId: purchase.buyerShopId,
+          status: purchase.status,
+          retryEligible: purchase.retryEligible,
+          exceptionStatus: purchase.exceptionStatus,
+          order: activePurchaseOrderWhere(),
+        },
+        data: { syncRevision: { increment: 1 } },
+      }),
+    );
+    return claimed.count === 1
+      ? { syncRevision: purchase.syncRevision + 1, status: purchase.status }
+      : null;
+  }
+
   private async flagSettledPurchase(
     purchaseOrderId: bigint,
     orderId: bigint,
@@ -887,19 +1156,14 @@ export class Alibaba1688PurchaseService {
   }
 
   private async flagActivePurchase(
-    purchaseOrderId: bigint,
-    orderId: bigint,
+    purchase: PurchaseOrderGraph,
     syncRevision: number,
     code: PurchaseExceptionCode,
     reason: string,
   ): Promise<void> {
-    await this.mutatePurchaseFacts(orderId, (tx) =>
+    await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
       tx.purchaseOrder.updateMany({
-        where: {
-          id: purchaseOrderId,
-          syncRevision,
-          exceptionStatus: { in: ['none', 'resolved'] },
-        },
+        where: activeOwnedPurchaseWhere(purchase, syncRevision),
         data: {
           retryEligible: false,
           exceptionStatus: 'action_required',
@@ -937,19 +1201,137 @@ export class Alibaba1688PurchaseService {
 }
 
 function ownedPurchaseWhere(
-  purchaseOrderId: bigint,
+  purchase: PurchaseOrderGraph,
   syncRevision: number,
   settledOrder: boolean,
 ): Prisma.PurchaseOrderWhereInput {
   return settledOrder
     ? {
-        id: purchaseOrderId,
+        id: purchase.id,
         syncRevision,
         exceptionStatus: { in: ['none', 'resolved'] },
         status: { in: ['shipped', 'received'] },
         order: { status: { in: ['shipped', 'received'] } },
       }
-    : { id: purchaseOrderId, syncRevision };
+    : activeOwnedPurchaseWhere(purchase, syncRevision);
+}
+
+function activeOwnedPurchaseWhere(
+  purchase: PurchaseOrderGraph,
+  syncRevision: number,
+): Prisma.PurchaseOrderWhereInput {
+  return {
+    id: purchase.id,
+    syncRevision,
+    attemptNo: purchase.attemptNo,
+    outOrderId: purchase.outOrderId,
+    orderId1688: purchase.orderId1688,
+    buyerShopId: purchase.buyerShopId,
+    status: purchase.status,
+    retryEligible: purchase.retryEligible,
+    exceptionStatus: purchase.exceptionStatus,
+    order: activePurchaseOrderWhere(),
+  };
+}
+
+function preparedPurchaseWhere(
+  purchase: PreparedPurchase['purchase'],
+  failure: boolean,
+): Prisma.PurchaseOrderWhereInput {
+  return {
+    id: purchase.id,
+    orderId: purchase.orderId,
+    buyerShopId: purchase.buyerShopId,
+    attemptNo: purchase.attemptNo,
+    outOrderId: purchase.outOrderId,
+    orderId1688: purchase.orderId1688,
+    status: purchase.status,
+    retryEligible: purchase.retryEligible,
+    syncRevision: purchase.syncRevision,
+    exceptionStatus: purchase.exceptionStatus,
+    order: {
+      status: failure ? 'paid' : { in: ['paid', 'purchasing'] },
+      OR: allowedAfterSaleWhere(),
+    },
+  };
+}
+
+function activePurchaseOrderWhere(): Prisma.OrderWhereInput {
+  return { status: 'purchasing', OR: allowedAfterSaleWhere() };
+}
+
+function allowedAfterSaleWhere(): Prisma.OrderWhereInput[] {
+  return [
+    { afterSaleStatus: { in: ['none', 'failed'] } },
+    {
+      afterSaleStatus: 'partial_refund',
+      partialRefundDisposition: 'continue_remaining',
+    },
+  ];
+}
+
+function samePurchaseAttempt(
+  current: {
+    id: bigint;
+    orderId: bigint;
+    buyerShopId: bigint | null;
+    attemptNo: number;
+    outOrderId: string;
+  },
+  prepared: PreparedPurchase['purchase'],
+): boolean {
+  return (
+    current.id === prepared.id &&
+    current.orderId === prepared.orderId &&
+    current.buyerShopId === prepared.buyerShopId &&
+    current.attemptNo === prepared.attemptNo &&
+    current.outOrderId === prepared.outOrderId
+  );
+}
+
+function placedPurchaseHold(order: {
+  status: string;
+  afterSaleStatus: string;
+  partialRefundDisposition: string;
+}): { code: PurchaseExceptionCode; reason: string } | null {
+  if (order.status === 'refunded' || order.afterSaleStatus === 'refunded') {
+    return {
+      code: PURCHASE_EXCEPTION_CODE.salesOrderRefunded,
+      reason:
+        '销售订单已退款，但 1688 采购单已创建；请停止付款或发货，并在 1688 完成取消、退款或物流拦截后回到系统确认。',
+    };
+  }
+  if (order.status === 'closed') {
+    return {
+      code: PURCHASE_EXCEPTION_CODE.salesOrderClosed,
+      reason:
+        '销售订单已关闭，但 1688 采购单已创建；请停止付款或发货，并在 1688 完成取消、退款或物流拦截后回到系统确认。',
+    };
+  }
+  if (
+    order.afterSaleStatus === 'partial_refund' &&
+    order.partialRefundDisposition !== 'continue_remaining'
+  ) {
+    return {
+      code: PURCHASE_EXCEPTION_CODE.salesOrderPartialRefund,
+      reason:
+        '销售订单存在部分退款成功的商品，但 1688 采购单已创建；请核对未退款商品、调整或取消 1688 采购后回到系统确认。',
+    };
+  }
+  if (
+    !['paid', 'purchasing'].includes(order.status) ||
+    isAfterSaleBlocked(order.afterSaleStatus, order.partialRefundDisposition)
+  ) {
+    return afterSalePlacementHold();
+  }
+  return null;
+}
+
+function afterSalePlacementHold(): { code: PurchaseExceptionCode; reason: string } {
+  return {
+    code: PURCHASE_EXCEPTION_CODE.afterSaleHold,
+    reason: '销售订单售后状态已变化，但 1688 采购单已创建；系统已暂停自动履约，请核对并人工处置。',
+  };
 }
 
 function samePurchaseCost(

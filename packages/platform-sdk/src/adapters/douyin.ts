@@ -1,7 +1,11 @@
 import type { PlatformType, TokenSet } from '@supplier/shared-types';
 import { createHmac } from 'node:crypto';
 import { BasePlatformAdapter } from '../adapter';
-import { PlatformMutationResultUnknownError } from '../types';
+import {
+  PlatformMutationResultUnknownError,
+  PlatformTokenRefreshRejectedError,
+  PlatformTokenRefreshRetryableError,
+} from '../types';
 import type {
   AdapterConfig,
   CategoryAttr,
@@ -33,16 +37,16 @@ import type {
 type HttpFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 interface DouyinTokenResponse {
-  code?: number;
-  err_no?: number;
-  message?: string;
+  code?: unknown;
+  err_no?: unknown;
+  message?: unknown;
   data?: {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-    scope?: string;
-    shop_id?: string | number;
-    shop_name?: string;
+    access_token?: unknown;
+    refresh_token?: unknown;
+    expires_in?: unknown;
+    scope?: unknown;
+    shop_id?: unknown;
+    shop_name?: unknown;
   };
 }
 
@@ -833,38 +837,82 @@ export class DouyinAdapter extends BasePlatformAdapter {
         signal: AbortSignal.timeout(10_000),
       });
     } catch {
-      throw new Error(`Douyin token ${operation} request failed`);
+      const message = `Douyin token ${operation} request failed`;
+      if (operation === 'refresh') throw new PlatformTokenRefreshRetryableError(message);
+      throw new Error(message);
     }
 
     if (!response.ok) {
-      throw new Error(`Douyin token ${operation} failed (HTTP ${response.status})`);
+      const message = `Douyin token ${operation} failed (HTTP ${response.status})`;
+      if (operation === 'refresh') {
+        if (
+          response.status !== 408 &&
+          response.status !== 425 &&
+          response.status !== 429 &&
+          response.status < 500
+        ) {
+          const payload = await this.parseTokenResponse(response, operation);
+          const errorCode = tokenResponseErrorCode(payload);
+          if (
+            errorCode !== null &&
+            errorCode !== undefined &&
+            isExplicitRefreshCredentialRejection(payload.message)
+          ) {
+            throw new PlatformTokenRefreshRejectedError(
+              `Douyin token refresh failed: ${safeMessage(payload.message, errorCode)}`,
+            );
+          }
+        }
+        throw new PlatformTokenRefreshRetryableError(message);
+      }
+      throw new Error(message);
     }
 
     const payload = await this.parseTokenResponse(response, operation);
-    const errorCode = payload.err_no ?? payload.code;
-    if (typeof errorCode === 'number' && errorCode !== 0) {
-      throw new Error(
-        `Douyin token ${operation} failed: ${safeMessage(payload.message, errorCode)}`,
-      );
+    const errorCode = tokenResponseErrorCode(payload);
+    if (errorCode === null) {
+      const message = `Douyin token ${operation} returned an invalid response`;
+      if (operation === 'refresh') throw new PlatformTokenRefreshRetryableError(message);
+      throw new Error(message);
+    }
+    if (errorCode !== undefined) {
+      const message = `Douyin token ${operation} failed: ${safeMessage(payload.message, errorCode)}`;
+      if (operation === 'refresh') {
+        if (isExplicitRefreshCredentialRejection(payload.message)) {
+          throw new PlatformTokenRefreshRejectedError(message);
+        }
+        throw new PlatformTokenRefreshRetryableError(message);
+      }
+      throw new Error(message);
     }
 
     const data = payload.data;
+    const accessToken = requiredToken(data?.access_token);
+    const refreshToken = optionalToken(data?.refresh_token);
+    const expiresIn = positiveTokenSeconds(data?.expires_in);
+    const scope = optionalScope(data?.scope);
+    const platformShopId = tokenSubjectId(data?.shop_id);
+    const shopName = optionalText(data?.shop_name);
     if (
-      !data?.access_token ||
-      typeof data.expires_in !== 'number' ||
-      data.expires_in <= 0 ||
-      data.shop_id === undefined
+      !accessToken ||
+      refreshToken === null ||
+      !expiresIn ||
+      scope === null ||
+      !platformShopId ||
+      shopName === null
     ) {
-      throw new Error(`Douyin token ${operation} returned an invalid response`);
+      const message = `Douyin token ${operation} returned an invalid response`;
+      if (operation === 'refresh') throw new PlatformTokenRefreshRetryableError(message);
+      throw new Error(message);
     }
 
     return {
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
-      expiresAt: new Date(this.now() + data.expires_in * 1000),
-      scope: data.scope ? data.scope.split(/[\s,]+/).filter(Boolean) : undefined,
-      platformShopId: String(data.shop_id),
-      shopName: data.shop_name,
+      accessToken,
+      refreshToken,
+      expiresAt: new Date(this.now() + expiresIn * 1000),
+      scope,
+      platformShopId,
+      shopName,
     };
   }
 
@@ -873,9 +921,15 @@ export class DouyinAdapter extends BasePlatformAdapter {
     operation: 'exchange' | 'refresh',
   ): Promise<DouyinTokenResponse> {
     try {
-      return (await response.json()) as DouyinTokenResponse;
+      const payload = (await response.json()) as unknown;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('invalid payload');
+      }
+      return payload as DouyinTokenResponse;
     } catch {
-      throw new Error(`Douyin token ${operation} returned an invalid response`);
+      const message = `Douyin token ${operation} returned an invalid response`;
+      if (operation === 'refresh') throw new PlatformTokenRefreshRetryableError(message);
+      throw new Error(message);
     }
   }
 
@@ -1216,9 +1270,69 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
-function safeMessage(message: string | undefined, fallbackCode: number): string {
-  const value = message?.trim();
+function safeMessage(message: unknown, fallbackCode: number): string {
+  const value = typeof message === 'string' ? message.trim() : '';
   return value ? value.slice(0, 200) : String(fallbackCode);
+}
+
+function tokenResponseErrorCode(payload: DouyinTokenResponse): number | null | undefined {
+  const codes = [payload.err_no, payload.code];
+  for (const code of codes) {
+    if (code !== undefined && (typeof code !== 'number' || !Number.isSafeInteger(code))) {
+      return null;
+    }
+  }
+  return codes.find((code): code is number => typeof code === 'number' && code !== 0);
+}
+
+function isExplicitRefreshCredentialRejection(message: unknown): boolean {
+  const value = typeof message === 'string' ? message.trim().toLowerCase() : '';
+  return (
+    /invalid[_\s-]*grant/.test(value) ||
+    /invalid[_\s-]*(?:refresh[_\s-]*)?token/.test(value) ||
+    /refresh[_\s-]*token.*(?:invalid|expired|revoked)/.test(value) ||
+    /(?:刷新令牌|刷新凭证).*(?:无效|过期|失效|撤销)/.test(value) ||
+    /(?:无效|过期|失效|撤销).*(?:刷新令牌|刷新凭证)/.test(value) ||
+    /^(?:商家)?授权(?:已)?(?:过期|失效|撤销)(?:，?请重新授权)?[。.!！]?$/.test(value)
+  );
+}
+
+function requiredToken(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function optionalToken(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  const token = requiredToken(value);
+  return token || null;
+}
+
+function positiveTokenSeconds(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= 31_536_000
+    ? value
+    : null;
+}
+
+function tokenSubjectId(value: unknown): string {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? String(value) : '';
+  }
+  return typeof value === 'string' && value.length <= 64 && /^[1-9]\d*$/.test(value) ? value : '';
+}
+
+function optionalScope(value: unknown): string[] | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return null;
+  return value.split(/[\s,]+/).filter(Boolean);
+}
+
+function optionalText(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return null;
+  return value.trim() || undefined;
 }
 
 function canonicalJson(value: unknown): string {

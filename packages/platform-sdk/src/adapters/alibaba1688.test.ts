@@ -1,6 +1,10 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import type { AdapterConfig } from '../types';
+import {
+  PlatformTokenRefreshRejectedError,
+  PlatformTokenRefreshRetryableError,
+  type AdapterConfig,
+} from '../types';
 import { Alibaba1688Adapter } from './alibaba1688';
 
 const CONFIG: AdapterConfig = {
@@ -124,6 +128,90 @@ describe('Alibaba1688Adapter', () => {
       grant_type: 'refresh_token',
       refresh_token: 'old-refresh-token',
     });
+  });
+
+  it('classifies a token refresh transport failure as retryable', async () => {
+    const adapter = new Alibaba1688Adapter(CONFIG, async () => {
+      throw new Error('socket timeout');
+    });
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it.each([408, 425, 429, 500])('classifies token refresh HTTP %s as retryable', async (status) => {
+    const adapter = new Alibaba1688Adapter(
+      CONFIG,
+      async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status }),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it('classifies malformed and unknown token refresh responses as retryable', async () => {
+    const malformed = new Alibaba1688Adapter(
+      CONFIG,
+      async () => new Response('{', { status: 200 }),
+    );
+    const unknown = new Alibaba1688Adapter(
+      CONFIG,
+      async () =>
+        new Response(JSON.stringify({ error: 'temporarily_unavailable' }), { status: 200 }),
+    );
+    const unknownHttp = new Alibaba1688Adapter(
+      CONFIG,
+      async () =>
+        new Response(JSON.stringify({ error: 'temporarily_unavailable' }), { status: 400 }),
+    );
+
+    await expect(malformed.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+    await expect(unknown.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+    await expect(unknownHttp.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
+  });
+
+  it.each([200, 400])(
+    'classifies an explicit refresh credential rejection at HTTP %s as terminal',
+    async (status) => {
+      const adapter = new Alibaba1688Adapter(
+        CONFIG,
+        async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status }),
+      );
+
+      await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+        PlatformTokenRefreshRejectedError,
+      );
+    },
+  );
+
+  it.each([
+    ['blank access token', { access_token: ' ', expires_in: 36000, memberId: 'member-1' }],
+    [
+      'invalid refresh token',
+      { access_token: 'access', refresh_token: {}, expires_in: 36000, memberId: 'member-1' },
+    ],
+    [
+      'invalid scope',
+      { access_token: 'access', expires_in: 36000, memberId: 'member-1', scope: {} },
+    ],
+    ['an invalid expiry type', { access_token: 'access', expires_in: true, memberId: 'member-1' }],
+  ])('classifies a token refresh response with %s as retryable', async (_label, payload) => {
+    const adapter = new Alibaba1688Adapter(
+      CONFIG,
+      async () => new Response(JSON.stringify(payload), { status: 200 }),
+    );
+
+    await expect(adapter.refreshToken('old-refresh-token')).rejects.toBeInstanceOf(
+      PlatformTokenRefreshRetryableError,
+    );
   });
 
   it('signs every form parameter and posts only to the fixed OpenAPI origin', async () => {

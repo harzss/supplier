@@ -7,7 +7,12 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Platform, Shop } from '@supplier/db';
-import { Alibaba1688Adapter, DouyinAdapter, type PlatformAdapter } from '@supplier/platform-sdk';
+import {
+  Alibaba1688Adapter,
+  DouyinAdapter,
+  PlatformTokenRefreshRejectedError,
+  type PlatformAdapter,
+} from '@supplier/platform-sdk';
 import type Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import { CryptoService } from '../../common/crypto.module';
@@ -20,6 +25,7 @@ const REFRESH_WINDOW_MS = 5 * 60 * 1000;
 const REFRESH_LOCK_TTL_MS = 60_000;
 const REFRESH_RECOVERY_TTL_MS = 24 * 60 * 60 * 1000;
 const REAUTHORIZE_MESSAGE = '店铺授权已过期，请重新授权';
+const REFRESH_RETRY_MESSAGE = '店铺授权刷新暂时失败，请稍后重试';
 const REFRESH_RECOVERY_MESSAGE = '店铺授权刷新结果待恢复，请稍后重试';
 
 type TokenShop = Pick<
@@ -108,12 +114,18 @@ export class ShopTokenService {
     try {
       const adapter = this.createAdapter(shop.platform);
       tokenSet = await adapter.refreshToken(refreshToken);
-      if (tokenSet.platformShopId && tokenSet.platformShopId !== shop.platformShopId) {
-        throw new Error('platform shop mismatch');
-      }
     } catch (err) {
       this.logger.warn(`店铺 ${shop.id} Token 刷新失败：${(err as Error).message}`);
       await this.raiseCredentialAlert(shop, 'token_refresh', err, 'warning');
+      if (err instanceof PlatformTokenRefreshRejectedError) {
+        await this.markExpired(shop);
+        throw new UnauthorizedException(REAUTHORIZE_MESSAGE);
+      }
+      throw new ServiceUnavailableException(REFRESH_RETRY_MESSAGE);
+    }
+    if (tokenSet.platformShopId && tokenSet.platformShopId !== shop.platformShopId) {
+      const error = new Error('platform shop mismatch');
+      await this.raiseCredentialAlert(shop, 'token_refresh_identity_mismatch', error, 'critical');
       await this.markExpired(shop);
       throw new UnauthorizedException(REAUTHORIZE_MESSAGE);
     }
@@ -366,7 +378,12 @@ export class ShopTokenService {
       key: this.alertKey(shop.id),
       type: 'credential',
       severity,
-      summary: severity === 'critical' ? '店铺授权凭证无法解密' : '店铺授权 Token 刷新失败',
+      summary:
+        failure === 'token_refresh_identity_mismatch'
+          ? '店铺授权刷新返回了不同主体'
+          : severity === 'critical'
+            ? '店铺授权凭证无法解密'
+            : '店铺授权 Token 刷新失败',
       details: {
         shopId: shop.id,
         userId: shop.userId,

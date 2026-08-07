@@ -87,6 +87,22 @@ export class PlatformMutationResultUnknownError extends Error {
   }
 }
 
+/** The platform explicitly rejected the refresh credential; reauthorization is required. */
+export class PlatformTokenRefreshRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlatformTokenRefreshRejectedError';
+  }
+}
+
+/** The refresh result is transient or unknown; the stored credential must remain active. */
+export class PlatformTokenRefreshRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlatformTokenRefreshRetryableError';
+  }
+}
+
 export interface SyncInventoryItemDto {
   /** 发布商品时写入平台的外部 SKU 编码，对应 1688 specId。 */
   sourceSkuId: string;

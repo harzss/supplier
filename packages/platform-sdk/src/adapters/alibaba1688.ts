@@ -1,6 +1,7 @@
 import type { PlatformType, TokenSet } from '@supplier/shared-types';
 import { createHmac } from 'node:crypto';
 import { BasePlatformAdapter } from '../adapter';
+import { PlatformTokenRefreshRejectedError, PlatformTokenRefreshRetryableError } from '../types';
 import type {
   AdapterConfig,
   CategoryAttr,
@@ -369,30 +370,81 @@ export class Alibaba1688Adapter extends BasePlatformAdapter {
   ): Promise<TokenSet> {
     this.assertConfig();
     const path = `${protocol}/1/system.oauth2/getToken/${this.config.appKey}`;
-    const response = await this.postForm(`${API_BASE_URL}/${path}`, `token ${operation}`, params);
-    const payload = await parseJson<Alibaba1688TokenResponse>(
-      response,
-      `Alibaba 1688 token ${operation}`,
-    );
-    if (payload.error || payload.errorCode) {
-      throw new Error(
-        `Alibaba 1688 token ${operation} failed (code ${safeErrorCode(payload.errorCode ?? payload.error)})`,
+    let response: Response;
+    try {
+      response = await this.postForm(`${API_BASE_URL}/${path}`, `token ${operation}`, params, true);
+    } catch (error) {
+      if (operation === 'refresh') {
+        throw new PlatformTokenRefreshRetryableError(safeErrorMessage(error));
+      }
+      throw error;
+    }
+    if (!response.ok) {
+      const message = `Alibaba 1688 token ${operation} failed (HTTP ${response.status})`;
+      if (operation !== 'refresh') throw new Error(message);
+      if ([408, 425, 429].includes(response.status) || response.status >= 500) {
+        throw new PlatformTokenRefreshRetryableError(message);
+      }
+      let errorPayload: Alibaba1688TokenResponse;
+      try {
+        errorPayload = await parseJson<Alibaba1688TokenResponse>(response, message);
+      } catch {
+        throw new PlatformTokenRefreshRetryableError(message);
+      }
+      if (isExplicitRefreshCredentialRejection(errorPayload.error, errorPayload.errorCode)) {
+        throw new PlatformTokenRefreshRejectedError(message);
+      }
+      throw new PlatformTokenRefreshRetryableError(message);
+    }
+    let payload: Alibaba1688TokenResponse;
+    try {
+      payload = await parseJson<Alibaba1688TokenResponse>(
+        response,
+        `Alibaba 1688 token ${operation}`,
       );
+    } catch (error) {
+      if (operation === 'refresh') {
+        throw new PlatformTokenRefreshRetryableError(safeErrorMessage(error));
+      }
+      throw error;
+    }
+    if (payload.error || payload.errorCode) {
+      const message = `Alibaba 1688 token ${operation} failed (code ${safeErrorCode(payload.errorCode ?? payload.error)})`;
+      if (operation === 'refresh') {
+        if (isExplicitRefreshCredentialRejection(payload.error, payload.errorCode)) {
+          throw new PlatformTokenRefreshRejectedError(message);
+        }
+        throw new PlatformTokenRefreshRetryableError(message);
+      }
+      throw new Error(message);
     }
 
+    const accessToken = requiredToken(payload.access_token);
+    const refreshToken = optionalToken(payload.refresh_token);
+    const scope = optionalScope(payload.scope);
+    const shopName = optionalText(payload.resource_owner);
     const expiresIn = positiveSeconds(payload.expires_in);
     const platformShopId = stringValue(payload.memberId);
-    if (!payload.access_token || !expiresIn || !platformShopId) {
-      throw new Error(`Alibaba 1688 token ${operation} returned an invalid response`);
+    if (
+      !accessToken ||
+      refreshToken === null ||
+      scope === null ||
+      shopName === null ||
+      !expiresIn ||
+      !platformShopId
+    ) {
+      const message = `Alibaba 1688 token ${operation} returned an invalid response`;
+      if (operation === 'refresh') throw new PlatformTokenRefreshRetryableError(message);
+      throw new Error(message);
     }
 
     return {
-      accessToken: payload.access_token,
-      refreshToken: payload.refresh_token,
+      accessToken,
+      refreshToken,
       expiresAt: new Date(this.now() + expiresIn * 1000),
-      scope: payload.scope ? payload.scope.split(/[\s,]+/).filter(Boolean) : undefined,
+      scope,
       platformShopId,
-      shopName: payload.resource_owner,
+      shopName,
     };
   }
 
@@ -400,6 +452,7 @@ export class Alibaba1688Adapter extends BasePlatformAdapter {
     url: string,
     operation: string,
     params: Record<string, unknown>,
+    returnErrorResponse = false,
   ): Promise<Response> {
     const body = new URLSearchParams(
       Object.keys(params)
@@ -419,7 +472,7 @@ export class Alibaba1688Adapter extends BasePlatformAdapter {
     } catch {
       throw new Error(`Alibaba 1688 ${operation} request failed`);
     }
-    if (!response.ok) {
+    if (!response.ok && !returnErrorResponse) {
       throw new Error(`Alibaba 1688 ${operation} failed (HTTP ${response.status})`);
     }
     return response;
@@ -477,7 +530,10 @@ async function parseJson<T>(response: Response, operation: string): Promise<T> {
 }
 
 function positiveSeconds(value: unknown): number | null {
-  const number = Number(value);
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const normalized = typeof value === 'string' ? value.trim() : value;
+  if (typeof normalized === 'string' && !/^\d+$/.test(normalized)) return null;
+  const number = Number(normalized);
   return Number.isSafeInteger(number) && number > 0 && number <= 31_536_000 ? number : null;
 }
 
@@ -487,9 +543,50 @@ function stringValue(value: unknown): string {
   return '';
 }
 
+function requiredToken(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function optionalToken(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  const token = requiredToken(value);
+  return token || null;
+}
+
+function optionalScope(value: unknown): string[] | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return null;
+  return value.split(/[\s,]+/).filter(Boolean);
+}
+
+function optionalText(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return null;
+  return value.trim() || undefined;
+}
+
 function safeErrorCode(value: unknown): string {
   const code = stringValue(value);
   return /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? code : 'unknown';
+}
+
+function safeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Alibaba 1688 token refresh failed';
+}
+
+function isExplicitRefreshCredentialRejection(...values: unknown[]): boolean {
+  return values.some((value) => {
+    const code = stringValue(value).toLowerCase();
+    return (
+      code === 'invalid_grant' ||
+      code === 'invalid_token' ||
+      code === 'invalid_refresh_token' ||
+      code === 'refresh_token_invalid' ||
+      code === 'refresh_token_expired' ||
+      code === 'expired_refresh_token' ||
+      code === 'revoked_refresh_token'
+    );
+  });
 }
 
 function isSafeApiName(value: string): boolean {

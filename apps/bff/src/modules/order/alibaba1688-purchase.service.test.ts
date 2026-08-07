@@ -87,6 +87,108 @@ function logisticsResponse(trackingNo: string): Response {
   );
 }
 
+function activePurchaseState(overrides: Record<string, unknown> = {}) {
+  return {
+    attemptNo: 1,
+    outOrderId: 'supplier-5-supplier-a',
+    syncRevision: 0,
+    retryEligible: false,
+    exceptionStatus: 'none',
+    ...overrides,
+  };
+}
+
+function preparedPurchaseState(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 101n,
+    orderId: 5n,
+    buyerShopId: 20n,
+    attemptNo: 1,
+    outOrderId: 'supplier-5-supplier-a',
+    orderId1688: null,
+    status: 'pending',
+    retryCount: 0,
+    retryEligible: false,
+    syncRevision: 0,
+    exceptionStatus: 'none',
+    ...overrides,
+  };
+}
+
+function activeOrderFence() {
+  return {
+    status: 'purchasing',
+    OR: [
+      { afterSaleStatus: { in: ['none', 'failed'] } },
+      {
+        afterSaleStatus: 'partial_refund',
+        partialRefundDisposition: 'continue_remaining',
+      },
+    ],
+  };
+}
+
+function activePurchaseFence(purchase: Record<string, unknown>, syncRevision: number) {
+  return {
+    id: purchase.id,
+    syncRevision,
+    attemptNo: purchase.attemptNo,
+    outOrderId: purchase.outOrderId,
+    orderId1688: purchase.orderId1688,
+    buyerShopId: purchase.buyerShopId,
+    status: purchase.status,
+    retryEligible: purchase.retryEligible,
+    exceptionStatus: purchase.exceptionStatus,
+    order: activeOrderFence(),
+  };
+}
+
+function preparedPurchaseFence(purchase: Record<string, unknown>, failure = false) {
+  return {
+    id: purchase.id,
+    orderId: purchase.orderId,
+    buyerShopId: purchase.buyerShopId,
+    attemptNo: purchase.attemptNo,
+    outOrderId: purchase.outOrderId,
+    orderId1688: purchase.orderId1688,
+    status: purchase.status,
+    retryEligible: purchase.retryEligible,
+    syncRevision: purchase.syncRevision,
+    exceptionStatus: purchase.exceptionStatus,
+    order: {
+      status: failure ? 'paid' : { in: ['paid', 'purchasing'] },
+      OR: activeOrderFence().OR,
+    },
+  };
+}
+
+function placementOrderFixture(crypto: CryptoService, purchaseOrders: unknown[] = []) {
+  const item = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
+  return {
+    item,
+    order: {
+      id: 5n,
+      status: 'paid',
+      afterSaleStatus: 'none',
+      partialRefundDisposition: 'none',
+      platformOrderId: 'douyin-order-5',
+      receiverNameEnc: crypto.encrypt('张三'),
+      receiverPhoneEnc: crypto.encrypt('13811112222'),
+      receiverAddressDetailEnc: crypto.encrypt(
+        JSON.stringify({
+          province: '浙江省',
+          city: '杭州市',
+          area: '余杭区',
+          detail: '文一西路 969 号',
+        }),
+      ),
+      shop: { id: 9n },
+      items: [item],
+      purchaseOrders,
+    },
+  };
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Alibaba1688PurchaseService', () => {
@@ -212,11 +314,13 @@ describe('Alibaba1688PurchaseService', () => {
       update: expect.objectContaining({ unitCost: 7.25 }),
     });
     expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
-      where: { id: 101n, OR: [{ orderId1688: null }, { orderId1688: '900001' }] },
+      where: preparedPurchaseFence(preparedPurchaseState()),
       data: expect.objectContaining({ orderId1688: '900001', status: 'awaiting_payment' }),
     });
     expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
-      where: { id: 102n, OR: [{ orderId1688: null }, { orderId1688: '900002' }] },
+      where: preparedPurchaseFence(
+        preparedPurchaseState({ id: 102n, outOrderId: 'supplier-5-supplier-b' }),
+      ),
       data: expect.objectContaining({ orderId1688: '900002', status: 'awaiting_payment' }),
     });
     expect(orderUpdateMany).toHaveBeenCalledWith({
@@ -271,11 +375,7 @@ describe('Alibaba1688PurchaseService', () => {
           order: { findUnique: transactionOrderFindUnique },
           purchaseOrder: {
             upsert: vi.fn().mockResolvedValue({
-              id: 101n,
-              outOrderId: 'supplier-5-supplier-a',
-              orderId1688: null,
-              status: 'pending',
-              retryCount: 0,
+              ...preparedPurchaseState(),
             }),
           },
           purchaseOrderItem: { upsert: purchaseOrderItemUpsert },
@@ -360,12 +460,8 @@ describe('Alibaba1688PurchaseService', () => {
       items: [item],
     };
     const existingPurchase = {
-      id: 101n,
+      ...preparedPurchaseState({ status: 'failed', retryCount: 1 }),
       supplierKey: 'supplier-a',
-      outOrderId: 'supplier-5-supplier-a',
-      orderId1688: null,
-      status: 'failed',
-      retryCount: 1,
       items: [
         {
           orderItemId: 11n,
@@ -386,11 +482,7 @@ describe('Alibaba1688PurchaseService', () => {
     const purchaseOrderUpsert = vi
       .fn()
       .mockResolvedValueOnce({
-        id: 101n,
-        outOrderId: 'supplier-5-supplier-a',
-        orderId1688: null,
-        status: 'pending',
-        retryCount: 0,
+        ...preparedPurchaseState(),
       })
       .mockResolvedValueOnce(existingPurchase)
       .mockResolvedValueOnce(retryPurchase);
@@ -419,7 +511,10 @@ describe('Alibaba1688PurchaseService', () => {
           platformShopId: 'buyer-1',
         }),
       },
-      purchaseOrder: { updateMany: purchaseOrderUpdateMany },
+      purchaseOrder: {
+        findUnique: vi.fn().mockRejectedValue(new Error('db unavailable')),
+        updateMany: purchaseOrderUpdateMany,
+      },
       $transaction: vi.fn((callback) =>
         callback({
           order: { findUnique: transactionOrderFindUnique },
@@ -477,13 +572,420 @@ describe('Alibaba1688PurchaseService', () => {
       fetcher.mock.calls.filter(([url]) => String(url).includes('alibaba.trade.getBuyerOrderList')),
     ).toHaveLength(3);
     expect(purchaseOrderUpdateMany).toHaveBeenLastCalledWith({
-      where: { id: 101n, OR: [{ orderId1688: null }, { orderId1688: '900001' }] },
+      where: preparedPurchaseFence(retryPurchase),
       data: {
         orderId1688: '900001',
         status: 'awaiting_payment',
         failureReason: null,
+        syncRevision: { increment: 1 },
       },
     });
+  });
+
+  it('keeps an uncertain purchase on its pinned buyer account when another buyer becomes active', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const item = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
+    const purchase = {
+      ...preparedPurchaseState({ status: 'failed', retryCount: 1 }),
+      supplierKey: 'supplier-a',
+      items: [
+        {
+          orderItemId: 11n,
+          offerId: '111111',
+          specId: 'spec-11',
+          quantity: 1,
+          orderItem: item,
+        },
+      ],
+      shipments: [],
+    };
+    const order = {
+      id: 5n,
+      status: 'paid',
+      afterSaleStatus: 'none',
+      partialRefundDisposition: 'none',
+      platformOrderId: 'douyin-order-5',
+      receiverNameEnc: crypto.encrypt('张三'),
+      receiverPhoneEnc: crypto.encrypt('13811112222'),
+      receiverAddressDetailEnc: crypto.encrypt(
+        JSON.stringify({
+          province: '浙江省',
+          city: '杭州市',
+          area: '余杭区',
+          detail: '文一西路 969 号',
+        }),
+      ),
+      shop: { id: 9n },
+      items: [item],
+      purchaseOrders: [purchase],
+    };
+    const latestBuyerLookup = vi.fn().mockResolvedValue({ id: 21n });
+    const purchaseOrderUpsert = vi.fn().mockResolvedValue(purchase);
+    const purchaseOrderUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValue(order),
+        findUnique: vi.fn().mockResolvedValue({ status: 'paid' }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      shop: { findFirst: latestBuyerLookup },
+      purchaseOrder: { updateMany: purchaseOrderUpdateMany },
+      $transaction: vi.fn((callback) =>
+        callback({
+          order: { findUnique: vi.fn().mockResolvedValue(order) },
+          purchaseOrder: { upsert: purchaseOrderUpsert },
+          purchaseOrderItem: { upsert: vi.fn().mockResolvedValue({}) },
+        }),
+      ),
+    } as unknown as PrismaService;
+    const fetcher = vi.fn(async (input: string | URL) => {
+      if (!String(input).includes('alibaba.trade.getBuyerOrderList')) {
+        throw new Error('unexpected 1688 write');
+      }
+      return new Response(
+        JSON.stringify({
+          totalRecord: 1,
+          result: [
+            {
+              baseInfo: { idOfStr: '900001', status: 'waitbuyerpay' },
+              productItems: [
+                {
+                  productID: '111111',
+                  subItemIDString: '900001-1',
+                  specId: 'spec-11',
+                  quantity: 1,
+                  status: 'waitbuyerpay',
+                },
+              ],
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const getAccessToken = vi.fn().mockResolvedValue('buyer-a-token');
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).resolves.toEqual({
+      packages: [],
+      requestId: null,
+    });
+
+    expect(latestBuyerLookup).not.toHaveBeenCalled();
+    expect(getAccessToken).toHaveBeenCalledWith(20n, USER.userId);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0]![0])).toContain('alibaba.trade.getBuyerOrderList');
+    expect(purchaseOrderUpsert.mock.calls[0]![0].update).not.toHaveProperty('buyerShopId');
+    expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
+      where: preparedPurchaseFence(purchase),
+      data: expect.objectContaining({ orderId1688: '900001', status: 'awaiting_payment' }),
+    });
+  });
+
+  it('fails closed without any 1688 recovery call when the pinned buyer is unavailable', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const latestBuyerLookup = vi.fn().mockResolvedValue({ id: 21n });
+    const transaction = vi.fn();
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 5n,
+          status: 'paid',
+          afterSaleStatus: 'none',
+          partialRefundDisposition: 'none',
+          purchaseOrders: [
+            {
+              id: 101n,
+              buyerShopId: 20n,
+              exceptionStatus: 'none',
+              orderId1688: null,
+            },
+          ],
+        }),
+      },
+      shop: { findFirst: latestBuyerLookup },
+      $transaction: transaction,
+    } as unknown as PrismaService;
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const getAccessToken = vi
+      .fn()
+      .mockRejectedValue(new ServiceUnavailableException('原 1688 买家账号不可用'));
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).rejects.toThrow('原 1688 买家账号不可用');
+
+    expect(getAccessToken).toHaveBeenCalledWith(20n, USER.userId);
+    expect(latestBuyerLookup).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('polls an existing purchase with its pinned buyer token instead of the current buyer', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const item = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
+    const purchase = {
+      ...activePurchaseState(),
+      id: 101n,
+      orderId: 5n,
+      buyerShopId: 20n,
+      orderId1688: '900001',
+      supplierKey: 'supplier-a',
+      status: 'awaiting_payment',
+      purchaseCost: 8.5,
+      exceptionStatus: 'none',
+      items: [
+        {
+          orderItemId: 11n,
+          offerId: '111111',
+          specId: 'spec-11',
+          quantity: 1,
+          orderItem: item,
+        },
+      ],
+      shipments: [],
+    };
+    const order = {
+      id: 5n,
+      status: 'purchasing',
+      afterSaleStatus: 'none',
+      partialRefundDisposition: 'none',
+      platformOrderId: 'douyin-order-5',
+      shop: { id: 9n },
+      items: [item],
+      purchaseOrders: [purchase],
+    };
+    const latestBuyerLookup = vi.fn().mockResolvedValue({ id: 21n });
+    const purchaseOrderUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const prisma = {
+      order: { findFirst: vi.fn().mockResolvedValue(order) },
+      shop: { findFirst: latestBuyerLookup },
+      purchaseOrder: { updateMany: purchaseOrderUpdateMany },
+    } as unknown as PrismaService;
+    const fetcher = vi.fn().mockResolvedValue(buyerOrderResponse('waitbuyerpay'));
+    vi.stubGlobal('fetch', fetcher);
+    const getAccessToken = vi.fn().mockResolvedValue('buyer-a-token');
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).resolves.toEqual({
+      packages: [],
+      requestId: null,
+    });
+
+    expect(latestBuyerLookup).not.toHaveBeenCalled();
+    expect(getAccessToken).toHaveBeenCalledWith(20n, USER.userId);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(purchaseOrderUpdateMany).toHaveBeenNthCalledWith(1, {
+      where: activePurchaseFence(purchase, 0),
+      data: { syncRevision: { increment: 1 } },
+    });
+    expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
+      where: activePurchaseFence(purchase, 1),
+      data: expect.objectContaining({ status: 'awaiting_payment' }),
+    });
+  });
+
+  it('does not query or write a remote order when an active purchase claim is stale', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const item = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
+    const purchase = {
+      ...activePurchaseState(),
+      id: 101n,
+      orderId: 5n,
+      buyerShopId: 20n,
+      orderId1688: '900001',
+      supplierKey: 'supplier-a',
+      status: 'awaiting_payment',
+      purchaseCost: 8.5,
+      items: [
+        {
+          orderItemId: 11n,
+          offerId: '111111',
+          specId: 'spec-11',
+          quantity: 1,
+          orderItem: item,
+        },
+      ],
+      shipments: [],
+    };
+    const order = {
+      id: 5n,
+      status: 'purchasing',
+      afterSaleStatus: 'none',
+      partialRefundDisposition: 'none',
+      platformOrderId: 'douyin-order-5',
+      shop: { id: 9n },
+      items: [item],
+      purchaseOrders: [purchase],
+    };
+    const purchaseOrderUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const prisma = {
+      order: { findFirst: vi.fn().mockResolvedValue(order) },
+      purchaseOrder: { updateMany: purchaseOrderUpdateMany },
+    } as unknown as PrismaService;
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const getAccessToken = vi.fn().mockResolvedValue('buyer-a-token');
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).resolves.toEqual({
+      packages: [],
+      requestId: null,
+    });
+
+    expect(getAccessToken).toHaveBeenCalledWith(20n, USER.userId);
+    expect(purchaseOrderUpdateMany).toHaveBeenCalledTimes(1);
+    expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
+      where: activePurchaseFence(purchase, 0),
+      data: { syncRevision: { increment: 1 } },
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('does not persist a remote poll after the sales order enters an after-sale hold', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const item = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
+    const purchase = {
+      ...activePurchaseState(),
+      id: 101n,
+      orderId: 5n,
+      buyerShopId: 20n,
+      orderId1688: '900001',
+      supplierKey: 'supplier-a',
+      status: 'awaiting_payment',
+      purchaseCost: 8.5,
+      items: [
+        {
+          orderItemId: 11n,
+          offerId: '111111',
+          specId: 'spec-11',
+          quantity: 1,
+          orderItem: item,
+        },
+      ],
+      shipments: [],
+    };
+    const order = {
+      id: 5n,
+      status: 'purchasing',
+      afterSaleStatus: 'none',
+      partialRefundDisposition: 'none',
+      platformOrderId: 'douyin-order-5',
+      shop: { id: 9n },
+      items: [item],
+      purchaseOrders: [purchase],
+    };
+    const heldOrder = {
+      ...order,
+      afterSaleStatus: 'pending',
+      purchaseOrders: [{ ...purchase, exceptionStatus: 'action_required' }],
+    };
+    const purchaseOrderUpdateMany = vi
+      .fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValueOnce(order).mockResolvedValueOnce(heldOrder),
+      },
+      purchaseOrder: { updateMany: purchaseOrderUpdateMany },
+    } as unknown as PrismaService;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(buyerOrderResponse('waitbuyerpay')));
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).resolves.toEqual({ packages: [], requestId: null });
+
+    expect(purchaseOrderUpdateMany).toHaveBeenNthCalledWith(2, {
+      where: activePurchaseFence(purchase, 1),
+      data: expect.objectContaining({ status: 'awaiting_payment', purchaseCost: 8.5 }),
+    });
+  });
+
+  it.each([
+    [
+      'multiple buyer accounts',
+      [
+        { id: 101n, buyerShopId: 20n, orderId1688: '900001', exceptionStatus: 'none' },
+        { id: 102n, buyerShopId: 21n, orderId1688: '900002', exceptionStatus: 'none' },
+      ],
+      '同一销售订单绑定了多个 1688 买家账号，已停止自动处理以避免错单',
+    ],
+    [
+      'a missing buyer account with no remote order ID',
+      [{ id: 101n, buyerShopId: null, orderId1688: null, exceptionStatus: 'none' }],
+      '1688 采购单缺少原买家账号绑定，已停止自动处理以避免重复下单或错单',
+    ],
+  ])('fails closed before token or remote access for %s', async (_label, purchases, error) => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const buyerLookup = vi.fn();
+    const purchaseWrite = vi.fn();
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 5n,
+          status: 'purchasing',
+          afterSaleStatus: 'none',
+          partialRefundDisposition: 'none',
+          purchaseOrders: purchases,
+        }),
+      },
+      shop: { findFirst: buyerLookup },
+      purchaseOrder: { updateMany: purchaseWrite },
+    } as unknown as PrismaService;
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const getAccessToken = vi.fn();
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).rejects.toThrow(error);
+
+    expect(buyerLookup).not.toHaveBeenCalled();
+    expect(getAccessToken).not.toHaveBeenCalled();
+    expect(purchaseWrite).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('creates purchases only for non-refunded items after an explicit continuation decision', async () => {
@@ -541,9 +1043,10 @@ describe('Alibaba1688PurchaseService', () => {
           order: { findUnique: vi.fn().mockResolvedValue(order) },
           purchaseOrder: {
             upsert: vi.fn().mockResolvedValue({
-              id: 102n,
-              outOrderId: 'supplier-5-supplier-b',
-              retryCount: 0,
+              ...preparedPurchaseState({
+                id: 102n,
+                outOrderId: 'supplier-5-supplier-b',
+              }),
             }),
           },
           purchaseOrderItem: { upsert: purchaseOrderItemUpsert },
@@ -577,7 +1080,9 @@ describe('Alibaba1688PurchaseService', () => {
     expect(purchaseOrderItemUpsert).toHaveBeenCalledTimes(1);
     expect(purchaseOrderItemUpsert.mock.calls[0]![0].where.orderItemId).toBe(12n);
     expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
-      where: { id: 102n, OR: [{ orderId1688: null }, { orderId1688: '900002' }] },
+      where: preparedPurchaseFence(
+        preparedPurchaseState({ id: 102n, outOrderId: 'supplier-5-supplier-b' }),
+      ),
       data: expect.objectContaining({ orderId1688: '900002' }),
     });
   });
@@ -587,13 +1092,8 @@ describe('Alibaba1688PurchaseService', () => {
     const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
     const item = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
     const purchase = {
-      id: 101n,
+      ...preparedPurchaseState({ outOrderId: 'supplier-5-supplier-a-r2' }),
       supplierKey: 'supplier-a',
-      outOrderId: 'supplier-5-supplier-a-r2',
-      orderId1688: null,
-      status: 'pending',
-      retryCount: 0,
-      exceptionStatus: 'none',
       items: [
         {
           orderItemId: 11n,
@@ -670,7 +1170,7 @@ describe('Alibaba1688PurchaseService', () => {
     const body = new URLSearchParams(String(fetcher.mock.calls[0]![1]?.body));
     expect(body.get('outOrderId')).toBe('supplier-5-supplier-a-r2');
     expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
-      where: { id: 101n, OR: [{ orderId1688: null }, { orderId1688: '900002' }] },
+      where: preparedPurchaseFence(purchase),
       data: expect.objectContaining({ orderId1688: '900002', status: 'awaiting_payment' }),
     });
   });
@@ -723,9 +1223,7 @@ describe('Alibaba1688PurchaseService', () => {
       },
       purchaseOrder: {
         upsert: vi.fn().mockResolvedValue({
-          id: 101n,
-          outOrderId: 'supplier-5-supplier-a',
-          retryCount: 0,
+          ...preparedPurchaseState(),
         }),
         updateMany: purchaseOrderUpdateMany,
       },
@@ -735,9 +1233,7 @@ describe('Alibaba1688PurchaseService', () => {
           order: { findUnique: vi.fn().mockResolvedValue(order) },
           purchaseOrder: {
             upsert: vi.fn().mockResolvedValue({
-              id: 101n,
-              outOrderId: 'supplier-5-supplier-a',
-              retryCount: 0,
+              ...preparedPurchaseState(),
             }),
           },
           purchaseOrderItem: { upsert: vi.fn().mockResolvedValue({}) },
@@ -763,7 +1259,7 @@ describe('Alibaba1688PurchaseService', () => {
     await expect(service.advance(USER, 5n)).resolves.toEqual({ packages: [], requestId: null });
 
     expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
-      where: { id: 101n, OR: [{ orderId1688: null }, { orderId1688: '900001' }] },
+      where: preparedPurchaseFence(preparedPurchaseState()),
       data: expect.objectContaining({ orderId1688: '900001', status: 'awaiting_payment' }),
     });
     expect(purchaseExceptionUpdateMany).toHaveBeenLastCalledWith(
@@ -775,6 +1271,228 @@ describe('Alibaba1688PurchaseService', () => {
         data: expect.objectContaining({ exceptionStatus: 'action_required', reconciledCost: null }),
       }),
     );
+  });
+
+  it('records a proven remote order as action required when a refund stops the local purchase', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const prepared = preparedPurchaseState();
+    const { order } = placementOrderFixture(crypto);
+    const heldPurchase = {
+      ...prepared,
+      exceptionStatus: 'stopped',
+      exceptionRevision: 1,
+      order: {
+        status: 'refunded',
+        afterSaleStatus: 'refunded',
+        partialRefundDisposition: 'stop_all',
+      },
+    };
+    const purchaseOrderUpdateMany = vi.fn(async ({ data }) => {
+      if (data.orderId1688 && data.exceptionStatus === 'action_required') return { count: 1 };
+      return { count: 0 };
+    });
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValue(order),
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce({
+            status: 'paid',
+            afterSaleStatus: 'none',
+            partialRefundDisposition: 'none',
+          })
+          .mockResolvedValueOnce({
+            status: 'refunded',
+            afterSaleStatus: 'refunded',
+            partialRefundDisposition: 'stop_all',
+          }),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      shop: { findFirst: vi.fn().mockResolvedValue({ id: 20n }) },
+      purchaseOrder: {
+        findUnique: vi.fn().mockResolvedValue(heldPurchase),
+        updateMany: purchaseOrderUpdateMany,
+      },
+      $transaction: vi.fn((callback) =>
+        callback({
+          order: { findUnique: vi.fn().mockResolvedValue(order) },
+          purchaseOrder: { upsert: vi.fn().mockResolvedValue(prepared) },
+          purchaseOrderItem: { upsert: vi.fn().mockResolvedValue({}) },
+        }),
+      ),
+    } as unknown as PrismaService;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ success: true, result: { orderId: '900001' } }), {
+          status: 200,
+        }),
+      ),
+    );
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).resolves.toEqual({ packages: [], requestId: null });
+
+    expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: 101n,
+        attemptNo: 1,
+        outOrderId: 'supplier-5-supplier-a',
+        orderId1688: null,
+        exceptionStatus: 'stopped',
+      }),
+      data: expect.objectContaining({
+        orderId1688: '900001',
+        status: 'awaiting_payment',
+        exceptionStatus: 'action_required',
+        exceptionCode: 'sales_order_refunded',
+        syncRevision: { increment: 1 },
+      }),
+    });
+  });
+
+  it('raises manual action when an unknown create result overlaps an after-sale hold', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const prepared = preparedPurchaseState();
+    const { order } = placementOrderFixture(crypto);
+    const heldPurchase = {
+      ...prepared,
+      exceptionRevision: 1,
+      order: {
+        status: 'paid',
+        afterSaleStatus: 'pending',
+        partialRefundDisposition: 'none',
+      },
+    };
+    const purchaseOrderUpdateMany = vi.fn(async ({ data }) => ({
+      count: data.exceptionStatus === 'action_required' ? 1 : 0,
+    }));
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValue(order),
+        findUnique: vi.fn().mockResolvedValue({
+          status: 'paid',
+          afterSaleStatus: 'none',
+          partialRefundDisposition: 'none',
+        }),
+        updateMany: vi.fn(),
+      },
+      shop: { findFirst: vi.fn().mockResolvedValue({ id: 20n }) },
+      purchaseOrder: {
+        findUnique: vi.fn().mockResolvedValue(heldPurchase),
+        updateMany: purchaseOrderUpdateMany,
+      },
+      $transaction: vi.fn((callback) =>
+        callback({
+          order: { findUnique: vi.fn().mockResolvedValue(order) },
+          purchaseOrder: { upsert: vi.fn().mockResolvedValue(prepared) },
+          purchaseOrderItem: { upsert: vi.fn().mockResolvedValue({}) },
+        }),
+      ),
+    } as unknown as PrismaService;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 503 })),
+    );
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).rejects.toThrow('Alibaba 1688 order creation failed');
+
+    expect(purchaseOrderUpdateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: 101n,
+        attemptNo: 1,
+        outOrderId: 'supplier-5-supplier-a',
+        orderId1688: null,
+      }),
+      data: expect.objectContaining({
+        status: 'failed',
+        exceptionStatus: 'action_required',
+        exceptionCode: 'sales_order_after_sale_hold',
+        exceptionReason: expect.stringContaining('原外部订单号'),
+        syncRevision: { increment: 1 },
+      }),
+    });
+  });
+
+  it('does not let a delayed create result overwrite a replacement purchase attempt', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const prepared = preparedPurchaseState();
+    const { order } = placementOrderFixture(crypto);
+    const replacement = {
+      ...prepared,
+      attemptNo: 2,
+      outOrderId: 'supplier-5-supplier-a-r2',
+      syncRevision: 1,
+      exceptionRevision: 2,
+      order: {
+        status: 'paid',
+        afterSaleStatus: 'none',
+        partialRefundDisposition: 'none',
+      },
+    };
+    const purchaseOrderUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const prisma = {
+      order: {
+        findFirst: vi.fn().mockResolvedValue(order),
+        findUnique: vi.fn().mockResolvedValue({
+          status: 'paid',
+          afterSaleStatus: 'none',
+          partialRefundDisposition: 'none',
+        }),
+        updateMany: vi.fn(),
+      },
+      shop: { findFirst: vi.fn().mockResolvedValue({ id: 20n }) },
+      purchaseOrder: {
+        findUnique: vi.fn().mockResolvedValue(replacement),
+        updateMany: purchaseOrderUpdateMany,
+      },
+      $transaction: vi.fn((callback) =>
+        callback({
+          order: { findUnique: vi.fn().mockResolvedValue(order) },
+          purchaseOrder: { upsert: vi.fn().mockResolvedValue(prepared) },
+          purchaseOrderItem: { upsert: vi.fn().mockResolvedValue({}) },
+        }),
+      ),
+    } as unknown as PrismaService;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ success: true, result: { orderId: '900001' } }), {
+          status: 200,
+        }),
+      ),
+    );
+    const service = new Alibaba1688PurchaseService(
+      prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).rejects.toThrow('1688 采购单恢复结果与本地记录冲突');
+
+    expect(purchaseOrderUpdateMany).toHaveBeenCalledTimes(2);
+    for (const [{ where }] of purchaseOrderUpdateMany.mock.calls) {
+      expect(where).toMatchObject({ attemptNo: 1, outOrderId: 'supplier-5-supplier-a' });
+      expect(where).not.toMatchObject({ attemptNo: 2 });
+    }
   });
 
   it.each([
@@ -796,10 +1514,7 @@ describe('Alibaba1688PurchaseService', () => {
       const values = enabledConfig();
       const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
       const localItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
-      const purchaseClaim = vi
-        .fn()
-        .mockResolvedValue({ syncRevision: 1, status: 'awaiting_payment' });
-      const purchaseUpdateMany = vi.fn();
+      const purchaseUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
       const transaction = vi.fn();
       const prisma = {
         order: {
@@ -813,7 +1528,9 @@ describe('Alibaba1688PurchaseService', () => {
             items: [localItem],
             purchaseOrders: [
               {
+                ...activePurchaseState(),
                 id: 101n,
+                buyerShopId: 20n,
                 orderId1688: '900001',
                 supplierKey: 'supplier-a',
                 status: 'awaiting_payment',
@@ -839,7 +1556,7 @@ describe('Alibaba1688PurchaseService', () => {
             platformShopId: 'buyer-1',
           }),
         },
-        purchaseOrder: { update: purchaseClaim, updateMany: purchaseUpdateMany },
+        purchaseOrder: { updateMany: purchaseUpdateMany },
         $transaction: transaction,
       } as unknown as PrismaService;
       vi.stubGlobal(
@@ -879,16 +1596,33 @@ describe('Alibaba1688PurchaseService', () => {
 
       await expect(service.advance(USER, 5n)).rejects.toThrow(error);
 
-      expect(purchaseClaim).toHaveBeenCalledWith({
-        where: { id: 101n },
+      expect(purchaseUpdateMany).toHaveBeenNthCalledWith(1, {
+        where: {
+          id: 101n,
+          syncRevision: 0,
+          attemptNo: 1,
+          outOrderId: 'supplier-5-supplier-a',
+          orderId1688: '900001',
+          buyerShopId: 20n,
+          status: 'awaiting_payment',
+          retryEligible: false,
+          exceptionStatus: 'none',
+          order: activeOrderFence(),
+        },
         data: { syncRevision: { increment: 1 } },
-        select: { syncRevision: true, status: true },
       });
       expect(purchaseUpdateMany).toHaveBeenCalledWith({
         where: {
           id: 101n,
           syncRevision: 1,
-          exceptionStatus: { in: ['none', 'resolved'] },
+          attemptNo: 1,
+          outOrderId: 'supplier-5-supplier-a',
+          orderId1688: '900001',
+          buyerShopId: 20n,
+          status: 'awaiting_payment',
+          retryEligible: false,
+          exceptionStatus: 'none',
+          order: activeOrderFence(),
         },
         data: expect.objectContaining({
           exceptionStatus: 'action_required',
@@ -910,11 +1644,7 @@ describe('Alibaba1688PurchaseService', () => {
       const values = enabledConfig();
       const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
       const localItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
-      const purchaseClaim = vi.fn().mockResolvedValue({
-        syncRevision: 1,
-        status: currentStatus,
-      });
-      const purchaseUpdateMany = vi.fn();
+      const purchaseUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
       const transaction = vi.fn();
       const prisma = {
         order: {
@@ -928,7 +1658,9 @@ describe('Alibaba1688PurchaseService', () => {
             items: [localItem],
             purchaseOrders: [
               {
+                ...activePurchaseState(),
                 id: 101n,
+                buyerShopId: 20n,
                 orderId1688: '900001',
                 supplierKey: 'supplier-a',
                 status: currentStatus,
@@ -954,7 +1686,7 @@ describe('Alibaba1688PurchaseService', () => {
             platformShopId: 'buyer-1',
           }),
         },
-        purchaseOrder: { update: purchaseClaim, updateMany: purchaseUpdateMany },
+        purchaseOrder: { updateMany: purchaseUpdateMany },
         $transaction: transaction,
       } as unknown as PrismaService;
       const fetcher = vi.fn().mockResolvedValue(buyerOrderResponse(remoteStatus));
@@ -974,7 +1706,14 @@ describe('Alibaba1688PurchaseService', () => {
         where: {
           id: 101n,
           syncRevision: 1,
-          exceptionStatus: { in: ['none', 'resolved'] },
+          attemptNo: 1,
+          outOrderId: 'supplier-5-supplier-a',
+          orderId1688: '900001',
+          buyerShopId: 20n,
+          status: currentStatus,
+          retryEligible: false,
+          exceptionStatus: 'none',
+          order: activeOrderFence(),
         },
         data: expect.objectContaining({
           exceptionStatus: 'action_required',
@@ -991,7 +1730,9 @@ describe('Alibaba1688PurchaseService', () => {
     const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
     const localItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
     const purchase = {
+      ...activePurchaseState(),
       id: 101n,
+      buyerShopId: 20n,
       orderId1688: '900001',
       supplierKey: 'supplier-a',
       status: 'awaiting_payment',
@@ -1030,7 +1771,6 @@ describe('Alibaba1688PurchaseService', () => {
         }),
       },
       purchaseOrder: {
-        update: vi.fn().mockResolvedValue({ syncRevision: 1, status: 'awaiting_payment' }),
         updateMany: purchaseUpdateMany,
       },
     } as unknown as PrismaService;
@@ -1049,7 +1789,7 @@ describe('Alibaba1688PurchaseService', () => {
     });
 
     expect(purchaseUpdateMany).toHaveBeenCalledWith({
-      where: { id: 101n, syncRevision: 1 },
+      where: activePurchaseFence(purchase, 1),
       data: expect.objectContaining({
         status: 'failed',
         purchaseCost: 8.5,
@@ -1067,7 +1807,9 @@ describe('Alibaba1688PurchaseService', () => {
     const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
     const localItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
     const purchase = {
+      ...activePurchaseState({ syncRevision: 1 }),
       id: 101n,
+      buyerShopId: 20n,
       orderId1688: '900001',
       supplierKey: 'supplier-a',
       status: 'shipped',
@@ -1128,7 +1870,6 @@ describe('Alibaba1688PurchaseService', () => {
         }),
       },
       purchaseOrder: {
-        update: vi.fn().mockResolvedValue({ syncRevision: 2, status: 'shipped' }),
         updateMany: purchaseUpdateMany,
       },
     } as unknown as PrismaService;
@@ -1147,7 +1888,7 @@ describe('Alibaba1688PurchaseService', () => {
     });
 
     expect(purchaseUpdateMany).toHaveBeenCalledWith({
-      where: { id: 101n, syncRevision: 2 },
+      where: activePurchaseFence(purchase, 2),
       data: expect.objectContaining({
         status: 'failed',
         retryEligible: false,
@@ -1506,10 +2247,7 @@ describe('Alibaba1688PurchaseService', () => {
     const values = enabledConfig();
     const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
     const localItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
-    const purchaseClaim = vi
-      .fn()
-      .mockResolvedValue({ syncRevision: 1, status: 'awaiting_payment' });
-    const purchaseUpdateMany = vi.fn();
+    const purchaseUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const transaction = vi.fn();
     const prisma = {
       order: {
@@ -1523,7 +2261,9 @@ describe('Alibaba1688PurchaseService', () => {
           items: [localItem],
           purchaseOrders: [
             {
+              ...activePurchaseState(),
               id: 101n,
+              buyerShopId: 20n,
               orderId1688: '900001',
               supplierKey: 'supplier-a',
               status: 'awaiting_payment',
@@ -1549,7 +2289,7 @@ describe('Alibaba1688PurchaseService', () => {
           platformShopId: 'buyer-1',
         }),
       },
-      purchaseOrder: { update: purchaseClaim, updateMany: purchaseUpdateMany },
+      purchaseOrder: { updateMany: purchaseUpdateMany },
       $transaction: transaction,
     } as unknown as PrismaService;
     vi.stubGlobal(
@@ -1612,8 +2352,7 @@ describe('Alibaba1688PurchaseService', () => {
       'Alibaba 1688 logistics query returned an invalid response',
     );
 
-    expect(purchaseClaim).toHaveBeenCalledTimes(1);
-    expect(purchaseUpdateMany).not.toHaveBeenCalled();
+    expect(purchaseUpdateMany).toHaveBeenCalledTimes(1);
     expect(transaction).not.toHaveBeenCalled();
   });
 
@@ -1622,7 +2361,9 @@ describe('Alibaba1688PurchaseService', () => {
     const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
     const localItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
     const purchase = {
+      ...activePurchaseState(),
       id: 101n,
+      buyerShopId: 20n,
       orderId1688: '900001',
       supplierKey: 'supplier-a',
       status: 'awaiting_payment',
@@ -1676,10 +2417,11 @@ describe('Alibaba1688PurchaseService', () => {
     );
 
     let revision = 0;
-    const purchaseClaim = vi.fn(async () => ({
-      syncRevision: ++revision,
-      status: 'awaiting_payment',
-    }));
+    const purchaseClaim = vi.fn(async ({ where }) => {
+      if (where.syncRevision !== revision) return { count: 0 };
+      revision += 1;
+      return { count: 1 };
+    });
     const purchaseWrites: Array<Record<string, unknown>> = [];
     const shipmentUpsert = vi.fn(async ({ create }) => ({ ...create, id: 201n }));
     const transaction = vi.fn(async (callback) =>
@@ -1702,7 +2444,15 @@ describe('Alibaba1688PurchaseService', () => {
       }),
     );
     const prisma = {
-      order: { findFirst: vi.fn().mockResolvedValue(order) },
+      order: {
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce(order)
+          .mockResolvedValue({
+            ...order,
+            purchaseOrders: [{ ...purchase, syncRevision: 1 }],
+          }),
+      },
       shop: {
         findFirst: vi.fn().mockResolvedValue({
           id: 20n,
@@ -1710,7 +2460,7 @@ describe('Alibaba1688PurchaseService', () => {
           platformShopId: 'buyer-1',
         }),
       },
-      purchaseOrder: { update: purchaseClaim },
+      purchaseOrder: { updateMany: purchaseClaim },
       $transaction: transaction,
     } as unknown as PrismaService;
     const service = new Alibaba1688PurchaseService(
@@ -1737,7 +2487,7 @@ describe('Alibaba1688PurchaseService', () => {
     );
   });
 
-  it('rejects a stored package that contains an item excluded from final fulfillment', async () => {
+  it('rejects a stored package without a remote purchase binding before package validation', async () => {
     const values = enabledConfig();
     const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
     const eligibleItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
@@ -1757,6 +2507,7 @@ describe('Alibaba1688PurchaseService', () => {
       purchaseOrders: [
         {
           id: 101n,
+          buyerShopId: 20n,
           orderId1688: null,
           supplierKey: 'supplier-a',
           status: 'shipped',
@@ -1796,8 +2547,79 @@ describe('Alibaba1688PurchaseService', () => {
         }),
       },
     } as unknown as PrismaService;
+    const getAccessToken = vi.fn().mockResolvedValue('buyer-token');
     const service = new Alibaba1688PurchaseService(
       prisma,
+      crypto,
+      values,
+      new OAuthConfigService(values),
+      { getAccessToken } as unknown as ShopTokenService,
+    );
+
+    await expect(service.advance(USER, 5n)).rejects.toThrow(
+      '1688 采购单缺少远端订单绑定，已停止自动查询和物流回传',
+    );
+    expect(getAccessToken).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stored package containing an order item excluded from final fulfillment', async () => {
+    const values = enabledConfig();
+    const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
+    const eligibleItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
+    const refundedItem = {
+      ...orderItem(12n, 'supplier-a', '222222', 'sku-order-2'),
+      afterSaleStatusRaw: 12,
+      refundStatusRaw: 3,
+    };
+    const purchase = {
+      ...activePurchaseState(),
+      id: 101n,
+      orderId: 5n,
+      buyerShopId: 20n,
+      orderId1688: '900001',
+      supplierKey: 'supplier-a',
+      status: 'shipped',
+      purchaseCost: 8.5,
+      items: [
+        {
+          orderItemId: 11n,
+          offerId: '111111',
+          specId: 'spec-11',
+          quantity: 1,
+          orderItem: eligibleItem,
+        },
+      ],
+      shipments: [
+        {
+          id: 201n,
+          trackingNo: 'SF111',
+          carrier: '顺丰速运',
+          items: [
+            { orderItemId: 11n, quantity: 1, orderItem: eligibleItem },
+            { orderItemId: 12n, quantity: 1, orderItem: refundedItem },
+          ],
+        },
+      ],
+    };
+    const order = {
+      id: 5n,
+      status: 'purchasing',
+      afterSaleStatus: 'partial_refund',
+      partialRefundDisposition: 'continue_remaining',
+      platformOrderId: 'douyin-order-5',
+      shop: { id: 9n },
+      items: [eligibleItem, refundedItem],
+      purchaseOrders: [purchase],
+    };
+    const purchaseOrderUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const service = new Alibaba1688PurchaseService(
+      {
+        order: { findFirst: vi.fn().mockResolvedValue(order) },
+        purchaseOrder: { updateMany: purchaseOrderUpdateMany },
+      } as unknown as PrismaService,
       crypto,
       values,
       new OAuthConfigService(values),
@@ -1807,6 +2629,8 @@ describe('Alibaba1688PurchaseService', () => {
     await expect(service.advance(USER, 5n)).rejects.toThrow(
       '1688 包裹包含不属于当前采购单的订单项',
     );
+
+    expect(purchaseOrderUpdateMany).toHaveBeenCalledTimes(1);
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -1821,7 +2645,9 @@ describe('Alibaba1688PurchaseService', () => {
       refundStatusRaw: 3,
     };
     const purchase1 = {
+      ...activePurchaseState(),
       id: 101n,
+      buyerShopId: 20n,
       orderId1688: '900001',
       supplierKey: 'supplier-a',
       status: 'awaiting_payment',
@@ -1838,7 +2664,9 @@ describe('Alibaba1688PurchaseService', () => {
       shipments: [],
     };
     const purchase2 = {
+      ...activePurchaseState({ outOrderId: 'supplier-5-supplier-b' }),
       id: 102n,
+      buyerShopId: 20n,
       orderId1688: '900002',
       supplierKey: 'supplier-b',
       status: 'awaiting_payment',
@@ -1897,9 +2725,7 @@ describe('Alibaba1688PurchaseService', () => {
         },
       ],
     };
-    const purchaseOrderClaim = vi
-      .fn()
-      .mockResolvedValue({ syncRevision: 1, status: 'awaiting_payment' });
+    const purchaseOrderClaim = vi.fn().mockResolvedValue({ count: 1 });
     const purchaseOrderUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const purchaseShipmentDeleteMany = vi.fn().mockResolvedValue({ count: 0 });
     const purchaseShipmentItemDeleteMany = vi.fn().mockResolvedValue({ count: 0 });
@@ -1931,7 +2757,7 @@ describe('Alibaba1688PurchaseService', () => {
           platformShopId: 'buyer-1',
         }),
       },
-      purchaseOrder: { update: purchaseOrderClaim },
+      purchaseOrder: { updateMany: purchaseOrderClaim },
       purchaseShipment: {
         upsert: vi.fn(async ({ create }) => ({
           ...create,

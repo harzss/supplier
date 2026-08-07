@@ -205,7 +205,39 @@ describe('ShopTokenService', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('marks the shop expired when refresh fails', async () => {
+  it('keeps the shop active when token refresh has a transient transport failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('socket timeout');
+      }),
+    );
+    const state = makeService({ expiresInMs: -1 });
+
+    await expect(state.service.getAccessToken(9n, 42n)).rejects.toThrow('店铺授权刷新暂时失败');
+    expect(state.shop.status).toBe('active');
+    expect(state.updates).toHaveLength(0);
+    expect(state.alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: 'warning',
+        details: expect.objectContaining({ failure: 'token_refresh' }),
+      }),
+    );
+  });
+
+  it('keeps the shop active when token refresh returns a malformed response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{', { status: 200 })),
+    );
+    const state = makeService({ expiresInMs: -1 });
+
+    await expect(state.service.getAccessToken(9n, 42n)).rejects.toThrow('店铺授权刷新暂时失败');
+    expect(state.shop.status).toBe('active');
+    expect(state.updates).toHaveLength(0);
+  });
+
+  it('marks the shop expired when the platform explicitly rejects the refresh credential', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -219,6 +251,39 @@ describe('ShopTokenService', () => {
 
     await expect(service.getAccessToken(9n, 42n)).rejects.toThrow('店铺授权已过期');
     expect(updates.at(-1)).toEqual({ status: 'expired' });
+  });
+
+  it('marks the shop expired when a refreshed token belongs to another shop', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              err_no: 0,
+              data: {
+                access_token: 'other-access-token',
+                refresh_token: 'other-refresh-token',
+                expires_in: 7200,
+                shop_id: '4463799',
+              },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const state = makeService({ expiresInMs: -1 });
+
+    await expect(state.service.getAccessToken(9n, 42n)).rejects.toThrow('店铺授权已过期');
+    expect(state.shop.status).toBe('expired');
+    expect(state.updates.at(-1)).toEqual({ status: 'expired' });
+    expect(state.alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: 'critical',
+        summary: '店铺授权刷新返回了不同主体',
+        details: expect.objectContaining({ failure: 'token_refresh_identity_mismatch' }),
+      }),
+    );
   });
 
   it('refreshes a 1688 buyer token with the platform-specific endpoint', async () => {

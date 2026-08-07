@@ -3,7 +3,7 @@ name: Security scans
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/internal-test-deploy]
   schedule:
     - cron: '23 3 * * 1'
   workflow_dispatch:

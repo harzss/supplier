@@ -5,7 +5,7 @@
 > [00-roadmap.md](./00-roadmap.md) 为唯一来源；能否上线以
 > [10-production-readiness.md](./10-production-readiness.md) 的 P0 门禁为准。
 >
-> 本文包含 M1～M85 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
+> 本文包含 M1～M86 的工程台账，状态文字应按证据日期理解；外部平台“应用侧已通”不等于真实 E2E 已验收。
 
 ## 1. 主流程定义（核心闭环）
 
@@ -37,7 +37,7 @@ flowchart LR
 | 身份与租户隔离      | 🔄 应用侧已通                   | Supabase JWT、内部用户映射、Bearer 门禁与前端登录门禁已完成；待真实邮件账号流验收                                                                                                                                             |
 | AI 标题优化         | ✅ 已通                         | 生成 5 条合规候选，可选中后直连铺货；队列复用所选标题并按实际目标平台再次校验                                                                                                                                                 |
 | 平台类目映射        | 🔄 应用侧已通                   | 官方目录/Top3/人工确认、类目必填属性与 `product_format_new` 发布快照已完成；待真实店验收                                                                                                                                      |
-| 店铺管理            | ✅ 已通（Mock + 抖店 OAuth UI） | 设置页可发起官方授权、展示授权状态和重新授权；真实账号待凭证联调                                                                                                                                                              |
+| 店铺管理            | ✅ 已通（Mock + 抖店 OAuth UI） | 设置页可发起官方授权、展示授权状态和重新授权；Token 刷新仅在明确凭证拒绝或主体不一致时失效，瞬时/未知故障保留账号 active；真实账号待凭证联调                                                                                  |
 | 一键铺货            | ✅ 已通（Mock + 抖店 adapter）  | 演示店走 Mock；OAuth 抖店走 `product.addV2`，真实发布待类目映射与测试店铺联调                                                                                                                                                 |
 | 铺货任务队列        | ✅ 已通                         | PostgreSQL 持久化队列、自动 worker、指数退避、死信、超时恢复与人工重新入队                                                                                                                                                    |
 | 智能定价            | ✅ 已通                         | 固定加价、目标毛利与竞品对标；试算保本价/利润，结果快照随队列任务持久化                                                                                                                                                       |
@@ -51,7 +51,7 @@ flowchart LR
 | 订单同步            | ✅ 应用侧已通                   | 固定时间窗全分页增量同步、持久水位、Redis 锁与后台 worker；敏感字段解密后再加密落库                                                                                                                                           |
 | 售后/退款保护       | ✅ 应用侧已通                   | 子订单售后、剩余子单处置、销售退款与采购成本核销、采购/物流保护、审计告警已闭环                                                                                                                                               |
 | 售后工单            | 🔄 staging 候选已部署           | M80 将权威销售售后快照、销售子单与 1688 采购关联收敛为可认领、有时限、有凭证、可重开和可验证关闭的工单；数据库与部署 smoke 已通过，外部动作仍由运营在平台执行，待双租户与真实平台 E2E                                         |
-| 自动代发            | 🔄 应用侧已通                   | 按供应商创建 `saleproxy` 采购单，人工付款后同步 1688 包裹，幂等回传抖店一单多包；待真实联调                                                                                                                                   |
+| 自动代发            | 🔄 应用侧已通                   | 按供应商创建 `saleproxy` 采购单并持久绑定原 1688 买家账号；恢复与轮询不回退最新账号，人工付款后同步 1688 包裹并幂等回传抖店一单多包；待真实联调                                                                               |
 | 库存联动            | 🔄 应用侧已通                   | 采集库存指纹/版本、持久队列、抖店逐 SKU 全量同步、缺货/下架/SKU 变化自动下架；待真实店验收                                                                                                                                    |
 | AI 详情 / 主图      | 🔄 开发中                       | 详情链路已完成；主图权益、远程 GPU 流水线编排、托管与铺货接入已完成，待真实 worker 联调                                                                                                                                       |
 | 真实平台 OAuth      | 🔄 开发中                       | M3-1～5 已完成；M3-6 已增加联调准备度检查，当前环境 0/6 待配置                                                                                                                                                                |
@@ -305,13 +305,13 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 | 3   | Token 安全存储与刷新：加密 access/refresh token、过期续期  | ✅ 完成                                 |
 | 4   | 真实抖店 adapter：商品发布、订单拉取、物流回传             | ✅ 完成（待真实凭证联调）               |
 | 5   | 设置页接入真实店铺授权、授权状态与重新授权                 | ✅ 完成（待真实凭证联调）               |
-| 6   | 测试店铺/真实账号联调、typecheck、单测与浏览器验收         | 🔄 进行中（准备度检查已完成，当前 0/5） |
+| 6   | 测试店铺/真实账号联调、typecheck、单测与浏览器验收         | 🔄 进行中（准备度检查已完成，当前 0/6） |
 
 ### 验收标准（M3）
 
 - [ ] 用户可从设置页发起抖店 OAuth，并在回调后看到已授权店铺
 - [x] Token 加密落库，接口与日志不暴露明文
-- [x] Token 临近过期时自动刷新，刷新失败提示重新授权
+- [x] Token 临近过期时自动刷新；瞬时/未知故障保留 active，明确凭证拒绝或主体不一致才提示重新授权
 - [x] 同一套铺货服务可切换 Mock/真实 adapter，不改业务流程
 - [ ] 至少完成一次测试店铺或真实店铺的商品发布、订单同步与物流回传
 - [ ] 全量 typecheck、单测与浏览器端到端验证通过
@@ -709,7 +709,7 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 - [x] `pnpm audit --prod` 返回 `No known vulnerabilities found`
 - [x] 当前 Next 15.5.22 与 Sharp 0.35.3 production build 通过；BFF 移除非业务必需的 static 插件，Nest 11 lint、typecheck 和 64 文件 / 338 项测试通过
 - [x] `make release-check` 全绿：lint 2/2、typecheck 14/14、测试任务 11/11（总计 209 项）、build 9/9、Prettier 与 `git diff --check` 通过
-- [x] release-gates 在安装依赖后执行生产 audit；security-scans 对 PR、main、每周和手工触发运行依赖审计与 CodeQL
+- [x] release-gates 在安装依赖后执行生产 audit；security-scans 对 PR、main、`codex/internal-test-deploy` push、每周和手工触发运行依赖审计与 CodeQL
 - [ ] 在 GitHub 实际完成首次 security-scans，确认 Code Scanning 权限/套餐可用，并将 release/security checks 设为 main 分支 required
 
 ## 23. M18 · 真实 1688 采购与一单多包闭环
@@ -1405,6 +1405,8 @@ M68 已完成发布前利润与风险预检的应用侧闭环：只读 API 聚�
 - [x] 全仓 lint/typecheck/test、Prisma 与格式门禁通过
 
 ## 54. 变更记录
+
+- 2026-08-07：完成 M86 / R1-03～R1-04 平台凭证、采购账号亲和性与 attempt fence 加固。1688 采购创建时固化 `buyerShopId`，远端创建结果不确定后的 `outOrderId` 恢复、付款状态与物流轮询只使用该原买家账号；已有采购缺少账号/远端单号、同一销售订单绑定多个买家账号、原账号失效或事务内绑定漂移时均 fail-closed。active 轮询以 `buyerShopId + attemptNo + outOrderId + orderId1688 + status + retryEligible + exceptionStatus + syncRevision` 和销售订单售后允许态原子认领，旧 attempt 迟到响应不能查询或覆盖新采购；下单结果已知或未知时若并发进入退款/售后，都会按原 attempt 原子复核，保留远端单号或原 `outOrderId` 并转为 `action_required`，不会误标已停止或覆盖 replacement attempt。抖店与 1688 Token refresh 新增明确拒绝与可重试错误分类：网络、408/425/429/5xx、畸形字段和未知业务错误保留店铺 active 并返回 503；1688 会解析非瞬时 4xx 的精确拒绝码，抖店会拒绝空主体、空白 Token 与越界有效期，只有明确 refresh credential 拒绝或有效且不同的刷新主体才标记 expired。定向验证覆盖 Platform SDK 204/204、1688 采购与 ShopToken 42/42；全仓测试 14/14 个任务共 1,301 项、typecheck 15/15、lint 2/2、build 9/9、运维脚本 92/92、生产依赖审计、Prettier 与 diff check 全部通过。尚未执行真实平台账号切换、真实 Token 失效和小额采购 E2E，因此 R1 与生产门禁状态不变。
 
 - 2026-08-07：完成 M85 / R1-01 双账号租户隔离验收器的代码基座。新增固定读取权限为 `0600` 的 Web staging 配置，并把 Supabase 项目与 BFF 固定到当前公开 staging origin；同账号、非 UUID 身份、非公开 Key、错项目或错 Gateway 都在发送凭证/Token 前失败。验收器在任何写入前要求双方都没有目标收藏，随后对 A、B 依次执行收藏、己方回读、对方不可见、删除和对称验证。只有双方初始为空后才允许补偿删除；PUT 超时、网络错误或非 200 时不重试，最终仍逐账号执行 best-effort DELETE、回读、logout，并要求 refresh token 返回 400/401，但由于迟到提交可能晚于即时回读，这类结果会永久标记为清理未证明而不是误报成功。普通路径任一步无法证明也会失败，且输出不含邮箱、密码、Key、Token、用户 ID、商品编号或响应正文。同时加固单账号 Auth 验收器：password/refresh 的响应在完整性或状态断言前登记任何 access token，grant 超时、无 Token 的 5xx 和注销后 refresh 探针不确定均明确要求人工核对会话，错误目标在发送凭证前失败。定向 Auth/隔离测试 43/43、全体运维脚本 92/92、全仓测试 14/14 个任务共 1,249 项、typecheck 15/15、lint 2/2、build 9/9、Prettier 与 diff check 已通过。真实双账号尚未写入 staging 私有配置，也未执行本 smoke；当前动态证据范围只覆盖两个不同 Supabase 用户的当前 JWT 会话与 Favorites 双向不可见，不能宣称刷新前后内部映射、R1-01、其他业务域租户隔离或生产身份门禁完成。
 

@@ -4,6 +4,8 @@
 
 > **当前状态（2026-08-10，`d30d302`）**：Supabase staging 已在 2026-08-08 完成 43→45 恢复演练与单次前向迁移；`d30d302` 严格审计确认当前 45/45、pending 0、schema diff matched，42/42 public 表 RLS 与客户端 ACL/default privileges 门禁通过。当前 BFF 的本机、Quick Tunnel 和外部固定 Gateway readiness 均通过；18/18 部署 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state 原子语义 smoke 通过。旧 Supplier Redis/PostgreSQL 运行容器和运行卷已删除，保留未挂载的历史备份卷。真实 Auth 邮件、真实平台 E2E、独立生产资源、监控与合规仍未完成，所有真实平台/worker/批量/SKU flag 保持关闭。
 
+> **2026-08-17 状态覆盖（`8a9fd30`）**：当前 BFF 已以 Supabase-only 配置、loopback 监听和精确 SHA 重新部署，本机 `database + runtimeState` readiness、Supabase HTTP 变更请求限流、全仓门禁、Release gates 与 Security scans 通过；所有副作用开关仍关闭。固定 Gateway 当前返回 Cloudflare Tunnel 530，根因是 Shadowrocket 对 `argotunnel.com` 的代理 DNS 与 7844 出站阻断。必须先加入 Tunnel 域名直连规则或暂时关闭该 packet tunnel，再重启 supervisor 并重跑固定 Gateway/18 项 smoke；完成前不得把 2026-08-10 的外部入口证据套用到本候选。见 [当前运行边界证据](./evidence/2026-08-17-supabase-runtime-boundary.md)。
+
 ## 1. 拓扑
 
 ```text

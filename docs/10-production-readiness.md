@@ -7,6 +7,8 @@
 >
 > **时效说明（2026-08-10，`d30d302`）**：Supabase staging 已在 2026-08-08 完成第 44、45 个 migration；当前严格审计为 **45/45、pending 0、schema diff matched**，42/42 public 表启用 RLS，`anon` / `authenticated` 的表、sequence 与 default privileges 均为 0。停写窗口前的 43→45 备份恢复演练和单次 `migrate-forward-once` 已通过；当前 BFF 在本机、Quick Tunnel 与外部固定 Gateway 的 readiness 均为 `database + runtimeState`。18/18 部署 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state 原子语义 smoke 通过。本机旧 Supplier PostgreSQL/Redis 运行容器和运行卷已删除，保留未挂载的历史备份卷。以上只证明当前 staging 候选，不证明独立生产资源、真实平台闭环或生产可用。
 
+> **2026-08-17 时效覆盖（`8a9fd30`）**：Supabase-only 启动边界、PostgreSQL HTTP 变更请求限流、无 AI 进程内缓存、CI-only 临时数据库和 loopback BFF 已完成；当前本机 BFF 与 CI 全绿。但 Shadowrocket 阻断 Cloudflare Tunnel 必需的 7844 出站，固定 Gateway 返回 530，因此当前候选的外部 HTTPS 部署 smoke 未完成。生产准备结论仍为不通过，且 R0-03 暂不能关闭。
+
 ## 1. 当前结论（治理与技术证据截至 2026-08-10）
 
 **结论不变：当前不能宣称生产可用或直接正式上架。** staging 的 45/45、`runtime_states`、当前 BFF/Gateway 和无本机中间件门禁已经关闭；仍未关闭的是两个真实 Auth 邮件账号生命周期、真实抖店与 1688 小额订单 E2E、独立生产 Supabase 与计算资源、外部监控告警、生产备份恢复/切流演练、服务市场商业生命周期和法务合规。以下内容保留为 M13～M67 的工程历史证据，不能替代新的生产环境验收。

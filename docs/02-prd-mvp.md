@@ -187,7 +187,7 @@ flowchart LR
 9. 10 家以上种子商家各完成至少 3 次真实闭环，全部 P0 缺陷关闭，并得到激活、履约、异常人工时、成本和付费意愿数据。
 10. [生产准备度](./10-production-readiness.md) 的 P0 全部关闭，生产环境部署、备份、回滚、监控、告警和合规证据有效。
 
-当前候选已把 OAuth state/result、Token refresh recovery、订单/商品租约、1688 fixed-window limiter 和 AI 精确缓存收敛到 Supabase PostgreSQL `runtime_states`，不再要求本机或 staging Redis。但这只减少部署依赖，不降低第 10 项门禁；staging 仍为 43/45，第 44、45 个 migration、当前 SHA CI、真实备份恢复与真实抖店/1688 E2E 尚未完成。
+当前候选已把 OAuth state/result、Token refresh recovery、订单/商品租约、HTTP/1688 fixed-window limiter 和 AI 精确缓存收敛到 Supabase PostgreSQL `runtime_states`，不再要求本机或 staging Redis，也不再保留 AI 缓存的进程内副本。staging 已完成 45/45、真实备份 43→45 恢复演练、schema/RLS/ACL 和 `database + runtimeState` 动态验证；但这只减少部署依赖，不降低第 10 项门禁。真实 Auth 邮件、抖店/1688 E2E、独立生产资源、监控、恢复切流和合规仍未完成。
 
 每项证据至少包含：环境、时间、租户/业务对象 ID、期望与实际结果、平台截图或回读、相关日志/审计 ID、发现问题及处理结论。不得在文档中记录密钥或完整个人信息。
 

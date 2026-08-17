@@ -4,6 +4,11 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { PrismaModule } from './common/prisma.module';
 import { RuntimeStateModule } from './common/runtime-state.module';
+import { RuntimeStateService } from './common/runtime-state.service';
+import {
+  skipReadOnlyThrottle,
+  SupabaseThrottlerStorage,
+} from './common/supabase-throttler-storage';
 import { CryptoModule } from './common/crypto.module';
 import { HealthModule } from './modules/health/health.module';
 import { ProductModule } from './modules/product/product.module';
@@ -27,7 +32,15 @@ import { AfterSaleModule } from './modules/after-sale/after-sale.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnvironment }),
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
+    ThrottlerModule.forRootAsync({
+      imports: [RuntimeStateModule],
+      inject: [RuntimeStateService],
+      useFactory: (runtimeState: RuntimeStateService) => ({
+        skipIf: skipReadOnlyThrottle,
+        storage: new SupabaseThrottlerStorage(runtimeState),
+        throttlers: [{ ttl: 60_000, limit: 120, blockDuration: 60_000 }],
+      }),
+    }),
     PrismaModule,
     RuntimeStateModule,
     CryptoModule,

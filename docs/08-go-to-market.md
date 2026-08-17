@@ -1,12 +1,12 @@
 # 商业化与上架验证方案
 
-> 最近更新：2026-08-08
+> 最近更新：2026-08-10
 >
 > 本文档记录商业假设、定价原则和渠道实验，不作为产品进度表。执行顺序以
 > [00-roadmap.md](./00-roadmap.md) 为准，能否上线以
 > [10-production-readiness.md](./10-production-readiness.md) 为准。
 >
-> **当前环境边界**：内测运行依赖已收敛为 Cloudflare + Supabase（PostgreSQL / Auth / Storage）；应用不再要求本机 Redis。该降本方案仍是未完成的候选：staging 为 43/45，最新两个 migration、当前 SHA CI、真实备份恢复和真实平台 E2E 尚未完成，不能据此对外宣称已可上线。
+> **当前环境边界**：内测运行依赖已收敛为 Cloudflare + Supabase（PostgreSQL / Auth / Storage），不再要求本机 Redis/Postgres；旧运行容器和运行卷已删除，保留未挂载的历史备份卷。2026-08-08 已完成 staging 43→45 备份恢复演练与真实迁移；2026-08-10 的 `d30d302` 又确认 45/45、schema diff、42/42 public 表 RLS/ACL、`database + runtimeState` readiness、18/18 smoke 和 runtime-state 动态验证。该结果只证明内部测试基础设施基线，不代表已可上线：真实 Auth 邮件、抖店/1688 E2E、独立生产资源、监控与合规门禁仍未完成。
 
 ## 1. 商业目标
 

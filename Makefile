@@ -1,14 +1,11 @@
-.PHONY: help install dev test-db-up test-db-down db-migrate db-migrate-deploy db-seed db-studio llm-test typecheck build release-check clean
+.PHONY: help install dev db-migrate db-migrate-deploy db-studio llm-test typecheck build release-check clean
 
 help:
 	@echo "Supplier — 常用命令"
 	@echo ""
 	@echo "  make install       安装依赖（pnpm install）"
-	@echo "  make test-db-up    启动仅供隔离测试的临时 PostgreSQL"
-	@echo "  make test-db-down  停止隔离测试数据库"
 	@echo "  make db-migrate    创建 / 应用 Prisma 迁移（首次跑：make db-migrate name=init）"
 	@echo "  make db-migrate-deploy  仅应用已有迁移（生产发布）"
-	@echo "  make db-seed       写入演示种子数据"
 	@echo "  make db-studio     打开 Prisma Studio"
 	@echo "  make llm-test      测试 LLM API Key 是否可用"
 	@echo "  make dev           启动 Web + BFF（并行）"
@@ -20,20 +17,11 @@ help:
 install:
 	pnpm install
 
-test-db-up:
-	docker compose -f infra/docker-compose.dev.yml up -d --wait postgres
-
-test-db-down:
-	docker compose -f infra/docker-compose.dev.yml down -v
-
 db-migrate:
 	pnpm --filter @supplier/db exec prisma migrate dev $(if $(name),--name $(name),)
 
 db-migrate-deploy:
 	pnpm db:migrate:deploy
-
-db-seed:
-	pnpm db:seed
 
 db-studio:
 	pnpm db:studio

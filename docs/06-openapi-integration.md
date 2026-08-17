@@ -2,7 +2,7 @@
 
 > **原则**：仅使用官方 OpenAPI，不做账号 Cookie、不做爬虫黑产。所有授权走 OAuth 2.0。
 >
-> **运行依赖状态（2026-08-08）**：OAuth 一次性 state/result、Token refresh recovery、订单/商品租约、1688 fixed-window limiter 与 AI 精确缓存已改为 Supabase PostgreSQL `runtime_states`，staging / production 不再配置 `REDIS_URL`。第 45 个 migration 尚未应用到 staging（当前 43/45）；真实平台 E2E 和当前 SHA CI 也未完成，以下“应用侧实现”不能视为平台验收或生产可用。
+> **运行依赖状态（2026-08-10）**：OAuth 一次性 state/result、Token refresh recovery、订单/商品租约、1688 fixed-window limiter 与 AI 精确缓存已改为 Supabase PostgreSQL `runtime_states`，staging / production 不再配置 `REDIS_URL`。在 45/45 的 Supabase staging 上，`d30d302` 已通过本机 BFF、Quick Tunnel、外部固定 Gateway 的 `database + runtimeState` readiness；18/18 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state store/read/consume/lease/renew/release 通过。旧 Redis/Postgres 运行容器和运行卷已删除，保留未挂载的历史备份卷。所有自动化与 SKU flag 仍为 `false`，真实 Auth 邮件、抖店/1688 E2E 和独立生产资源尚未完成，以下“应用侧实现”不能视为平台验收或生产可用。
 
 ## 1. 平台清单
 

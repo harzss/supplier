@@ -17,7 +17,9 @@ interface FixedWindowRow {
 
 export interface FixedWindowResult {
   allowed: boolean;
+  count: number;
   retryAfterMs: number;
+  timeToExpireMs: number;
 }
 
 /**
@@ -204,7 +206,9 @@ export class RuntimeStateService {
     }
     return {
       allowed: row.count <= limit,
+      count: row.count,
       retryAfterMs: row.count <= limit ? 0 : Math.max(row.retryAfterMs, 0),
+      timeToExpireMs: Math.max(row.retryAfterMs, 0),
     };
   }
 

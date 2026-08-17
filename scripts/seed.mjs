@@ -2,10 +2,8 @@
 /**
  * 写入演示用的种子数据（10 个货源 + 打分 + 1 个测试用户）
  *
- * 用法：
- *   1. apps/bff/.env 或 packages/db/.env 配好本地 DATABASE_URL；脚本拒绝任何 Supabase/staging 目标
- *   2. pnpm db:migrate -- --name init   # 第一次先建表
- *   3. pnpm db:seed
+ * 仅供 GitHub Actions 的可销毁隔离 PostgreSQL。脚本拒绝任何 Supabase 目标，
+ * 也不再作为本机开发命令暴露。
  */
 
 import { readFileSync } from 'node:fs';

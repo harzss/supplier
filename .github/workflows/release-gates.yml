@@ -52,12 +52,12 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm db:test:up
+      - run: docker compose -f infra/docker-compose.ci.yml up -d --wait postgres
       - run: pnpm --filter @supplier/bff... build
       - run: pnpm db:migrate:deploy
-      - run: pnpm db:seed
+      - run: node scripts/seed.mjs
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm test:e2e
+      - run: pnpm test:e2e:integration
       - name: Upload browser failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -70,7 +70,7 @@ jobs:
           retention-days: 7
       - name: Stop browser test infrastructure
         if: always()
-        run: docker compose -f infra/docker-compose.dev.yml down -v
+        run: docker compose -f infra/docker-compose.ci.yml down -v
 
   images:
     needs: [verify, browser]

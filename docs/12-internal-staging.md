@@ -1,6 +1,8 @@
 # 12 · 免费内部测试环境
 
-> 目标：优先使用 Supabase Free 与 Cloudflare Workers Free/Tunnel，在不改写 NestJS BFF 的前提下验证核心功能；稳定 Web 首选 Cloudflare Workers Free，Vercel Pro Trial 仅作备选。本方案不是生产架构；本机只运行 BFF/Tunnel 应用进程，不运行 PostgreSQL、Redis 或其他常驻中间件。隔离 migration/恢复门禁可以使用执行后删除的临时 PostgreSQL。
+> 目标：优先使用 Supabase Free 与 Cloudflare Workers Free/Tunnel，在不改写 NestJS BFF 的前提下验证核心功能；稳定 Web 首选 Cloudflare Workers Free，Vercel Pro Trial 仅作备选。本方案不是生产架构；本机只运行 BFF/Tunnel 应用进程，不运行 PostgreSQL、Redis 或其他常驻中间件。开发启动、HTTP 限流、队列、租约和 AI 精确缓存全部使用 Supabase；隔离 migration/恢复门禁可以使用执行后删除的临时 PostgreSQL。
+
+> **当前状态（2026-08-10，`d30d302`）**：Supabase staging 已在 2026-08-08 完成 43→45 恢复演练与单次前向迁移；`d30d302` 严格审计确认当前 45/45、pending 0、schema diff matched，42/42 public 表 RLS 与客户端 ACL/default privileges 门禁通过。当前 BFF 的本机、Quick Tunnel 和外部固定 Gateway readiness 均通过；18/18 部署 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state 原子语义 smoke 通过。旧 Supplier Redis/PostgreSQL 运行容器和运行卷已删除，保留未挂载的历史备份卷。真实 Auth 邮件、真实平台 E2E、独立生产资源、监控与合规仍未完成，所有真实平台/worker/批量/SKU flag 保持关闭。
 
 ## 1. 拓扑
 
@@ -71,14 +73,14 @@ node packages/db/scripts/staging-maintenance-host.mjs audit --allow-pending
 
 默认严格审计通过且输出 `Database schema is up to date!`、`No difference detected.` 时，**不要再运行 `migrate deploy`**。
 
-### 3.1 当前 43→45 前向窗口
+### 3.1 已完成的 43→45 前向窗口
 
-当前 staging 已应用 43 条，仓库有 45 条；本次只允许 pending 精确为：
+2026-08-08 执行前 staging 已应用 43 条、仓库有 45 条，当时只允许 pending 精确为：
 
 - `20260807110000_add_published_product_sku_edits`
 - `20260807150000_add_runtime_state_store`
 
-执行顺序如下：
+以下是本次已验证的执行顺序，保留用于审计和未来独立生产迁移；当前 staging 已是 45/45，不得重复执行：
 
 1. 当前 clean SHA 的本地门禁与 CI 完成；先摘流，停止旧 BFF、队列和全部 worker，等待 in-flight 外部调用与 ownership drain，`PRODUCT_BATCH_SKU_EDIT_ENABLED=false`。
 2. 旧应用已隔离写流量后，只读计数旧 Redis 的 `oauth:refresh-result:*`；若非零，先通过旧候选受控恢复并逐项确认正式 Token 记录已提交，禁止删除或等待过期。确认旧 BFF/worker 不会再续租后，旧 Redis 锁域才算退出；新 PostgreSQL 租约实例在 migration 完成前不得启动，两套锁域绝不重叠。
@@ -86,9 +88,10 @@ node packages/db/scripts/staging-maintenance-host.mjs audit --allow-pending
 4. 停写后创建新的 Supabase 一致性备份，恢复到使用 tmpfs、`--rm`、数值 loopback 和固定 PostgreSQL 17 image ID 的一次性隔离数据库；它只用于门禁，完成后必须确认容器删除，不能成为本机常驻中间件。
 5. 隔离库必须从精确 43 条 baseline 执行 `rehearse-forward-sku-edits`。该历史命名的 action 实际同时应用第 44/45 条，运行 `migrate status`、schema diff、`assert-43-to-44-sku-edits.sql` 与 `assert-44-to-45-runtime-state.sql`。
 6. 只有真实备份恢复、45/45、schema diff、SKU/runtime state 断言、RLS/ACL 全部通过，才允许同一停写窗口执行一次 `migrate-forward-once`。失败保持停写并前向修复，禁止启动旧 Redis/BFF 兜底。
-7. 迁移后重跑严格 audit，再部署当前 BFF；`/api/health/ready` 必须返回 `database=up` 与 `runtimeState=up`，且环境中没有 `REDIS_URL`。旧版本只保留 image digest，不保留运行副本。
+7. 迁移后重跑严格 audit，再部署当前 BFF；`/api/health/ready` 必须返回 `database=up` 与 `runtimeState=up`，且环境中没有 `REDIS_URL`。本次已完成上述验证；旧版本只保留 image digest，不保留运行副本。
 
 ```bash
+# 2026-08-08 已执行记录；不要对当前 45/45 staging 重跑。
 node packages/db/scripts/staging-maintenance-host.mjs audit --allow-pending
 
 node --env-file=packages/db/.env.staging.local \
@@ -270,6 +273,10 @@ pnpm audit:supabase-boundary
 
 2026-08-08 状态覆盖：上段“当前候选”现只表示 2026-08-06 的旧部署。仓库已新增第 44 个 SKU 编辑与第 45 个 `runtime_states` migration，staging 为 43/45；当前 SHA CI、最新真实备份恢复、`migrate-forward-once` 和无 Redis 的 BFF/Gateway smoke 都尚未完成。当前操作必须使用 3.1 节的 43→45 流程，`PRODUCT_BATCH_SKU_EDIT_ENABLED=false`，不得继续执行下方历史 33→43 的 `migrate-once`。
 
+2026-08-10 `d30d302` 状态覆盖：第 3.1 节的迁移前备份恢复演练和单次 `migrate-forward-once` 已于 2026-08-08 完成；`d30d302` 严格审计再次确认 45/45、pending 0、schema diff matched、42/42 public 表 RLS，`anon` / `authenticated` 的表、sequence 与 default privileges 均为 0。本机、Quick Tunnel 与外部固定 Gateway 的 `database + runtimeState` readiness 通过；18/18 部署 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state 原子语义 smoke 通过。旧 `supplier-staging-redis`、`supplier-postgres` 运行容器及运行卷已删除，未挂载的历史备份卷仍保留，不能重新作为 staging 依赖。
+
+迁移后归档保存在 Git 忽略路径 `tmp/staging-backups/supplier-staging-post-45-d30d302-20260810.dump`，大小 248508 bytes，SHA256 `0a15a148e5f973bd87ec72851728ae16cf063ddea466b92a762fa39b63061ae4`，TOC 校验通过。该 post-45 归档尚未单独恢复，不能写成恢复演练已通过；本次恢复证据来自迁移前归档完成的 43→45 隔离恢复演练。
+
 2026-08-05 又用 `staging-libpq.mjs` 对真实 staging 完成一次只读工具链预检：PostgreSQL 17.10 在 `verify-full` 下通过官方 CA 连接 PostgreSQL 17.6，生成 150239 bytes、权限 `0600`、365 个有效 TOC 条目的 custom archive，SHA256 为 `a325f82ddb2e9d1815de9860bab99c46ce7ba01e1692cb3eae5a95ceec21be98`，且原子发布后无 partial 残留。该文件仅证明备份入口真实可执行，不是维护停写后的最终备份，也未替代上述隔离恢复演练。
 
 2026-08-06 又以该 150239 bytes 预检归档验证当时的分步 `restore-rehearsal.mjs` PostgreSQL 17 Docker 路径：通过宿主机 `127.0.0.1` 端口转发恢复全部 365 个 TOC 条目，顺序应用第 34～43 个 migration 后得到 43/43、`Database schema is up to date!`、`No difference detected.`，三组 post-upgrade assertions 全部通过；一次性容器随后删除。脱敏的输入、镜像 digest、执行顺序、结果和清理证据见 [2026-08-06 本地 PG17 恢复演练](./evidence/2026-08-06-local-pg17-restore-rehearsal.md)。该证据证明真实归档和 Docker 路径可用，但早于当前把恢复、迁移与断言绑定到同一完整 container ID 的单进程 `rehearse`。
@@ -322,6 +329,8 @@ ALIBABA_1688_SOURCE_DATA_SCOPE=
 
 构建并以独立环境文件启动：
 
+当前内测 `DATABASE_URL` 使用 Supabase `:6543` transaction pooler 且 `connection_limit=5`；HTTP 变更请求限流、后台轮询与 readiness 共用连接池，低于 3 会在启动前被拒绝。BFF 的环境文件显式写空 `DIRECT_URL=`，防止 Prisma Client 自动加载 `packages/db/.env` 中属于其他项目的迁移连接；migration/audit 只从独立的 owner-only `packages/db/.env.staging.local` 读取 5432 session URL。
+
 ```bash
 pnpm --filter @supplier/bff build
 node --env-file=apps/bff/.env.staging.local apps/bff/dist/main.js
@@ -334,7 +343,7 @@ curl -fsS http://127.0.0.1:3001/api/health/live
 curl -fsS http://127.0.0.1:3001/api/health/ready
 ```
 
-当前 BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、批量商品执行、SKU 编辑和批量货源采集开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本是 `20260807150000_add_runtime_state_store`，并返回 `database + runtimeState`；staging 当前 43/45，所以在第 44、45 个 migration 完成前，当前 BFF 必须保持 503，不能绕过后接流量。
+当前 BFF 使用 production/Supabase Auth/数据库队列模式，订单同步、库存、采购、履约巡检、异常扫描、批量商品执行、SKU 编辑和批量货源采集开关均为 `false`。Supabase Free 实测单次数据库探测偶尔超过 3 秒，因此 staging 专用 `HEALTH_CHECK_TIMEOUT_MS=8000`；探测仍然 fail-closed，超时返回 503。readiness 的最新必需版本是 `20260807150000_add_runtime_state_store`，并返回 `database + runtimeState`；`d30d302` 已在 45/45 staging 的本机、Quick Tunnel 与外部固定 Gateway 验证通过。
 
 批量货源采集不得仅因页面可见就开启。先保持 `SOURCE_IMPORT_ENABLED=false`，用两个受控 1688 买家账号对同一组 offer 分别取证标题、SKU、分销价和库存；只有确认这些字段不随账号变化，并完成方案配额、限流和曝光回传要求核验后，才在维护窗口写入 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer` 并开启 worker。开启后至少用两个 Supabase 测试用户分别验证任务列表、按 client request 恢复和“我的货源”互不可见；再演练 BFF 重启、`runtimeState` 故障时 fail-closed、停止未开始项、单个失败项重试、相同 UUID 同参恢复和异参 409。任何一项失败都应重新关闭开关，不得回退 Mock。
 
@@ -360,7 +369,7 @@ npx wrangler secret put BFF_ORIGIN
 
 ### 6.1 macOS 内测进程守护
 
-本机长期承载内测 BFF 时，不再分别手工运行 BFF 和 Quick Tunnel。仓库提供一个最小权限的 supervisor：先启动 production BFF 并等待本机 readiness，再启动 Quick Tunnel；解析到新的随机 Origin 后，通过本机已登录的 Wrangler 将 Worker `BFF_ORIGIN` 更新为该 Origin，并等待固定 Worker readiness。BFF 或 Tunnel 任一退出时，supervisor 会优雅停止另一进程并以失败退出，由 launchd 有界重启整组进程。
+本机长期承载内测 BFF 时，不再分别手工运行 BFF 和 Quick Tunnel。仓库提供一个最小权限的 supervisor：先启动 production BFF 并等待本机 readiness，再启动 Quick Tunnel；解析到新的随机 Origin 后，通过本机已登录的 Wrangler 将 Worker `BFF_ORIGIN` 更新为该 Origin，并等待固定 Worker readiness。BFF 或 Tunnel 任一退出时，supervisor 会优雅停止另一进程并以失败退出，由 launchd 有界重启整组进程；如果 BFF 与 Tunnel 仍健康但固定 Gateway 暂不可达，supervisor 会持续等待并复查 Gateway，不再反复重启健康进程。2026-08-10 本机 `workers.dev` 存在 DNS 污染，固定 Gateway readiness 因此由外部只读探针确认。
 
 安装前确认 clean commit 已完成 BFF 构建、Wrangler 已登录到正确账号；随后传入公开的 Cloudflare Account ID、固定 Worker Origin，以及与该构建完全一致的 40 位 Git SHA：
 
@@ -412,7 +421,7 @@ Vercel Pro Trial 备选仍使用 `apps/web/vercel.json`：Root Directory 选 `ap
 
    2026-08-06 本次轮换是一次经明确授权的执行例外：当时尚无可用于真实会话 smoke 的已验收内部测试账号，在新式 Secret/Publishable、Auth admin、Storage、公开边界和 18/18 部署验证通过后，Legacy API keys 已禁用，旧 HS256 signing key 已 revoked，并再次通过同组验证。该结果证明新 Key 与部署边界可用，但**不等于真实 Auth 会话前置已通过**；管理员邀请、收信、设密、登录、refresh、logout、找回密码回跳和旧密码失效仍须使用测试邮箱补验。后续轮换继续遵守上一条完整标准顺序，不得以本次例外降低门禁。
 
-4. 关闭公开注册，通过操作员确认的单请求管理员邀请创建内部账号。邀请前在权限为 `0600` 且不入 Git 的 `apps/bff/.env.staging.local` 中确认已有 `SUPABASE_URL` 和新式 `SUPABASE_SERVICE_ROLE_KEY`，临时加入精确稳定 Web origin 和目标邮箱：
+4. 关闭公开注册，通过操作员确认的单请求管理员邀请创建内部账号。Supabase [默认邮件服务只向项目组织成员投递](https://supabase.com/changelog/29370-supabase-auth-changes-to-default-email-provider)，因此在邀请前先确认两个受控邮箱满足当前投递边界；若测试邮箱不是组织成员，必须先在 Dashboard 配置并验证自定义 SMTP，不能把 API 200 当作已收信。SMTP 用户名、密码或 API Key 只进入 Supabase Secret 配置，不写入 `NEXT_PUBLIC_*`、仓库或日志。随后在权限为 `0600` 且不入 Git 的 `apps/bff/.env.staging.local` 中确认已有 `SUPABASE_URL` 和新式 `SUPABASE_SERVICE_ROLE_KEY`，临时加入精确稳定 Web origin 和目标邮箱：
 
    ```env
    WEB_URL=https://supplier-staging-web.chenjie.workers.dev
@@ -489,7 +498,7 @@ pnpm deploy:verify
 
 验证器按顺序执行，避免 Supabase Free 单连接环境因测试自身的并发请求产生假 503；30 秒只是 staging 的单请求上限，不能替代延迟监控或正式 SLA。
 
-再按登录、选品、筛选、收藏、AI 文案、类目/SKU、铺货记录、批量经营、订单、统一异常中心、售后工单和经营看板顺序人工验证。批量经营当前候选包含 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory`、`cleanup`、抖店离线 `change_source` 与独立开关保护的 `edit_sku`。`change_source` 仍只切换版本化采购绑定，必须保持平台 SKU、售价和离线状态不变；只有 `PRODUCT_BATCH_SKU_EDIT_ENABLED=true` 的一次性窗口才允许普通 SKU 完整集合编辑。当前 flag 必须保持 `false`，直到第 44/45 个 migration、当前 SHA 动态 smoke 与真实抖店 SKU E2E 准备完成。
+再按登录、选品、筛选、收藏、AI 文案、类目/SKU、铺货记录、批量经营、订单、统一异常中心、售后工单和经营看板顺序人工验证。批量经营当前候选包含 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory`、`cleanup`、抖店离线 `change_source` 与独立开关保护的 `edit_sku`。`change_source` 仍只切换版本化采购绑定，必须保持平台 SKU、售价和离线状态不变；只有 `PRODUCT_BATCH_SKU_EDIT_ENABLED=true` 的一次性窗口才允许普通 SKU 完整集合编辑。当前 flag 必须保持 `false`，直到真实抖店 SKU E2E、未知结果恢复流程和一次性开启审批全部准备完成。
 
 异常中心先保持 `EXCEPTION_CENTER_SCAN_ENABLED=false`，用两个 Supabase 测试用户验证列表、计数、详情和确认记录完全隔离，再分别准备可清理的发布、订单同步、采购、物流、售后和权益异常。订单域必须覆盖从未同步、水位陈旧、首次同步挂起、授权过期和启用店铺凭证缺失；用户主动停用的 `revoked` 店铺不得重新产生 critical 异常，刚授权或近期首次同步中的店铺也不得提前告警。确认一次六域刷新只关闭权威条件已经消失的 scanner 事项；人为让某一域查询失败时，该域旧事项必须保留。对一条事项写入跟进说明后状态只能变为 `acknowledged`，不能同时关闭；改变来源指纹后必须重新变为 `open`。物流回传失败或成功后平台回读未知必须生成 producer 事项，只有后续回读确认平台已发货才能关闭。所有处理入口只能落在明确白名单的站内路径，包括 `/orders`、`/published`、`/settings`、`/sources` 或 `/after-sales`。样本通过后在维护窗口开启 worker，确认账号批次轮转有界、单账号失败不阻断后续账号且同一实例不重入；生产运行不得继续依赖人工刷新。
 
@@ -516,9 +525,9 @@ pnpm deploy:verify
 
 ## 10. 当前未关闭项
 
-截至 2026-08-08，R0-02 因仓库新增第 44/45 个 migration 已重新变为进行中：staging 为 43/45，当前 SHA CI、最新真实备份恢复、`migrate-forward-once`、45/45、schema/RLS/ACL 与无 Redis 当前候选动态 smoke 未完成。`PRODUCT_BATCH_SKU_EDIT_ENABLED=false`。`dd648f1` shadcn Web、固定 Web/Gateway 和 18 项 smoke 只证明 2026-08-07 的旧候选；R0-03 还缺当前候选部署、真实邮箱 Auth 和外部平台依赖：
+截至 2026-08-10，2026-08-08 的受控迁移与 `d30d302` 后验验证已关闭 R0-02 的 staging migration 与无本机中间件部署门禁：45/45、schema/RLS/ACL、三段 readiness、18/18 smoke 和 runtime-state 原子语义 smoke 均通过。R0-03 仍不能关闭，因为真实邮箱 Auth、真实抖店/1688/图片/LLM E2E、独立生产资源、外部监控和合规尚未完成；所有真实平台、worker、批量执行与 SKU flag 保持 `false`：
 
-旧候选的固定 Gateway + 固定 Cloudflare Web 曾通过 18 项部署验证，包括 live/ready、四个生产文档路由 404、三种鉴权拒绝、OAuth、运维状态/检查/指标、草稿 PUT/DELETE CORS 正向、恶意 Origin 负向 OPTIONS 和 Web 200。远端 Web URL 与 Supabase Site/Redirect URL 配置可继续复用，但当前 BFF 的 `database + runtimeState` readiness 必须在 45/45 后重新验证。
+当前 `d30d302` 已通过 18 项部署验证，包括 live/ready、四个生产文档路由 404、三种鉴权拒绝、OAuth、运维状态/检查/指标、草稿 PUT/DELETE CORS 正向、恶意 Origin 负向 OPTIONS 和 Web 200；该次验证使用当前 Quick Tunnel BFF 与当前本地生产 Web 构建，固定 CORS Origin 仍是 Cloudflare Web。`database + runtimeState` readiness 已在本机、Quick Tunnel 和外部固定 Gateway 验证；固定 Gateway 的当前候选只由外部只读探针证明 readiness，本机 DNS 污染仍需修复或绕开后再恢复本机直接探测能力。
 
 - 2026-08-07 当前候选通过 1,249 项测试、15/15 typecheck、2/2 lint、9/9 build、生产依赖审计、Prisma、63 项运维脚本、7 项 Gateway、Prettier、diff check 与 Cloudflare 无 binding dry-run；[Release gates #32](https://github.com/harzss/supplier/actions/runs/31139134369) 的 verify/browser/images 全绿。部署前发现 2026-08-06 的孤儿 BFF 仍以 `ppid=1` 占用 3001，SIGTERM 无效后只终止已核验的精确 PID；launchd 随后用当前构建接管、刷新 Quick Tunnel 与 Gateway，最终本机和固定 Gateway live/ready 均为 200。远端首页与本地静态产物 SHA256 同为 `ee6ed0a1ab856b4e2736bc3cae9688eca1a3cdd5830a1fa58306db7aa0894328`，主要路由、旧商品 URL 301 和废弃 prototype 404 通过。完整记录见 [2026-08-07 shadcn staging Web release](./evidence/2026-08-07-shadcn-staging-web-release.md)。
 
@@ -530,8 +539,8 @@ pnpm deploy:verify
 - M82 历史候选修复了 CI demo seed 缺 `supplierId` 导致的 pricing-preview 400，并把部署验证从 15 项扩为 18 项；[GitHub Release gates #23](https://github.com/harzss/supplier/actions/runs/30910322944) 在提交 `a48fb43` 上完成 verify、browser、images 三个 job 全绿。该历史 CI 证据现已由 2026-08-06 当前 staging 的 43/43 migration、重部署和 18/18 真实入口复验补充。
 - M83 维护前审计确认十条货源精确为 `mock-1001`～`mock-1010`，当时十条 `supplierId` 全部缺失。2026-08-06 已在最终备份后定向回填全部十条并回读，未运行会覆盖货源与评分的通用 seed；最终审计确认 mock 发布元数据可用。
 - 旧候选 `8ddac05` 没有与 Git SHA 绑定的 BFF 镜像或动态回滚 smoke；43→45 后任何旧 Redis BFF 都不理解 `runtime_states` / SKU fence，不能恢复写流量。维护失败时保持停写并前向修复。保留旧版本只保留 image digest，不保留运行副本，也不得让旧 Redis 锁域与新 PostgreSQL 租约重叠。
-- 第 36～43 个 migration 已实际应用到 staging；第 44/45 个尚未应用。`/published/batch`、`/sources`、`/exceptions`、`/after-sales` 页面存在不代表 SKU 编辑、真实平台或 runtime state 已验收。抖店、1688、LLM 和图片服务仍未配置，相关自动化及 SKU 编辑开关全部关闭。
-- `com.supplier.staging-local` LaunchAgent 的 BFF / Quick Tunnel 守护记录属于旧候选。完成 45/45 并确认本机无 Redis/数据库等常驻中间件后，才可让它接管新 BFF 并重新验证本机与固定 Gateway readiness。Quick Tunnel 无 SLA，只适合内部验证；生产必须迁移到稳定 Tunnel、容器平台或等价受监控托管服务。
+- 第 36～45 个 migration 已实际应用到 staging；页面存在、migration 完成和原子语义 smoke 不代表 SKU 编辑或真实平台已验收。抖店、1688、LLM 和图片服务仍未完成真实联调，相关自动化、worker、批量执行及 SKU 编辑开关全部关闭。
+- `com.supplier.staging-local` LaunchAgent 已由 `d30d302` BFF / Quick Tunnel 接管；本机和 Tunnel readiness 通过，外部固定 Gateway readiness 由外部只读探针确认。旧 Supplier Redis/PostgreSQL 运行容器和运行卷已删除，保留未挂载的历史备份卷。Quick Tunnel 无 SLA，只适合内部验证；生产必须迁移到稳定 Tunnel、容器平台或等价受监控托管服务。
 - Vercel Hobby 只允许非商业个人验证，不作为公司商业内测的回退方案。
 
 以上任一项未关闭时，不得把 R0-03 标记为完成，也不得用该 staging 证据宣称生产可用。

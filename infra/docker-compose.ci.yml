@@ -1,6 +1,5 @@
 services:
-  # 仅供隔离自动化测试使用；staging/runtime 必须直连 Supabase。
-  # 通过 `pnpm db:test:up` 启动；该入口会等待角色 bootstrap healthcheck 完成。
+  # 仅供 GitHub Actions 的隔离自动化测试使用；开发、staging/runtime 必须直连 Supabase。
   postgres:
     image: postgres:15-alpine
     container_name: supplier-postgres
@@ -16,9 +15,6 @@ services:
     volumes:
       - ./postgres/init-supabase-roles.sql:/docker-entrypoint-initdb.d/010-supabase-roles.sql:ro
     healthcheck:
-      # docker-entrypoint-initdb.d only runs for a new volume. Replaying this
-      # idempotent role bootstrap also upgrades older postgres_data volumes
-      # before Prisma migrations are allowed to treat the service as healthy.
       test:
         [
           'CMD-SHELL',

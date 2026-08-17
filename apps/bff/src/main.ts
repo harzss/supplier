@@ -34,8 +34,9 @@ async function bootstrap() {
   }
 
   const port = environment.get<number>('PORT') ?? 3001;
-  await app.listen(port, '0.0.0.0');
-  console.log(`[BFF] listening on 0.0.0.0:${port} (${nodeEnv})`);
+  const host = environment.get<string>('BFF_HOST') ?? '0.0.0.0';
+  await app.listen(port, host);
+  console.log(`[BFF] listening on ${host}:${port} (${nodeEnv})`);
 }
 
 void bootstrap();

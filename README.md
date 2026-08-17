@@ -53,6 +53,6 @@ supplier/
 
 具体环境变量和部署步骤见 [内部测试环境手册](docs/12-internal-staging.md)。常用命令以根目录 `package.json` 和各 workspace 的 `package.json` 为准。
 
-日常开发、预览、staging 与 production 都直接使用托管 Supabase，不启动本机 PostgreSQL、Redis 或其他常驻中间件。`DATABASE_URL` 使用 Supabase transaction pooler，migration 使用同项目 `DIRECT_URL`；创建开发 migration 可执行根目录 `pnpm db:migrate`（需要命名时使用 `make db-migrate name=...`）。
+日常开发、预览、staging 与 production 都直接使用托管 Supabase，不启动本机 PostgreSQL、Redis 或其他常驻中间件。`pnpm dev` 会从 Git 忽略的 `packages/db/.env` 加载同一 Supabase 项目的 transaction pooler 与 migration 连接，并在启动前拒绝 loopback 数据库、`REDIS_URL` 和进程内队列模式。当前内测 BFF 使用 `:6543` transaction pooler 和 `connection_limit=5`，迁移连接只交给 Prisma CLI；创建开发 migration 可执行根目录 `pnpm db:migrate`（需要命名时使用 `make db-migrate name=...`）。
 
-`pnpm db:test:up` / `make test-db-up` 只用于 CI、浏览器回归和恢复演练的可销毁隔离 PostgreSQL，数据位于 tmpfs，测试完成必须执行 `pnpm db:test:down` / `make test-db-down`；它不是开发或部署依赖，禁止被 staging/production 连接。
+本机浏览器回归使用 `pnpm test:browser`，只启动 Web 并拦截 API，不需要数据库、Redis 或 Docker。破坏性的全链路 E2E 只由 GitHub Actions 在 Runner 内创建 tmpfs PostgreSQL，仓库不再提供本机启动该数据库的开发命令；恢复演练的临时数据库仍是灾备门禁，执行后必须删除，不能成为 runtime 依赖。

@@ -5,23 +5,23 @@
 > [00-roadmap.md](./00-roadmap.md) 为准，工程实现证据见
 > [09-main-flow.md](./09-main-flow.md)。
 >
-> **时效说明（2026-08-08）**：现有 Supabase 项目继续仅按 staging 管理。2026-08-06 的维护窗口完成第 34～43 个 migration、43/43、schema/RLS/ACL、Web/BFF/Gateway 与 18/18 smoke；这些仍是上一候选的有效历史证据。仓库现新增第 44 个 SKU 编辑和第 45 个 Supabase PostgreSQL `runtime_states` migration，staging 当前为 **43/45**，两条均未应用。当前候选已移除 Redis 与 `REDIS_URL`，readiness 改为 `database + runtimeState`，但当前 SHA CI、最新真实备份恢复、43→45 受控迁移、当前候选动态 smoke 及真实平台 E2E 尚未完成。因此既不能沿用旧 43/43 smoke 宣称当前候选已部署，也不能宣称生产可用。
+> **时效说明（2026-08-10，`d30d302`）**：Supabase staging 已在 2026-08-08 完成第 44、45 个 migration；当前严格审计为 **45/45、pending 0、schema diff matched**，42/42 public 表启用 RLS，`anon` / `authenticated` 的表、sequence 与 default privileges 均为 0。停写窗口前的 43→45 备份恢复演练和单次 `migrate-forward-once` 已通过；当前 BFF 在本机、Quick Tunnel 与外部固定 Gateway 的 readiness 均为 `database + runtimeState`。18/18 部署 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state 原子语义 smoke 通过。本机旧 Supplier PostgreSQL/Redis 运行容器和运行卷已删除，保留未挂载的历史备份卷。以上只证明当前 staging 候选，不证明独立生产资源、真实平台闭环或生产可用。
 
-## 1. 当前结论（治理与技术证据截至 2026-08-08）
+## 1. 当前结论（治理与技术证据截至 2026-08-10）
 
-**结论不变：当前不能宣称生产可用或直接正式上架。** 真实抖店与 1688 小额订单 E2E、生产 Supabase、目标云计算、监控告警、恢复演练、服务市场商业生命周期和法务合规仍需关闭 P0 门禁。Redis 已从当前架构移除，不再是生产资源门禁；替代门禁是第 45 个 migration、`runtime_states` 的 RLS/ACL/原子语义、容量与故障动态验收。以下内容保留为 M13～M67 的工程历史证据，不能替代新的目标环境验收。
+**结论不变：当前不能宣称生产可用或直接正式上架。** staging 的 45/45、`runtime_states`、当前 BFF/Gateway 和无本机中间件门禁已经关闭；仍未关闭的是两个真实 Auth 邮件账号生命周期、真实抖店与 1688 小额订单 E2E、独立生产 Supabase 与计算资源、外部监控告警、生产备份恢复/切流演练、服务市场商业生命周期和法务合规。以下内容保留为 M13～M67 的工程历史证据，不能替代新的生产环境验收。
 
-上一 staging 候选已完成最终备份、精确十条 mock backfill、33→43 migration、schema/RLS/ACL 复核、Storage、关闭公开注册、匿名访问拒绝、Cloudflare Web/Gateway、旧 Redis AOF/BFF readiness 与告警 firing/resolved smoke，以及旧 Redis / 数据库队列非空重启实测。所有 Redis 内容只证明当时候选，已由 M87 架构取代。当前 M87 候选尚未应用第 44/45 个 migration，也尚未以固定 URL 重跑 `database + runtimeState` 的 18/18 部署验证。真实邀请邮箱的收信、设密、登录、刷新、退出、恢复邮件回跳和旧密码失效仍未执行；当前 staging 历史证据不能替代当前候选或生产部署证据。
+2026-08-08 staging 已完成 43→45 前向演练与单次迁移；当前 `d30d302` 又完成 schema/RLS/ACL 严格复核、`database + runtimeState` 三段 readiness、18/18 部署 smoke 和 runtime-state 原子语义 smoke。18/18 的 BFF 入口是当前 Quick Tunnel，Web 入口是当前本地生产构建；固定 Gateway 的当前候选只由外部探针证明 readiness。`d30d302` 的 [Release gates](https://github.com/harzss/supplier/actions/runs/31208812362) 与 [Security scans](https://github.com/harzss/supplier/actions/runs/31208812359) 全绿。所有真实平台、后台 worker、批量执行与 SKU 编辑开关仍保持 `false`。迁移后归档保存在 Git 忽略路径 `tmp/staging-backups/supplier-staging-post-45-d30d302-20260810.dump`，大小 248508 bytes，SHA256 `0a15a148e5f973bd87ec72851728ae16cf063ddea466b92a762fa39b63061ae4`，TOC 校验通过；该 post-45 归档尚未单独恢复，不能写成已完成恢复验收。恢复门禁的有效证据来自迁移前归档完成的 43→45 隔离恢复演练。真实邀请邮箱的收信、设密、登录、刷新、退出、恢复邮件回跳和旧密码失效仍未执行。
 
 M85 已补齐两个不同 Supabase 用户的当前 JWT 会话与 Favorites 双向隔离自动验收器，并在异常路径中执行有界删除回读、会话注销和 refresh token 失效检查；PUT 结果不确定时会把即时补偿明确标记为未证明，避免把迟到提交误报为已清理。同时固定单账号 Auth 验收目标，并修复不完整 session、grant 5xx/网络不确定及注销后 refresh 探针异常时的会话清理遗漏。该验收器尚未使用两个真实 staging 账号执行，也不能单独证明刷新前后稳定的内部用户映射或覆盖订单、异常中心、售后等其他业务域，因此身份与租户隔离 P0 门禁状态不变。
 
 M86 收紧会造成漏单、错单或重复采购的应用侧边界。1688 采购的恢复、付款状态和物流轮询现在只使用采购创建时持久化的原 `buyerShopId`；账号切换、账号/远端单号缺失、整单绑定冲突或原账号不可用时安全停止，不会改绑当前买家或在新账号重复创建相同 `outOrderId`。active 轮询以 `buyerShopId + attemptNo + outOrderId + orderId1688 + status + retryEligible + exceptionStatus + syncRevision` 和销售订单售后允许态原子认领，旧 attempt 的迟到响应不能覆盖新采购；下单结果已知或未知时若并发进入退款/售后，系统保留远端单号或原 `outOrderId` 并转为 `action_required`，要求人工按原 attempt 核对。抖店与 1688 Token refresh 将网络、限流、5xx、畸形字段和未知业务错误保留为 active + 503，只有明确 refresh credential 拒绝或规范化后的有效主体确实不一致才标记 expired，避免瞬时平台故障把店铺移出订单同步。该增量通过 Platform SDK 204/204、1688 采购与 ShopToken 42/42、全仓 1,301 项测试、15/15 typecheck、2/2 lint、9/9 build、92/92 运维脚本及生产依赖审计；提交 `2712995` 的 [Release Gates #35](https://github.com/harzss/supplier/actions/runs/31166983502) 和 [Security scans #1](https://github.com/harzss/supplier/actions/runs/31166983544) 全绿，但尚未用真实买家账号切换、真实过期 Token 或小额采购验证，因此真实平台 P0 门禁状态不变。
 
-M87 新增普通平台 SKU 完整集合编辑和 Supabase PostgreSQL runtime state。SKU 编辑只接受连续强回读确认的 `offline/draft` 商品，保留既有平台 SKU ID/key、售价与 side fields，新增 SKU 使用服务端稳定 key 和显式售价；支持规格增删、多个自定义维度/值与 1688 spec 一对一重映射，`SKU_WRITE_STARTED/SKU_RESULT_UNKNOWN` 未核验时阻断其他平台写入。`PRODUCT_BATCH_SKU_EDIT_ENABLED` 默认 `false`。第 45 个 migration 的 `runtime_states` 以 JSON value、UUID owner lease 或正整数 fixed-window 三种互斥模式，承载 OAuth state/result、加密 Token refresh recovery、订单/商品租约、1688 limiter 与 AI 精确缓存；`anon` / `authenticated` 无表权限，readiness 检查 `database + runtimeState`。这只是应用侧候选：staging 43/45、当前 SHA CI、最新真实备份恢复、当前候选部署与真实抖店 E2E 均未完成。
+M87 新增普通平台 SKU 完整集合编辑和 Supabase PostgreSQL runtime state。SKU 编辑只接受连续强回读确认的 `offline/draft` 商品，保留既有平台 SKU ID/key、售价与 side fields，新增 SKU 使用服务端稳定 key 和显式售价；支持规格增删、多个自定义维度/值与 1688 spec 一对一重映射，`SKU_WRITE_STARTED/SKU_RESULT_UNKNOWN` 未核验时阻断其他平台写入。第 44/45 个 migration 已在 staging 应用并通过 schema、权限、readiness 与原子语义 smoke，但 `PRODUCT_BATCH_SKU_EDIT_ENABLED=false`，真实抖店 SKU E2E 尚未执行；因此仍只能把 SKU 编辑视为关闭状态的 staging 候选。
 
 R2-01 当前已有跨页首次铺货进度、利润试算、统一风险预检、服务端草稿、用户内请求幂等键和上下文绑定的 OAuth 安全回跳。回跳目标只接受站内相对地址并绑定进一次性 state；callback 只在 URL 携带短期一次性、用户绑定的结果 token，登录用户消费后才能读取成功、店铺或错误信息，跨用户、伪造和重放均拒绝。草稿恢复后强制重新试算/预检，多标签旧 generation 不能覆盖新草稿，重复点击和响应丢失恢复原任务。第 34/35 个 migration 与当前候选已经进入 staging 并通过部署 smoke，但尚缺真实店 E2E 和 5 人无指导可用性验收，因此 R2-01 仍为进行中。
 
-R2-02 当前有九个候选代码切片。M78 的离线安全换源继续只切采购 binding；M87 新增普通 SKU 完整集合编辑，但只允许 `offline/draft`、独立开关默认关闭，并以完整权威快照、revision、共享商品租约与未知结果专用核验保护。第 36～43 个 migration 已在 staging；第 44 个 SKU migration 和第 45 个 runtime state migration 尚未应用。双租户采集、真实 1688 配额/数据口径、30 天订单历史回补、真实抖店 SKU 编辑与其他批量行为仍未验收，因此不能把九个切片写成 R2-02 完成或生产可用。
+R2-02 当前有九个候选代码切片。M78 的离线安全换源继续只切采购 binding；M87 新增普通 SKU 完整集合编辑，但只允许 `offline/draft`、独立开关默认关闭，并以完整权威快照、revision、共享商品租约与未知结果专用核验保护。第 36～45 个 migration 已在 staging；双租户采集、真实 1688 配额/数据口径、30 天订单历史回补、真实抖店 SKU 编辑与其他批量行为仍未验收，相关 worker、批量执行和 SKU flag 均保持关闭，因此不能把九个切片写成 R2-02 完成或生产可用。
 
 R2-03 当前已有统一异常中心 staging 候选。六个业务域独立扫描，单域读取失败时保留旧事项；扫描器与业务生产者事项分离，来源指纹变化会使旧确认失效并重新打开。订单域会识别从未同步、水位陈旧、首次同步挂起、授权失效和凭证缺失，并以同一店铺 dedupe 防止候选消失造成误关闭。有界后台 worker 可按活跃账号轮转，单实例防重入并隔离单账号失败；它默认关闭，必须在真实隔离验收后显式开启。运营确认只表示已接手，只有权威来源恢复或平台回读成功才能关闭。第 41 与 43 个 migration 及页面已部署 staging，但尚未使用真实双租户和六域异常样本验证，因此不能标记完成。
 
@@ -29,7 +29,7 @@ R2-05 当前已有售后工单基础闭环 staging 候选。订单同步与主�
 
 M80 的全仓 `pnpm test` 14/14 个任务共 1182 项（BFF 807、Web 99、DB 12、Platform SDK 166、Crawler 62、Entitlements 14、LLM 8、Scoring 14）证据保持有效。M81 新增第 43 个前向约束修复及升级后断言后，候选代码测试合计 1192/1192（其中 BFF 807/807、DB 22/22），一次性 PostgreSQL 15 已完成 43/43 deploy/status、live schema diff、三个回滚式负向探针与合法状态正向探针，并再次通过 public schema RLS/ACL 断言。M82 修复 CI seed 缺少供应商标识导致的 pricing-preview 400，并把部署验证扩为 PUT/DELETE CORS 正向与恶意 Origin 负向探针；[GitHub Release gates #23](https://github.com/harzss/supplier/actions/runs/30910322944) 在提交 `a48fb43` 上完成 verify、browser、images 三个 job 全绿。这些是维护前 CI 证据；2026-08-06 已进一步在真实 staging 完成最终备份、十条 backfill、43/43 migration、schema/RLS/ACL 复核、候选重部署、Key 轮换和 18/18 smoke。真实抖店/1688 E2E、真实异常/售后工单 E2E 和任意平台 SKU 编辑仍未完成。以下 M13～M67 文字是按里程碑当时证据保留的历史账本，不能覆盖本节最新状态。
 
-M83 把 staging mock 发布元数据纳入只读审计。维护窗口再次确认十条货源精确为 `mock-1001`～`mock-1010`，且满足当时的 33/43、binding 表不存在、项目确认和安全字段门禁；专用事务随后只补齐十条确定性 `supplierId`，锁内回读与维护后审计均确认 `pendingUpdates=0`。通用 seed 仍禁止用于 staging，避免覆盖货源与评分。随后第 34～43 个 migration 已单次应用，当时为 43/43 且 schema diff matched；仓库新增 44/45 后，staging 当前为 43/45。
+M83 把 staging mock 发布元数据纳入只读审计。维护窗口再次确认十条货源精确为 `mock-1001`～`mock-1010`，且满足当时的 33/43、binding 表不存在、项目确认和安全字段门禁；专用事务随后只补齐十条确定性 `supplierId`，锁内回读与维护后审计均确认 `pendingUpdates=0`。通用 seed 仍禁止用于 staging，避免覆盖货源与评分。第 34～43 个 migration 在 2026-08-06 单次应用；第 44/45 个已在 2026-08-08 单次前向窗口应用，当前为 45/45 且 schema diff matched。
 
 本次已经完成的 33→43 窗口没有已资格化的旧 BFF 可写回滚：`8ddac05` 虽预计可连接新 schema，却不会维护 M34～M43 的新业务语义，且没有与 Git SHA 绑定的旧镜像 digest 和动态 smoke。维护期间始终执行“失败保持停写并前向修复”，未把旧 BFF 恢复为写流量；相同约束继续适用于后续生产迁移。
 
@@ -37,7 +37,7 @@ M83 把 staging mock 发布元数据纳入只读审计。维护窗口再次确�
 
 > 本节及第 3～10 节出现的 Redis 容器、`REDIS_URL`、Redis 锁、恢复记录和 `PING` 都是旧候选的历史证据，已由 M87 / migration 45 的 Supabase PostgreSQL `runtime_states` 取代。不得按这些历史段落启动本机 Redis、配置当前环境或定义当前 readiness。
 
-按 M13～M67 历史时点，核心业务和早期生产基座已经具备大量应用侧能力，但当时新增 migration、目标环境和真实平台验收仍不完整。该账本中的“生产 Redis P0”已被 M87 取代；**当前仍不可直接面向真实多租户商家上线**，真正未关闭的是生产 Supabase / `runtime_states` 动态验收、当前 SHA 部署与恢复演练、真实 Auth 邮件生命周期、抖店/1688 小额闭环、外部告警/监控和法务合规。
+按 M13～M67 历史时点，核心业务和早期生产基座已经具备大量应用侧能力，但当时新增 migration、目标环境和真实平台验收仍不完整。该账本中的“生产 Redis P0”已被 M87 取代；**当前仍不可直接面向真实多租户商家上线**，真正未关闭的是独立生产 Supabase / `runtime_states` 动态验收、生产部署与备份恢复/切流演练、真实 Auth 邮件生命周期、抖店/1688 小额闭环、外部告警/监控和法务合规。
 
 M36 已保证铺货任务/job 与 worker 状态迁移的事务一致性；M37 已为每个任务/店铺固化抖店外部商品编码，创建结果不确定或本地写入失败时可恢复同一平台商品。M21～M37 期间新增的业务 migration（含类目、售后财务和铺货恢复键）仍未应用到目标 PostgreSQL。当前优先验证功能闭环，不重新构建 Docker 镜像、不部署。
 
@@ -103,27 +103,27 @@ M67 已将已发货物流修复改为持续租约：服务每 60 秒按 `repair 
 
 ## 2. 准备度矩阵
 
-| 领域                     | 当前状态              | 生产硬门禁                                                                                                                                                                                              |
-| ------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 生产配置                 | ✅ 基座完成           | 缺少 Supabase PostgreSQL、认证、加密密钥或安全 CORS 时拒绝启动；不得配置或依赖 `REDIS_URL`                                                                                                              |
-| 存活/就绪探针            | 🔄 P0 待部署          | `/api/health/live` 检查进程；`/api/health/ready` 实查最新 migration、database 与 `runtimeState`，失败返回 503；staging 43/45 尚不能让当前候选 ready                                                     |
-| API 防护                 | ✅ 基座完成           | 全局 120 次/分钟限流；生产默认关闭 Swagger；仅允许显式 HTTPS CORS origin                                                                                                                                |
-| 优雅退出                 | ✅ 基座完成           | Nest shutdown hooks 与 Prisma 断连；当前候选没有 Redis 客户端或 Redis 退出路径                                                                                                                          |
-| 发布门禁                 | 🔄 P0 当前 SHA 待验收 | 代码检查、三镜像构建、migration、部署 smoke、非 root 与优雅退出已纳入 CI；M87 当前 SHA 尚无完整 release gates 结果，旧 SHA 绿灯不能替代                                                                 |
-| 依赖与 SAST              | 🔄 P0 当前 SHA 待验收 | M86 提交 `2712995` 的历史 Release/Security gates 全绿；M87 当前 SHA 的 dependency audit、CodeQL、verify、browser、images 尚未完成，之后仍须设为 main required 并验收告警处置流程                        |
-| 身份与租户隔离           | 🔄 P0 待验收          | 应用侧已验证 JWT、内部用户映射和数据隔离；staging 须完成真实邮件账号生命周期，生产 Auth 项目还须独立配置和验收                                                                                          |
-| 真实抖店闭环             | 🔄 P0 阻塞            | 发布幂等恢复、状态同步、修正重提、订单、物流应用链路已通；Token 瞬时刷新故障不再误失效店铺；须用测试店验收 `outer_product_id`、`quality_list`、`product.detail`、`editV2`、Token 失效与物流             |
-| 真实 1688 货源           | 🔄 P0 待联调          | 搜索/详情 adapter 与持久批量采集应用侧已通；须验证方案订购、真实 buyer Token、配额/曝光回传，以及至少两个受控买家账号的价格和库存口径。未证明全局一致前不得配置 `global_offer` 或启用 worker            |
-| 真实 1688 采购           | 🔄 P0 待联调          | 应用侧下单恢复、付款状态、物流、多包回传、原买家账号绑定及下单结果/售后并发人工处置已通；须用两个真实买家账号验证 T-06 切换隔离、`outOrderId` 判重/反查与结果未知处置，并完成小额验收后才能打开采购开关 |
-| PostgreSQL runtime state | 🔄 P0 待部署          | 第 45 个 migration 已定义 `runtime_states`、RLS/ACL、TTL、租约与 fixed-window 断言；须完成 staging/生产 migration、原子语义、过期清理、并发租约、故障摘流与容量验证，不再采购 Redis                     |
-| 部署与回滚               | 🔄 P0 待演练          | 上一候选在 staging 完成 43/43 与 18/18 smoke；当前候选仍须完成 43→45、无 Redis BFF/Gateway/readiness smoke，并在独立生产目标完成切流、前向修复和备份恢复演练                                            |
-| 审计与告警               | 🔄 P0 待演练          | 应用侧审计、Prometheus、签名 Webhook 和告警状态机已完成；须接入真实接收端/监控平台并演练                                                                                                                |
-| Storage / GPU 图片链路   | 🔄 P1                 | 公开 Storage 与真实图片 worker 联调；失败继续保持降级而不误报成功                                                                                                                                       |
-| 真实平台类目/属性/资质   | 🔄 P0 待验收          | 这是首发抖店发布必经链路；schema 与应用候选已进入 staging，仍须用真实测试店验收目录、Top3、属性与动态资质闭环                                                                                           |
-| 批量商品经营             | 🔄 P0 进行中          | 第 36～43 个 migration 已进入 staging；SKU 编辑 migration 44 尚未应用且 flag 默认关闭。须验证双租户、30 天订单历史、真实状态/标题/价格/库存/清理/换源/SKU 编辑及所有未知结果恢复                        |
-| 生产数据库 schema        | ❌ P0 阻塞            | staging 仅 43/45，生产数据库也尚未独立验收；须完成真实备份恢复、单一 migration job、45/45、schema diff、SKU/runtime state 断言、RLS/ACL 与 readiness；staging 不能替代生产证据                          |
-| 服务市场商业生命周期     | ❌ P0 阻塞            | 须完成订购、试用、续费、退款、到期、卸载回调，以及验签、幂等、权益同步和对账异常路径                                                                                                                    |
-| 法务与平台合规           | ❌ P0 阻塞            | 隐私政策、用户协议、数据处理清单、AI 内容标识、备案/资质和应急演练                                                                                                                                      |
+| 领域                     | 当前状态          | 生产硬门禁                                                                                                                                                                                              |
+| ------------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 生产配置                 | ✅ 基座完成       | 缺少 Supabase PostgreSQL、认证、加密密钥或安全 CORS 时拒绝启动；不得配置或依赖 `REDIS_URL`                                                                                                              |
+| 存活/就绪探针            | ✅ staging 已验证 | `d30d302` 本机、Quick Tunnel 与外部固定 Gateway 均返回最新 migration、`database + runtimeState` ready；独立生产入口仍须重复验收                                                                         |
+| API 防护                 | ✅ 基座完成       | 状态变更请求 120 次/分钟限流使用 Supabase `runtime_states` 原子计数，不保留进程内计数；只读流量由鉴权、租户条件和边缘防护约束；生产默认关闭 Swagger；仅允许显式 HTTPS CORS origin                       |
+| 优雅退出                 | ✅ 基座完成       | Nest shutdown hooks 与 Prisma 断连；当前候选没有 Redis 客户端或 Redis 退出路径                                                                                                                          |
+| 发布门禁                 | 🔄 P0 生产待验收  | `d30d302` 已在 45/45 的 staging 完成严格审计、18/18 smoke 与原子语义 smoke；仍须在独立生产目标重复镜像、迁移、非 root、优雅退出、切流与前向修复门禁                                                     |
+| 依赖与 SAST              | 🔄 P0 生产待验收  | `d30d302` 的 Release gates verify/browser/images 与 Security scans dependency-audit/CodeQL 全绿；仍须设为生产分支 required checks 并验收告警处置流程                                                    |
+| 身份与租户隔离           | 🔄 P0 待验收      | 应用侧已验证 JWT、内部用户映射和数据隔离；先确认两个受控邮箱可由当前 SMTP 投递（非组织成员不能假定默认 SMTP 可用），再完成 staging 真实邮件账号生命周期；生产 Auth/SMTP 还须独立配置和验收              |
+| 真实抖店闭环             | 🔄 P0 阻塞        | 发布幂等恢复、状态同步、修正重提、订单、物流应用链路已通；Token 瞬时刷新故障不再误失效店铺；须用测试店验收 `outer_product_id`、`quality_list`、`product.detail`、`editV2`、Token 失效与物流             |
+| 真实 1688 货源           | 🔄 P0 待联调      | 搜索/详情 adapter 与持久批量采集应用侧已通；须验证方案订购、真实 buyer Token、配额/曝光回传，以及至少两个受控买家账号的价格和库存口径。未证明全局一致前不得配置 `global_offer` 或启用 worker            |
+| 真实 1688 采购           | 🔄 P0 待联调      | 应用侧下单恢复、付款状态、物流、多包回传、原买家账号绑定及下单结果/售后并发人工处置已通；须用两个真实买家账号验证 T-06 切换隔离、`outOrderId` 判重/反查与结果未知处置，并完成小额验收后才能打开采购开关 |
+| PostgreSQL runtime state | ✅ staging 已验证 | migration 45、RLS/ACL、租约、一次性消费、fixed-window 与 readiness smoke 已通过；生产仍须验证容量、延迟、故障摘流和清理策略，不再采购 Redis                                                             |
+| 部署与回滚               | 🔄 P0 生产待演练  | staging 43→45 备份恢复演练、单次前向迁移、无 Redis BFF/Gateway 与 18/18 smoke 已通过；独立生产目标仍须完成自己的备份恢复、切流和前向修复演练                                                            |
+| 审计与告警               | 🔄 P0 待演练      | 应用侧审计、Prometheus、签名 Webhook 和告警状态机已完成；须接入真实接收端/监控平台并演练                                                                                                                |
+| Storage / GPU 图片链路   | 🔄 P1             | 公开 Storage 与真实图片 worker 联调；失败继续保持降级而不误报成功                                                                                                                                       |
+| 真实平台类目/属性/资质   | 🔄 P0 待验收      | 这是首发抖店发布必经链路；schema 与应用候选已进入 staging，仍须用真实测试店验收目录、Top3、属性与动态资质闭环                                                                                           |
+| 批量商品经营             | 🔄 P0 进行中      | migration 36～45 已进入 staging，但所有真实 worker、批量执行与 SKU 编辑 flag 均为 `false`；须验证双租户、30 天订单历史、真实状态/标题/价格/库存/清理/换源/SKU 编辑及所有未知结果恢复                    |
+| 生产数据库 schema        | ❌ P0 阻塞        | staging 已 45/45、schema diff matched、42/42 RLS 且客户端 ACL/default privileges 为 0；生产数据库尚未独立完成备份恢复、单一 migration job、断言、权限和 readiness，staging 不能替代生产证据             |
+| 服务市场商业生命周期     | ❌ P0 阻塞        | 须完成订购、试用、续费、退款、到期、卸载回调，以及验签、幂等、权益同步和对账异常路径                                                                                                                    |
+| 法务与平台合规           | ❌ P0 阻塞        | 隐私政策、用户协议、数据处理清单、AI 内容标识、备案/资质和应急演练                                                                                                                                      |
 
 ## 3. 历史工程证据：M13 已落地的运行规则
 
@@ -352,7 +352,7 @@ git diff --check
 - 生产 Web 漏配认证或 HTTP BFF/Supabase origin 时安全失败，不展示商家工作台
 - `/api/health/live` 返回 200
 - `/api/health/ready` 仅在最新 migration、`database` 与 `runtimeState` 都可用时返回 200；响应不得再出现 Redis 检查
-- `/api/health/ready` 必须确认最新必需 migration `20260807150000_add_runtime_state_store` 已完成且未回滚，并能查询 `runtime_states`；staging 当前 43/45，应用当前候选前必须保持 503
+- `/api/health/ready` 必须确认最新必需 migration `20260807150000_add_runtime_state_store` 已完成且未回滚，并能查询 `runtime_states`；`d30d302` staging 已在本机、Quick Tunnel 与外部固定 Gateway 验证 200，生产部署仍须独立重复
 - `PRODUCT_BATCH_ENABLED=false` 时批量商品预览不产生平台副作用、确认执行返回 503；启用后支持 `online`、`offline`、`edit_title`、`edit_price`、`sync_inventory`、`cleanup`、抖店离线 `change_source` 与受独立开关保护的 `edit_sku`。`PRODUCT_BATCH_SKU_EDIT_ENABLED` 默认 `false`；只有 migration 44、真实 `offline/draft` 强回读、SKU 规则/完整集合、1688 spec 映射与未知结果核验通过后，才可在一次性窗口开启。所有未核验 fence 必须阻断完整编辑、普通状态同步、库存 worker 与其他平台写入
 - `SOURCE_IMPORT_ENABLED=false` 时可读取已有采集任务但确认执行返回 503；生产启用必须同时具备 1688 AppKey/AppSecret、HTTPS OAuth 回调和 `ALIBABA_1688_SOURCE_DATA_SCOPE=global_offer`。预览不得调用详情或请求用户 URL；worker 必须重新校验任务用户、buyer Shop、Token、Supabase fixed-window limiter 和 item 所有权
 - 统一异常中心必须验证两个真实账号互不可见；六域刷新中任一域故障不得关闭该域旧事项；确认跟进不能把来源置为已恢复；来源指纹变化必须重新打开；只有权威扫描恢复或生产者平台回读证据才能关闭；返回的处理入口必须保持站内白名单路径

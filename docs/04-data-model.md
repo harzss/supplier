@@ -1,11 +1,11 @@
 # 核心数据模型
 
-> 当前数据层：Supabase / PostgreSQL 17.6（业务主库、持久队列与 `runtime_states`）+ Supabase Auth + Supabase Storage；staging / production 不再依赖 Redis，本机也不运行中间件。Milvus 为后续向量规模化选项。
+> 当前数据层：Supabase / PostgreSQL 17.6（业务主库、持久队列与 `runtime_states`）+ Supabase Auth + Supabase Storage；staging / production 不再依赖 Redis，本机旧 Redis/Postgres 运行容器和运行卷已删除，保留未挂载的历史备份卷。Milvus 为后续向量规模化选项。
 > 货源大表（source_products）若达到亿级再考虑 Citus 分区或独立 PG 集群。
 
 > **权威说明**：当前可执行数据库定义以 `packages/db/prisma/schema.prisma` 和 `packages/db/prisma/migrations/` 为准。下方 MySQL DDL 是早期容量设计草案，不能用于当前环境建库、迁移或 schema diff。
 
-> **2026-08-08 当前状态**：2026-08-06 的维护窗口已把 staging 推进到当时的 43/43，并完成十条 mock 货源定向 `supplierId` backfill、schema diff 与 41/41 public 表 RLS/ACL 复核；但仓库现已新增第 44 个 SKU 编辑 migration 和第 45 个 `runtime_states` migration，staging 因而是 **43/45**，两条均未应用。下文写有“43/43 已应用”的内容是 2026-08-06 历史证据，不代表当前仓库最新。当前 SHA CI、最新真实备份恢复以及抖店、1688、Auth、LLM、图片服务 E2E 仍未完成，不能据此宣称生产可用。
+> **2026-08-10 当前状态**：保留 2026-08-06 的 43/43 阶段证据；Supabase staging 已在 2026-08-08 应用至 **45/45**，当前 `d30d302` 的严格审计确认 pending 0、schema diff matched。42/42 public 表均启用 RLS，`anon` / `authenticated` 的表、sequence 与 default privileges 均为 0；真实一致性备份的隔离 43→45 恢复演练和 SKU/runtime-state 专用断言已通过。真实 Auth 邮件、抖店/1688、LLM、图片服务 E2E 与独立生产资源仍未完成，不能据此宣称生产可用。
 
 ## 1. 实体关系（ER 概览）
 
@@ -263,7 +263,7 @@ erDiagram
 
 ## 3. 当前批量商品操作契约
 
-`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `online`（批量安全上架）、`offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）、`sync_inventory`（同步并核验 1688 库存）、`cleanup`（基于订单证据的滞销安全下架）、`change_source`（抖店离线安全换源）与候选 `edit_sku`（普通 SKU 完整集合编辑）。`change_source` 只切换版本化采购绑定，不修改平台 SKU、售价或上下架状态；`edit_sku` 由独立开关控制且默认关闭，只允许连续强回读确认的 `offline/draft` 商品。第 44 个 migration 与真实抖店 E2E 尚未完成，因此它仍是应用侧候选。
+`product_batch_tasks` 与 `product_batch_items` 是 R2-02 的 item 级持久执行模型。当前应用层允许 `online`（批量安全上架）、`offline`（批量下架）、`edit_title`（批量改标题）、`edit_price`（批量改价）、`sync_inventory`（同步并核验 1688 库存）、`cleanup`（基于订单证据的滞销安全下架）、`change_source`（抖店离线安全换源）与候选 `edit_sku`（普通 SKU 完整集合编辑）。`change_source` 只切换版本化采购绑定，不修改平台 SKU、售价或上下架状态；`edit_sku` 由独立开关控制且默认关闭，只允许连续强回读确认的 `offline/draft` 商品。第 44 个 migration 已应用，但真实抖店 E2E 尚未完成，因此它仍是应用侧候选。
 
 ### 3.1 `product_batch_tasks`
 
@@ -367,7 +367,7 @@ erDiagram
 - `sku_spec_snapshot` 保存商品状态/审核码、类目、商品类型、起售类型，以及按稳定平台 SKU key 排序的 1～100 个 SKU；每项保留平台 SKU ID/key、价格、库存、图片/编码等 side fields 和有序规格属性。
 - 平台 SKU ID、key 与规格组合必须各自唯一；规格维度最多 3 个。非自定义属性/值 ID 不得重复，自定义 ID `0` 使用名称参与身份，不能只按数值 ID 合并。
 - 价格、库存与规格快照在同一平台强回读后同步推进；SKU 集合改变时，价格/库存和当前采购 binding 路由必须共同校验，避免新规格存在但采购或库存无法落到对应 1688 spec。
-- `PRODUCT_BATCH_SKU_EDIT_ENABLED=false` 是当前 staging 默认值；第 44 个 migration 尚未应用，也未完成真实抖店编辑/未知结果恢复 E2E。
+- `PRODUCT_BATCH_SKU_EDIT_ENABLED=false` 是当前 staging 值；第 44 个 migration 已应用，但尚未完成真实抖店编辑/未知结果恢复 E2E。
 
 ### 3.11 Supabase PostgreSQL 运行状态
 
@@ -383,7 +383,7 @@ erDiagram
 | fixed window | 1688 全局采集限流以单条 upsert 原子递增并返回剩余窗口；状态存储不可用时 fail-closed                                               |
 | 隔离         | 表启用 RLS，但没有客户端 policy；`anon` / `authenticated` 的全部表权限均撤销，只允许 BFF 数据库身份访问                           |
 
-当前使用范围包括 OAuth state/result、加密 Token refresh recovery、订单同步租约、商品平台写入租约、1688 fixed-window limiter 和 AI 精确缓存。readiness 的 `runtimeState` 检查直接探测该表，并与最新 migration 检查共同决定是否接流。过期行由每次写入后的有界清理（最多 100 行）回收；清理失败只告警，不使已经完成的原子操作回滚。staging 当前为 43/45，因此本节仍是未部署候选；只有第 44、45 个 migration、schema diff、RLS/ACL、真实备份恢复和候选动态 smoke 全部通过后才能写成 staging 已验收。
+当前使用范围包括 OAuth state/result、加密 Token refresh recovery、订单同步租约、商品平台写入租约、1688 fixed-window limiter 和 AI 精确缓存。readiness 的 `runtimeState` 检查直接探测该表，并与最新 migration 检查共同决定是否接流。过期行由每次写入后的有界清理（最多 100 行）回收；清理失败只告警，不使已经完成的原子操作回滚。2026-08-10，staging 已达到 45/45、pending 0，schema diff、42/42 public 表 RLS/ACL、真实备份恢复 43→45 演练与 runtime-state store/read/consume/lease/renew/release 动态验证全部通过；这证明 staging 数据与协调状态基线可用，不替代真实 Auth、平台 E2E 或生产环境验收。
 
 ## 4. 核心表 Schema（历史 MySQL 设计草案）
 

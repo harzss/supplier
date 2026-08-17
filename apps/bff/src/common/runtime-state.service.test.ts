@@ -45,11 +45,15 @@ describe('RuntimeStateService', () => {
 
     await expect(service.takeFixedWindow('rate:1688', 5, 1_000)).resolves.toEqual({
       allowed: true,
+      count: 5,
       retryAfterMs: 0,
+      timeToExpireMs: 700,
     });
     await expect(service.takeFixedWindow('rate:1688', 5, 1_000)).resolves.toEqual({
       allowed: false,
+      count: 6,
       retryAfterMs: 650,
+      timeToExpireMs: 650,
     });
   });
 

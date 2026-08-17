@@ -2,7 +2,7 @@
 
 > 本文同时记录当前 MVP 与目标架构。当前候选形态是 Next.js Web + NestJS BFF 模块化单体、Supabase（PostgreSQL / Auth / Storage）、PostgreSQL 持久队列与 `runtime_states` 短期协调状态；staging / production 不再配置 `REDIS_URL`，本机也不运行 Redis。Go 微服务、Kafka、Temporal、Milvus、ClickHouse 与 K8s 属于后续演进，不能当作当前已上线能力。
 >
-> **状态边界（2026-08-08）**：上述 Supabase-only runtime state 已进入应用候选与第 45 个 migration，但 staging 仍为 43/45，第 44、45 个 migration 尚未应用；当前 SHA CI、真实备份恢复和真实抖店/1688 E2E 仍未完成，因此不能表述为生产可用。
+> **状态边界（2026-08-10）**：Supabase staging 已在 2026-08-08 应用至 45/45；`d30d302` 的严格审计确认 pending 0、schema diff matched，42/42 public 表 RLS 与客户端表、sequence、default privileges 隔离均通过，真实备份恢复 43→45 演练也已通过。本机 BFF、Quick Tunnel 和外部固定 Gateway 的 `database + runtimeState` readiness 已验证；18/18 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state store/read/consume/lease/renew/release 通过。旧 Redis/Postgres 运行容器和运行卷已删除，保留未挂载的历史备份卷。真实 Auth 邮件、抖店/1688 E2E 与独立生产资源仍未完成，因此不能表述为生产可用。
 
 ## 1. 整体架构
 
@@ -191,7 +191,7 @@ flowchart LR
 
 - 内测阶段优先减少独立中间件：BFF 只依赖同一个 Supabase 项目的 PostgreSQL / Auth / Storage，staging 和 production 都不需要 `REDIS_URL`
 - `runtime_states` 以单条 SQL 完成一次性写入/消费、带 owner token 的租约与 fixed-window 计数，兼容 Supabase transaction pooler；过期记录有索引并由有界清理回收
-- OAuth state/result、加密后的 Token refresh recovery、订单同步锁、商品变更锁、1688 全局限流与 AI 精确缓存共用该抽象，但业务持久事实、任务状态和审计仍保存于各自正式表
+- OAuth state/result、加密后的 Token refresh recovery、订单同步锁、商品变更锁、HTTP 变更请求限流、1688 全局限流与 AI 精确缓存共用该抽象；只读 HTTP 请求不额外写限流计数，AI 缓存故障时直接 miss，不保留进程内副本。业务持久事实、任务状态和审计仍保存于各自正式表
 - readiness 同时检查最新必需 migration、数据库与 `runtime_states`；任一失败都返回 503。只有真实负载证明 PostgreSQL 协调成为瓶颈时，才评估新的托管服务并先完成容量、故障和迁移验证
 
 ## 5. 服务边界

@@ -5,7 +5,7 @@ const INSECURE_SECRETS = new Set(['change-me-in-production', 'supplier-dev-encry
 export type RuntimeEnvironment = Record<string, unknown>;
 
 /**
- * Nest ConfigModule 启动校验。开发环境保留本地默认值；生产环境缺少关键运行配置时直接拒绝启动。
+ * Nest ConfigModule 启动校验。除隔离测试外，所有运行环境都只允许连接托管 Supabase。
  */
 export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironment {
   const environment = { ...input };
@@ -14,6 +14,11 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
     throw new Error('NODE_ENV must be development, test, or production');
   }
   environment.NODE_ENV = nodeEnv;
+  const bffHost = optionalString(environment.BFF_HOST) ?? '0.0.0.0';
+  if (!['127.0.0.1', '0.0.0.0'].includes(bffHost)) {
+    throw new Error('BFF_HOST must be 127.0.0.1 or 0.0.0.0');
+  }
+  environment.BFF_HOST = bffHost;
   const gitSha = optionalString(environment.SUPPLIER_GIT_SHA);
   if (gitSha !== undefined) {
     if (!/^[a-f0-9]{40}$/.test(gitSha)) {
@@ -258,7 +263,11 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
   }
   environment.AUTH_MODE = authMode;
   if (authMode === 'supabase') validateSupabaseAuth(environment, nodeEnv === PRODUCTION);
+  if (nodeEnv === PRODUCTION && authMode !== 'supabase') {
+    throw new Error('AUTH_MODE must be supabase in production');
+  }
 
+  if (nodeEnv !== 'test') validateSupabaseOnlyRuntime(environment);
   if (nodeEnv === PRODUCTION) validateProductionEnvironment(environment);
   return environment;
 }
@@ -297,13 +306,6 @@ export function swaggerEnabled(nodeEnv: unknown, configured: unknown): boolean {
 }
 
 function validateProductionEnvironment(environment: RuntimeEnvironment): void {
-  if (environment.AUTH_MODE !== 'supabase') {
-    throw new Error('AUTH_MODE must be supabase in production');
-  }
-  const databaseUrl = requiredString(environment, 'DATABASE_URL');
-  validateUrl(databaseUrl, 'DATABASE_URL', ['postgres:', 'postgresql:']);
-  validateSupabaseRuntimeDatabase(databaseUrl, requiredString(environment, 'SUPABASE_URL'));
-
   validateSecret(requiredString(environment, 'ENCRYPTION_KEY'), 'ENCRYPTION_KEY');
   validateSecret(requiredString(environment, 'OPERATIONS_TOKEN'), 'OPERATIONS_TOKEN');
   const alertWebhookUrl = requiredString(environment, 'ALERT_WEBHOOK_URL');
@@ -311,14 +313,31 @@ function validateProductionEnvironment(environment: RuntimeEnvironment): void {
   validateSecret(requiredString(environment, 'ALERT_WEBHOOK_SECRET'), 'ALERT_WEBHOOK_SECRET');
   corsOrigins(environment.CORS_ORIGINS, true);
 
-  const queueMode = optionalString(environment.PUBLISH_QUEUE_MODE) ?? 'database';
-  if (queueMode !== 'database') {
-    throw new Error('PUBLISH_QUEUE_MODE must be database in production');
-  }
-  environment.PUBLISH_QUEUE_MODE = queueMode;
   validateProductionPurchase(environment);
   validateProductionSourceImport(environment);
   validateProductionDouyinAutomation(environment);
+}
+
+function validateSupabaseOnlyRuntime(environment: RuntimeEnvironment): void {
+  if (optionalString(environment.REDIS_URL)) {
+    throw new Error('REDIS_URL must not be configured; runtime state is stored in Supabase');
+  }
+
+  const supabaseUrl = requiredRuntimeString(environment, 'SUPABASE_URL');
+  const databaseUrl = requiredRuntimeString(environment, 'DATABASE_URL');
+  validateSupabaseRuntimeDatabase(databaseUrl, supabaseUrl);
+
+  const directUrl = optionalString(environment.DIRECT_URL);
+  if (directUrl) {
+    validateSupabaseDirectDatabase(directUrl, supabaseUrl);
+    environment.DIRECT_URL = directUrl;
+  }
+
+  const queueMode = optionalString(environment.PUBLISH_QUEUE_MODE) ?? 'database';
+  if (queueMode !== 'database') {
+    throw new Error('PUBLISH_QUEUE_MODE must be database outside isolated tests');
+  }
+  environment.PUBLISH_QUEUE_MODE = queueMode;
 }
 
 function validateProductionPurchase(environment: RuntimeEnvironment): void {
@@ -432,16 +451,53 @@ export function validateSupabaseRuntimeDatabase(databaseUrl: string, supabaseUrl
   if (
     !database.hostname.endsWith('.pooler.supabase.com') ||
     database.username !== `postgres.${projectRef}` ||
-    database.port !== '6543'
+    !['5432', '6543'].includes(database.port)
   ) {
-    throw new Error('DATABASE_URL must use the matching Supabase transaction pooler');
+    throw new Error('DATABASE_URL must use the matching Supabase pooler');
   }
-  if (database.searchParams.get('pgbouncer') !== 'true') {
+  if (database.port === '6543' && database.searchParams.get('pgbouncer') !== 'true') {
     throw new Error('Supabase transaction pooler DATABASE_URL must set pgbouncer=true');
   }
+  if (database.port === '5432' && database.searchParams.has('pgbouncer')) {
+    throw new Error('Supabase session pooler DATABASE_URL must not set pgbouncer');
+  }
   const connectionLimit = Number(database.searchParams.get('connection_limit'));
-  if (!Number.isInteger(connectionLimit) || connectionLimit < 1 || connectionLimit > 10) {
-    throw new Error('Supabase transaction pooler connection_limit must be between 1 and 10');
+  if (!Number.isInteger(connectionLimit) || connectionLimit < 3 || connectionLimit > 10) {
+    throw new Error('Supabase transaction pooler connection_limit must be between 3 and 10');
+  }
+}
+
+export function validateSupabaseDirectDatabase(directUrl: string, supabaseUrl: string): void {
+  const projectRef = supabaseProjectRef(supabaseUrl);
+  let database: URL;
+  try {
+    database = new URL(directUrl);
+  } catch {
+    throw new Error('DIRECT_URL must be a valid URL');
+  }
+  if (!['postgres:', 'postgresql:'].includes(database.protocol)) {
+    throw new Error('DIRECT_URL must use postgres: or postgresql:');
+  }
+  if (database.pathname !== '/postgres') {
+    throw new Error('DIRECT_URL must target the Supabase postgres database');
+  }
+  if (!database.password) throw new Error('DIRECT_URL must contain a database password');
+  const sslMode = database.searchParams.get('sslmode');
+  if (sslMode !== null && sslMode !== 'require') {
+    throw new Error('DIRECT_URL must not disable or weaken Supabase TLS');
+  }
+
+  const directHost = `db.${projectRef}.supabase.co`;
+  const directConnection =
+    database.hostname === directHost &&
+    (database.port || '5432') === '5432' &&
+    database.username === 'postgres';
+  const sessionPooler =
+    database.hostname.endsWith('.pooler.supabase.com') &&
+    database.port === '5432' &&
+    database.username === `postgres.${projectRef}`;
+  if (!directConnection && !sessionPooler) {
+    throw new Error('DIRECT_URL must use the matching Supabase direct or session connection');
   }
 }
 
@@ -502,6 +558,13 @@ function validateSecret(value: string, name: string): void {
 function requiredString(environment: RuntimeEnvironment, name: string): string {
   const value = optionalString(environment[name]);
   if (!value) throw new Error(`${name} is required in production`);
+  environment[name] = value;
+  return value;
+}
+
+function requiredRuntimeString(environment: RuntimeEnvironment, name: string): string {
+  const value = optionalString(environment[name]);
+  if (!value) throw new Error(`${name} is required outside isolated tests`);
   environment[name] = value;
   return value;
 }

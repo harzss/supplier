@@ -2,8 +2,17 @@ import { defineConfig, devices } from '@playwright/test';
 
 const webOrigin = 'http://127.0.0.1:3200';
 const bffOrigin = 'http://127.0.0.1:3201';
-const databaseUrl =
-  process.env.SUPPLIER_E2E_DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:5432/supplier';
+const databaseUrl = process.env.CI
+  ? process.env.DATABASE_URL
+  : process.env.SUPPLIER_E2E_DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error(
+    'Full E2E requires CI DATABASE_URL or an explicit SUPPLIER_E2E_DATABASE_URL for a dedicated Supabase test project.',
+  );
+}
+if (!process.env.CI && !isSupabaseDatabaseUrl(databaseUrl)) {
+  throw new Error('Local full E2E must use a dedicated hosted Supabase database');
+}
 process.env.DATABASE_URL = databaseUrl;
 process.env.DIRECT_URL = databaseUrl;
 const inheritedEnvironment = Object.fromEntries(
@@ -39,7 +48,7 @@ export default defineConfig({
       reuseExistingServer: false,
       env: {
         ...inheritedEnvironment,
-        NODE_ENV: 'development',
+        NODE_ENV: 'test',
         PORT: '3201',
         AUTH_MODE: 'demo',
         CORS_ORIGINS: webOrigin,
@@ -67,3 +76,16 @@ export default defineConfig({
     },
   ],
 });
+
+function isSupabaseDatabaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      ['postgres:', 'postgresql:'].includes(url.protocol) &&
+      (url.hostname.endsWith('.pooler.supabase.com') ||
+        /^db\.[a-z0-9]{20}\.supabase\.co$/.test(url.hostname))
+    );
+  } catch {
+    return false;
+  }
+}

@@ -6,7 +6,7 @@
 >
 > 最后更新：2026-08-17
 
-> **2026-08-17 状态覆盖**：`8a9fd30` 已把开发、staging 与 production BFF 的运行依赖收敛到托管 Supabase，并用 Supabase `runtime_states` 承载状态变更请求限流；AI 缓存不再回退进程内存，本机默认浏览器回归也不再启动数据库。当前 BFF 以精确 SHA 在 `127.0.0.1:3001` 返回 `database + runtimeState` ready，Release gates 与 Security scans 全绿。固定 Gateway 尚未恢复：Shadowrocket 把 Cloudflare Tunnel 区域域名解析到代理保留地址并阻断必需的 7844 端口，Gateway 当前返回 530。R0-03 因此外部 HTTPS 入口仍是进行中，不能沿用 2026-08-10 的 Gateway 证据声称当前候选已完整部署。详见 [2026-08-17 Supabase-only runtime 证据](./evidence/2026-08-17-supabase-runtime-boundary.md)。
+> **2026-08-17 状态覆盖**：`8a9fd30` 已把开发、staging 与 production BFF 的运行依赖收敛到托管 Supabase，并用 Supabase `runtime_states` 承载状态变更请求限流；AI 缓存不再回退进程内存，本机默认浏览器回归也不再启动数据库。当前 BFF 以精确 SHA 在 `127.0.0.1:3001` 返回 `database + runtimeState` ready，Release gates 与 Security scans 全绿。`c31d818` 的 Cloudflare 静态 Web version 6 已发布，核心路由、重定向、远端产物哈希、浏览器控制台与 WCAG A/AA 自动审计通过。固定 Gateway 尚未恢复：Shadowrocket 把 Cloudflare Tunnel 区域域名解析到代理保留地址并阻断必需的 7844 端口，Gateway 当前返回 530。R0-03 因此外部 HTTPS BFF 入口仍是进行中，不能沿用 2026-08-10 的 Gateway 证据声称当前候选已完整部署。详见 [Supabase-only runtime 证据](./evidence/2026-08-17-supabase-runtime-boundary.md) 与 [Cloudflare Web 发布证据](./evidence/2026-08-17-cloudflare-web-release.md)。
 
 ## 1. 产品结论
 

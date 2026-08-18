@@ -52,18 +52,21 @@ FROM source AS web-builder
 
 ARG NEXT_PUBLIC_AUTH_MODE
 ARG NEXT_PUBLIC_SIGNUP_ENABLED=false
+ARG NEXT_PUBLIC_AUDIT_TEST_MODE=false
 ARG NEXT_PUBLIC_BFF_URL
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
 
 ENV NEXT_PUBLIC_AUTH_MODE=$NEXT_PUBLIC_AUTH_MODE
 ENV NEXT_PUBLIC_SIGNUP_ENABLED=$NEXT_PUBLIC_SIGNUP_ENABLED
+ENV NEXT_PUBLIC_AUDIT_TEST_MODE=$NEXT_PUBLIC_AUDIT_TEST_MODE
 ENV NEXT_PUBLIC_BFF_URL=$NEXT_PUBLIC_BFF_URL
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
 ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
 
 RUN test "$NEXT_PUBLIC_AUTH_MODE" = supabase && \
     { test "$NEXT_PUBLIC_SIGNUP_ENABLED" = true || test "$NEXT_PUBLIC_SIGNUP_ENABLED" = false; } && \
+    { test "$NEXT_PUBLIC_AUDIT_TEST_MODE" = true || test "$NEXT_PUBLIC_AUDIT_TEST_MODE" = false; } && \
     test -n "$NEXT_PUBLIC_BFF_URL" && \
     test -n "$NEXT_PUBLIC_SUPABASE_URL" && \
     test -n "$NEXT_PUBLIC_SUPABASE_ANON_KEY"
@@ -136,3 +139,7 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || '3000') + '/').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));"]
 
 CMD ["node", "apps/web/server.js"]
+
+# Default cloud-container target. Explicit `--target web|migrate|staging-maintenance`
+# builds remain unchanged; Railway builds the final stage as the long-running BFF.
+FROM bff AS railway-bff

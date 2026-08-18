@@ -63,6 +63,25 @@ BFF 至少需要：
 - `EXCEPTION_CENTER_SCAN_INTERVAL_MS` / `EXCEPTION_CENTER_SCAN_BATCH_SIZE`：默认 300000ms / 50 个活跃账号，合法范围分别为 60000～3600000 / 1～500
 - `SOURCE_IMPORT_POLL_MS`：默认 2000ms，允许 500～60000ms
 - `SOURCE_IMPORT_MAX_ATTEMPTS`：默认 3，允许 1～10 次；只重试失败 item，不得覆盖已成功采集结果
+
+### 3.1 邀请制审核测试版常驻 BFF
+
+10 个工作日审核测试版优先使用 Railway Singapore 单副本常驻容器，替代 Mac + Quick Tunnel 作为固定 Gateway 的上游。仓库根 `railway.json` 固定以下部署边界：
+
+- 最终 Docker target 为非 root `railway-bff`，Node 22 + Sharp + Prisma 与标准 BFF 镜像一致；
+- Southeast Asia / Singapore、单副本、禁止休眠、`ALWAYS` 重启；
+- `/api/health/ready` 作为发布健康门禁，等待上限 300 秒；
+- `overlapSeconds=0` 只取消新版本激活后的额外重叠；健康检查期间新旧实例仍会同时运行，SIGTERM 后保留 30 秒 drain；
+- BFF 使用 `BFF_HOST=0.0.0.0` 和平台注入的 `PORT`；首次部署前必须设置 `SUPPLIER_GIT_SHA=${{ RAILWAY_GIT_COMMIT_SHA }}`，且 live/ready 与部署验证返回的 revision 必须等于部署 commit；
+- runtime 只持有 Supabase pooler `DATABASE_URL`，显式 `DIRECT_URL=`；migration 使用独立 job/service，不能交给 BFF pre-deploy；
+- Railway Replica Limit 必须允许至少 1 GiB 内存；首次内测将内存上限设为 1 GiB，并在 Workspace Usage 设置 `$10` 提醒与 `$15/月` Compute hard limit；真实平台若要求固定出口 IP，必须先升级到支持 Static Outbound IP 的计划并完成白名单验收。
+
+部署前 Gate 包括上述 revision、1 GiB Replica Limit 和费用 hard limit，以及以下只读检查；任一不满足都不得部署或切流：`EXCEPTION_CENTER_SCAN_ENABLED`、`DOUYIN_ORDER_SYNC_ENABLED`、`INVENTORY_SYNC_ENABLED`、`PRODUCT_BATCH_ENABLED`、`PRODUCT_BATCH_SKU_EDIT_ENABLED`、`SOURCE_IMPORT_ENABLED`、`ALIBABA_1688_PURCHASE_ENABLED`、`ALIBABA_1688_PURCHASE_AUDIT_ENABLED` 必须全部为 `false`；`publish_jobs` 不得存在 `queued` / `running` / `retry_wait`，`product_batch_tasks` 与 `source_import_tasks` 不得存在 `queued` / `running` / `cancelling`，`published_products.inventory_sync_status` 不得存在 `pending` / `syncing` / `retry_wait`。任一队列检查非零都必须先停止切流并安全排空，不能把 `overlapSeconds=0` 当作跨实例互斥锁。
+
+切流顺序：先验证 Railway 直连 live/ready、revision、重启、Prisma 与 Sharp；再停止 `com.supplier.staging-local`，防止旧 supervisor 覆写 Gateway Secret；将 Cloudflare Gateway `BFF_ORIGIN` 更新为 Railway HTTPS origin；完成 18 项部署 smoke 和 48～72 小时观察后，才移除 Quick Tunnel。失败时恢复 Gateway 旧上游或保持 503，不同时运行两套有待执行任务的写实例。
+
+创建 Railway 项目、订阅付费计划或升级固定出口 IP 都会产生外部资源/费用。执行前必须由用户明确批准计划与月费上限；当前内测默认申请 Hobby、最低 `$5/月`，并以 `$15/月` Compute hard limit 为最高授权边界。当前仓库配置本身不会创建资源或扣费。
+
 - `ALIBABA_1688_SOURCE_DATA_SCOPE`：只有用至少两个受控买家账号证明详情、分销价和库存不随账号变化后才能设置为 `global_offer`；生产开启货源采集时缺失或为其他值必须启动失败
 
 `AUDIT_RETENTION_DAYS` 默认 180 天；告警监控周期、队列阈值、5xx 阈值、Webhook timeout 和重试参数应通过部署配置管理并记录变更。接收端必须校验 timestamp + HMAC-SHA256，并按签名 payload/header 中相同的 `deliveryId` 幂等去重。运维端点应同时使用网关来源限制和 `OPERATIONS_TOKEN`，不能只依赖 URL 隐蔽。

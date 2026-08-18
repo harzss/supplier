@@ -146,12 +146,29 @@ test('allows only closed maintenance operations and arguments', () => {
       ],
     },
   );
+  assert.deepEqual(
+    readStagingMaintenanceHostOptions([
+      'migrate-marketplace-entitlement-once',
+      `--confirm-project=${PROJECT_REF}`,
+    ]),
+    {
+      action: 'run',
+      operation: 'migrate-marketplace-entitlement-once',
+      projectRef: PROJECT_REF,
+      containerArgs: [
+        'packages/db/scripts/staging-libpq.mjs',
+        'migrate-marketplace-entitlement-once',
+        `--confirm-project=${PROJECT_REF}`,
+      ],
+    },
+  );
   for (const args of [
     [],
     ['audit', '--unknown'],
     ['backfill-apply'],
     ['migrate-once', '--confirm-project=short'],
     ['migrate-forward-once', '--confirm-project=short'],
+    ['migrate-marketplace-entitlement-once', '--confirm-project=short'],
     ['shell'],
     ['build', '--file=other'],
   ]) {

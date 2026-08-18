@@ -29,7 +29,8 @@ const USAGE =
   '   or: staging-maintenance-host.mjs backfill-check\n' +
   '   or: staging-maintenance-host.mjs backfill-apply --confirm-project=<STAGING_PROJECT_REF>\n' +
   '   or: staging-maintenance-host.mjs migrate-once --confirm-project=<STAGING_PROJECT_REF>\n' +
-  '   or: staging-maintenance-host.mjs migrate-forward-once --confirm-project=<STAGING_PROJECT_REF>';
+  '   or: staging-maintenance-host.mjs migrate-forward-once --confirm-project=<STAGING_PROJECT_REF>\n' +
+  '   or: staging-maintenance-host.mjs migrate-marketplace-entitlement-once --confirm-project=<STAGING_PROJECT_REF>';
 
 export function readStagingMaintenanceHostOptions(args) {
   if (args.length === 1 && args[0] === 'build') return { action: 'build' };
@@ -52,7 +53,12 @@ export function readStagingMaintenanceHostOptions(args) {
   }
   if (
     args.length === 2 &&
-    ['backfill-apply', 'migrate-once', 'migrate-forward-once'].includes(args[0]) &&
+    [
+      'backfill-apply',
+      'migrate-once',
+      'migrate-forward-once',
+      'migrate-marketplace-entitlement-once',
+    ].includes(args[0]) &&
     /^--confirm-project=[a-z0-9]{20}$/.test(args[1])
   ) {
     const projectRef = args[1].slice('--confirm-project='.length);

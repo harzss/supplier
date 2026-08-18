@@ -440,17 +440,18 @@ async function main() {
 
   const prisma = new PrismaClient({ datasourceUrl: prismaEnvironment.DATABASE_URL });
   try {
-    const audit = await prisma.$transaction(async (transaction) => {
-      await transaction.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+    const audit = await prisma.$transaction(
+      async (transaction) => {
+        await transaction.$executeRawUnsafe('SET TRANSACTION READ ONLY');
 
-      const database = await transaction.$queryRawUnsafe(`
+        const database = await transaction.$queryRawUnsafe(`
         SELECT
           current_database() AS database,
           current_schema() AS schema,
           current_setting('server_version') AS server_version,
           pg_database_size(current_database())::text AS database_bytes
       `);
-      const migrations = await transaction.$queryRawUnsafe(`
+        const migrations = await transaction.$queryRawUnsafe(`
         SELECT
           migration_name,
           checksum,
@@ -460,7 +461,7 @@ async function main() {
         FROM "_prisma_migrations"
         ORDER BY started_at ASC
       `);
-      const dataCounts = await transaction.$queryRawUnsafe(`
+        const dataCounts = await transaction.$queryRawUnsafe(`
         SELECT
           (SELECT COUNT(*)::int FROM source_products) AS source_products,
           (SELECT COUNT(*)::int FROM published_products) AS published_products,
@@ -468,7 +469,7 @@ async function main() {
           (SELECT COUNT(*)::int FROM purchase_orders) AS purchase_orders,
           (SELECT COUNT(*)::int FROM publish_tasks) AS publish_tasks
       `);
-      const sourceProducts = await transaction.$queryRawUnsafe(`
+        const sourceProducts = await transaction.$queryRawUnsafe(`
         SELECT
           COUNT(*)::int AS source_products,
           COUNT(*) FILTER (
@@ -494,10 +495,10 @@ async function main() {
           COUNT(*) FILTER (WHERE is_one_piece_drop IS NOT TRUE)::int AS not_one_piece_drop
         FROM source_products
       `);
-      const publishedSourceBindings = await transaction.$queryRawUnsafe(`
+        const publishedSourceBindings = await transaction.$queryRawUnsafe(`
         SELECT to_regclass('public.published_product_source_bindings') IS NOT NULL AS table_exists
       `);
-      const duplicateRecoveryKeys = await transaction.$queryRawUnsafe(`
+        const duplicateRecoveryKeys = await transaction.$queryRawUnsafe(`
         SELECT COUNT(*)::int AS duplicate_groups
         FROM (
           SELECT task_id, shop_id
@@ -507,7 +508,7 @@ async function main() {
           HAVING COUNT(*) > 1
         ) duplicates
       `);
-      const duplicatePlatformProductIds = await transaction.$queryRawUnsafe(`
+        const duplicatePlatformProductIds = await transaction.$queryRawUnsafe(`
         SELECT COUNT(*)::int AS duplicate_groups
         FROM (
           SELECT shop_id, platform_product_id
@@ -517,7 +518,7 @@ async function main() {
           HAVING COUNT(*) > 1
         ) duplicates
       `);
-      const publicTables = await transaction.$queryRawUnsafe(`
+        const publicTables = await transaction.$queryRawUnsafe(`
         SELECT
           tablename,
           rowsecurity,
@@ -535,7 +536,7 @@ async function main() {
         WHERE schemaname = 'public'
         ORDER BY tablename
       `);
-      const publicSequences = await transaction.$queryRawUnsafe(`
+        const publicSequences = await transaction.$queryRawUnsafe(`
         SELECT
           sequence_name,
           has_sequence_privilege(
@@ -552,7 +553,7 @@ async function main() {
         WHERE sequence_schema = 'public'
         ORDER BY sequence_name
       `);
-      const unsafeDefaultPrivileges = await transaction.$queryRawUnsafe(`
+        const unsafeDefaultPrivileges = await transaction.$queryRawUnsafe(`
         WITH owner_role AS (
           SELECT oid
           FROM pg_roles
@@ -593,21 +594,26 @@ async function main() {
         ORDER BY client_role, object_type
       `);
 
-      return {
-        database: database[0],
-        migrations,
-        dataCounts: dataCounts[0],
-        sourceProducts: {
-          ...sourceProducts[0],
-          published_source_bindings_exist: publishedSourceBindings[0].table_exists,
-        },
-        duplicateRecoveryKeys: duplicateRecoveryKeys[0],
-        duplicatePlatformProductIds: duplicatePlatformProductIds[0],
-        publicTables,
-        publicSequences,
-        unsafeDefaultPrivileges,
-      };
-    });
+        return {
+          database: database[0],
+          migrations,
+          dataCounts: dataCounts[0],
+          sourceProducts: {
+            ...sourceProducts[0],
+            published_source_bindings_exist: publishedSourceBindings[0].table_exists,
+          },
+          duplicateRecoveryKeys: duplicateRecoveryKeys[0],
+          duplicatePlatformProductIds: duplicatePlatformProductIds[0],
+          publicTables,
+          publicSequences,
+          unsafeDefaultPrivileges,
+        };
+      },
+      {
+        maxWait: 10_000,
+        timeout: 60_000,
+      },
+    );
 
     const { pendingMigrations } = assertMigrationHistory(localMigrations, audit.migrations, {
       allowPending,

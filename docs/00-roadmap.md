@@ -9,6 +9,8 @@
 > **2026-08-17 状态覆盖**：`8a9fd30` 已把开发、staging 与 production BFF 的运行依赖收敛到托管 Supabase，并用 Supabase `runtime_states` 承载状态变更请求限流；AI 缓存不再回退进程内存，本机默认浏览器回归也不再启动数据库。当前 BFF 以精确 SHA 在 `127.0.0.1:3001` 返回 `database + runtimeState` ready，Release gates 与 Security scans 全绿。`c31d818` 的 Cloudflare 静态 Web version 6 已发布，核心路由、重定向、远端产物哈希、浏览器控制台与 WCAG A/AA 自动审计通过。固定 Gateway 尚未恢复：Shadowrocket 把 Cloudflare Tunnel 区域域名解析到代理保留地址并阻断必需的 7844 端口，Gateway 当前返回 530。R0-03 因此外部 HTTPS BFF 入口仍是进行中，不能沿用 2026-08-10 的 Gateway 证据声称当前候选已完整部署。详见 [Supabase-only runtime 证据](./evidence/2026-08-17-supabase-runtime-boundary.md) 与 [Cloudflare Web 发布证据](./evidence/2026-08-17-cloudflare-web-release.md)。
 >
 > **2026-08-18 加速决策**：本轮目标冻结为 10 个工作日完成“Supplier 抖店 + 1688 邀请制审核测试版”的 D10 提交条件，不承诺平台在 D10 前审核通过。批量/SKU、自动采购、自动售后、AI 主图、多店和正式价格后移；Auth/双租户、真实平台回读、商业回调、独立生产、恢复监控和合规不能裁剪。每日 Gate、外部条件和风险边界见 [10 个工作日发布控制表](./13-audit-test-release.md)。
+>
+> **2026-08-18 执行状态**：`5cd6b28` 的 marketplace entitlement foundation 已完成 staging 45→46 真实备份、隔离恢复升级与单次前向迁移；post-audit 为 46/46、pending 0、schema diff matched、46/46 public 表 RLS、客户端 ACL 0。Shadowrocket 独立 Module 恢复了固定 Gateway，当前 SHA 的 18/18 smoke 通过；审核模式 Web 已发布为 Cloudflare version `488ee083-f2e8-4e08-8bbc-9b77baebb264`。Railway Hobby 与 GitHub OAuth 尚待完成，真实平台和商业回调开关继续关闭。详见 [本轮证据](./evidence/2026-08-18-marketplace-entitlement-staging.md)。
 
 ## 1. 产品结论
 

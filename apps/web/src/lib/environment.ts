@@ -6,11 +6,13 @@ const configuredBffUrl = process.env.NEXT_PUBLIC_BFF_URL?.trim();
 const configuredSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
 const configuredSupabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
 const configuredSignupEnabled = process.env.NEXT_PUBLIC_SIGNUP_ENABLED?.trim();
+const configuredAuditTestMode = process.env.NEXT_PUBLIC_AUDIT_TEST_MODE?.trim();
 
 export const authMode: WebAuthMode =
   configuredAuthMode === 'supabase' || production ? 'supabase' : 'demo';
 export const isDemoAuthMode = authMode === 'demo';
 export const isSignupEnabled = configuredSignupEnabled === 'true';
+export const isAuditTestMode = configuredAuditTestMode === 'true';
 
 export function frontendConfigurationError(): string | undefined {
   if (configuredAuthMode && !['demo', 'supabase'].includes(configuredAuthMode)) {
@@ -21,6 +23,9 @@ export function frontendConfigurationError(): string | undefined {
   }
   if (configuredSignupEnabled && !['true', 'false'].includes(configuredSignupEnabled)) {
     return 'NEXT_PUBLIC_SIGNUP_ENABLED 必须为 true 或 false';
+  }
+  if (configuredAuditTestMode && !['true', 'false'].includes(configuredAuditTestMode)) {
+    return 'NEXT_PUBLIC_AUDIT_TEST_MODE 必须为 true 或 false';
   }
 
   if (authMode === 'supabase') {

@@ -267,6 +267,10 @@ const CASE_CATALOG = {
     '本地订购有效期异常',
     '订购记录状态与有效期矛盾，可能导致错误授权。',
   ),
+  entitlement_active_subscription_missing: entitlementCatalog(
+    '高权限套餐缺少有效订购',
+    '账号仍保留非免费套餐，但当前没有可证明的有效订购，可能造成退款、到期或卸载后继续授权。',
+  ),
   entitlement_multiple_active_subscriptions: entitlementCatalog(
     '存在重叠的有效订购',
     '系统无法唯一确定当前应生效的套餐权益。',
@@ -941,7 +945,7 @@ export class ExceptionCenterService {
         },
       },
     });
-    if (!user || user.subscriptions.length === 0) return [];
+    if (!user) return [];
     const today = utcDateKey(now);
     const invalid = user.subscriptions.filter(
       (subscription) =>
@@ -953,7 +957,10 @@ export class ExceptionCenterService {
     );
     let code: CaseCode | null = null;
     let reason = '';
-    if (invalid.length > 0) {
+    if (user.subscriptions.length === 0 && user.plan !== 'free') {
+      code = 'entitlement_active_subscription_missing';
+      reason = '账号套餐不是免费版，但当前没有任何标记为有效的本地订购记录。';
+    } else if (invalid.length > 0) {
       code = 'entitlement_subscription_date_invalid';
       reason = '存在标记为有效、但当前日期不在有效期内的本地订购记录。';
     } else if (current.length > 1) {

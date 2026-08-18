@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { ApiError, api } from '@/lib/api';
-import { isDemoAuthMode } from '@/lib/environment';
+import { isAuditTestMode, isDemoAuthMode } from '@/lib/environment';
 
 const STATUS_LABELS: Record<string, string> = {
   success: '成功',
@@ -102,9 +102,11 @@ export default function PublishedPage() {
             跟踪铺货任务、平台上架状态、库存同步和需要人工修正的商品。
           </p>
         </div>
-        <Link href="/published/batch" className="batch-primary-button w-fit">
-          进入批量经营
-        </Link>
+        {isAuditTestMode ? null : (
+          <Link href="/published/batch" className="batch-primary-button w-fit">
+            进入批量经营
+          </Link>
+        )}
       </header>
 
       {isDemoAuthMode && simulate.isSuccess && (

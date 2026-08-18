@@ -22,6 +22,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api, ApiError, type RecommendationList } from '@/lib/api';
+import { isAuditTestMode } from '@/lib/environment';
 
 const DECISION_ROUTE = [
   { label: '货源确认', detail: '库存与采购价', icon: Package },
@@ -120,12 +121,14 @@ function RecommendationPage() {
               </Badge>
             </Link>
           </Button>
-          <Button asChild className="h-11 sm:h-9">
-            <Link href="/sources/import">
-              批量采集 1688
-              <ArrowRight weight="bold" aria-hidden="true" />
-            </Link>
-          </Button>
+          {isAuditTestMode ? null : (
+            <Button asChild className="h-11 sm:h-9">
+              <Link href="/sources/import">
+                批量采集 1688
+                <ArrowRight weight="bold" aria-hidden="true" />
+              </Link>
+            </Button>
+          )}
         </div>
       </header>
 
@@ -342,9 +345,11 @@ function EmptyState() {
           <p className="mt-2 text-sm text-muted-foreground">
             放宽类目或采购价范围，或者先采集新的 1688 货源。
           </p>
-          <Button asChild variant="outline" className="mt-5 h-11 sm:h-9">
-            <Link href="/sources/import">批量采集货源</Link>
-          </Button>
+          {isAuditTestMode ? null : (
+            <Button asChild variant="outline" className="mt-5 h-11 sm:h-9">
+              <Link href="/sources/import">批量采集货源</Link>
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>

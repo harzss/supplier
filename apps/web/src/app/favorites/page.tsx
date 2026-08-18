@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api, type FavoriteProduct } from '@/lib/api';
+import { isAuditTestMode } from '@/lib/environment';
 
 const MAX_COMPARE = 5;
 
@@ -46,9 +47,11 @@ export default function FavoritesPage() {
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Link href="/sources/import" className="primary-button source-entry-button">
-                批量采集 1688
-              </Link>
+              {isAuditTestMode ? null : (
+                <Link href="/sources/import" className="primary-button source-entry-button">
+                  批量采集 1688
+                </Link>
+              )}
               <div className="rounded-full bg-white px-3 py-1.5 text-xs text-[var(--muted)] shadow-sm ring-1 ring-black/5 tabular-nums">
                 已收藏 {items.length} · 已选 {selectedItems.length}/{MAX_COMPARE}
               </div>
@@ -69,9 +72,11 @@ export default function FavoritesPage() {
               从今日推荐中收藏感兴趣的款，再来这里并排比较。
             </p>
             <div className="mt-5 flex flex-wrap justify-center gap-2">
-              <Link href="/sources/import" className="primary-button source-entry-button">
-                从 1688 批量采集
-              </Link>
+              {isAuditTestMode ? null : (
+                <Link href="/sources/import" className="primary-button source-entry-button">
+                  从 1688 批量采集
+                </Link>
+              )}
               <Link href="/" className="secondary-button">
                 去今日推荐选款 →
               </Link>

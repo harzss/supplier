@@ -118,7 +118,7 @@ flowchart LR
 | PU-04 | P0  | 库存与 SKU 变化触发同步、下架或人工确认         | 不把未知状态当 0 库存；迟到 worker 不能覆盖新状态           |
 | PU-05 | P0  | 批量标题/价格/库存/SKU 编辑、上下架、换源和清理 | 100 SKU 有预览、进度、逐项结果、取消和幂等重试；成功率 ≥95% |
 
-当前工程状态不改变上述产品 DoD：普通 SKU 完整集合编辑已有应用侧候选，但只允许平台连续强回读确认的 `offline/draft` 商品，`PRODUCT_BATCH_SKU_EDIT_ENABLED` 默认 `false`；第 44 个 migration 尚未应用到 staging，真实抖店 E2E 未完成，因此 PU-05 仍不能标记完成。
+当前工程状态不改变上述完整产品 DoD：普通 SKU 完整集合编辑已有应用侧候选，但只允许平台连续强回读确认的 `offline/draft` 商品，`PRODUCT_BATCH_SKU_EDIT_ENABLED` 默认 `false`；第 44 个 migration 已应用到 staging，但真实抖店 E2E 未完成，因此 PU-05 仍不能标记完成。2026-08-18 的邀请制审核测试版将 PU-05 后移并隐藏，不把它计入本轮对外承诺，详见 [10 个工作日发布控制表](./13-audit-test-release.md)。
 
 ### 6.5 销售订单与 1688 采购
 

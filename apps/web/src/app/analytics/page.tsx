@@ -10,6 +10,7 @@ import type {
 import Link from 'next/link';
 import { useState } from 'react';
 import { ApiError, api } from '@/lib/api';
+import { isAuditTestMode } from '@/lib/environment';
 
 const RANGE_OPTIONS: AnalyticsRangeDays[] = [7, 30, 90];
 const STATUS_LABELS: Record<string, string> = {
@@ -337,12 +338,14 @@ function ProductPerformance({ data }: { data: AnalyticsOverview['productPerforma
                 {summary.graceDays} 天观察期
               </span>
             </div>
-            <Link
-              href="/published/batch?action=cleanup"
-              className="secondary-button min-h-10 shrink-0 px-3 text-xs"
-            >
-              进入安全清理
-            </Link>
+            {isAuditTestMode ? null : (
+              <Link
+                href="/published/batch?action=cleanup"
+                className="secondary-button min-h-10 shrink-0 px-3 text-xs"
+              >
+                进入安全清理
+              </Link>
+            )}
           </div>
           {data.slow.length ? (
             <div className="divide-y divide-[var(--line)]">

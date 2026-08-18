@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { isAuditTestMode } from '@/lib/environment';
 
 const PAGE_SIZE = 30;
 
@@ -29,9 +30,11 @@ export default function CollectedSourcesPage() {
           <h1 className="page-title">我的货源</h1>
           <p className="page-description">查看你采集过的 1688 商品，并继续完成选品、映射与铺货。</p>
         </div>
-        <Link href="/sources/import" className="primary-button source-entry-button w-fit">
-          批量采集 1688
-        </Link>
+        {isAuditTestMode ? null : (
+          <Link href="/sources/import" className="primary-button source-entry-button w-fit">
+            批量采集 1688
+          </Link>
+        )}
       </header>
 
       {sources.isLoading ? <SourceLibrarySkeleton /> : null}
@@ -50,9 +53,11 @@ export default function CollectedSourcesPage() {
           <p className="mt-2 text-sm text-[var(--muted)]">
             粘贴 1688 商品链接，检查后一次加入最多 100 件。
           </p>
-          <Link href="/sources/import" className="primary-button source-entry-button mt-5">
-            开始批量采集
-          </Link>
+          {isAuditTestMode ? null : (
+            <Link href="/sources/import" className="primary-button source-entry-button mt-5">
+              开始批量采集
+            </Link>
+          )}
         </section>
       ) : null}
 

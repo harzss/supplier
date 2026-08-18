@@ -26,6 +26,12 @@ import {
   settingsHrefWithReturnTo,
   type OAuthCallbackResult,
 } from '@/lib/oauth-return';
+import {
+  constrainAuditTestAiOptions,
+  constrainAuditTestShopIds,
+  nextAuditTestShopSelection,
+} from '@/lib/audit-test-scope';
+import { isAuditTestMode } from '@/lib/environment';
 
 interface Props {
   sourceProductId: string;
@@ -156,11 +162,8 @@ export function PublishPanel({
     JSON.stringify(pricingPreview.variables) === JSON.stringify(pricingPreviewInput);
   const currentPricingPreview = pricingPreviewIsCurrent ? pricingPreview.data : undefined;
 
-  const publishRequest: PublishPreflightRequest = {
-    sourceProductId,
-    targetShopIds: [...selected].sort(),
-    pricingStrategy,
-    aiOptions: {
+  const aiOptions = constrainAuditTestAiOptions(
+    {
       ...(titleOverride ? { titleOverride } : {}),
       rewriteTitle: titleOverride ? false : rewriteTitle,
       rewriteDetail,
@@ -168,6 +171,13 @@ export function PublishPanel({
       relightImages,
       ...(backgroundStyle ? { backgroundStyle } : {}),
     },
+    isAuditTestMode,
+  );
+  const publishRequest: PublishPreflightRequest = {
+    sourceProductId,
+    targetShopIds: constrainAuditTestShopIds([...selected].sort(), isAuditTestMode),
+    pricingStrategy,
+    aiOptions,
     ...(currentPricingPreview
       ? { pricingPreviewToken: currentPricingPreview.pricingPreviewToken }
       : {}),
@@ -204,7 +214,7 @@ export function PublishPanel({
   const restoreDraftForm = useCallback(
     (draft: PublishDraftView) => {
       const pricing = pricingFormFromDraft(draft.pricingStrategy);
-      setSelected([...draft.targetShopIds]);
+      setSelected(constrainAuditTestShopIds([...draft.targetShopIds], isAuditTestMode));
       setPricingMode(pricing.pricingMode);
       setMarkup(pricing.markup);
       setTargetMargin(pricing.targetMargin);
@@ -214,9 +224,9 @@ export function PublishPanel({
       setPlatformFeeRate(pricing.platformFeeRate);
       setRewriteTitle(draft.aiOptions?.rewriteTitle ?? true);
       setRewriteDetail(draft.aiOptions?.rewriteDetail ?? false);
-      setRemoveWatermark(draft.aiOptions?.removeWatermark ?? false);
-      setRelightImages(draft.aiOptions?.relightImages ?? false);
-      setBackgroundStyle(draft.aiOptions?.backgroundStyle ?? '');
+      setRemoveWatermark(isAuditTestMode ? false : (draft.aiOptions?.removeWatermark ?? false));
+      setRelightImages(isAuditTestMode ? false : (draft.aiOptions?.relightImages ?? false));
+      setBackgroundStyle(isAuditTestMode ? '' : (draft.aiOptions?.backgroundStyle ?? ''));
       onRestoreTitle?.(draft.aiOptions?.titleOverride ?? null);
       resetPricingPreview();
       resetPreflight();
@@ -671,7 +681,7 @@ export function PublishPanel({
 
   const toggle = (id: string) => {
     resetPreflight();
-    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+    setSelected((current) => nextAuditTestShopSelection(current, id, isAuditTestMode));
   };
 
   const resetPricingConfirmation = () => {
@@ -902,7 +912,9 @@ export function PublishPanel({
         shops.data &&
         (sellerShops.length > 0 || unavailableSelectedShopIds.length > 0) && (
           <>
-            <p className="mb-2 text-xs text-zinc-500">选择目标店铺</p>
+            <p className="mb-2 text-xs text-zinc-500">
+              {isAuditTestMode ? '选择 1 个目标店铺（审核测试版）' : '选择目标店铺'}
+            </p>
             <div className="mb-3 space-y-1.5">
               {sellerShops.map((s) => (
                 <label
@@ -1113,71 +1125,75 @@ export function PublishPanel({
                     <span className="ml-1 text-xs text-zinc-400">3 段以上，自动规避夸大词</span>
                   </span>
                 </label>
-                <div className="border-t border-zinc-200 pt-2">
-                  <div className="mb-2 flex items-center gap-2">
-                    <span className="text-xs font-medium text-zinc-600">主图处理</span>
-                    <span className="rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-600">
-                      需扩容权限
-                    </span>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="flex cursor-pointer items-start gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={removeWatermark}
-                        onChange={(e) => {
-                          resetPreflight();
-                          setRemoveWatermark(e.target.checked);
-                        }}
-                        className="mt-0.5"
-                      />
-                      <span>
-                        <span className="font-medium text-zinc-700">检测并去除水印</span>
-                        <span className="ml-1 text-xs text-zinc-400">检测、蒙版与重绘</span>
+                {isAuditTestMode ? null : (
+                  <div className="border-t border-zinc-200 pt-2">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="text-xs font-medium text-zinc-600">主图处理</span>
+                      <span className="rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-600">
+                        需扩容权限
                       </span>
-                    </label>
-                    <label className="flex cursor-pointer items-start gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={relightImages}
-                        onChange={(e) => {
-                          resetPreflight();
-                          setRelightImages(e.target.checked);
-                        }}
-                        className="mt-0.5"
-                      />
-                      <span>
-                        <span className="font-medium text-zinc-700">优化光线</span>
-                        <span className="ml-1 text-xs text-zinc-400">统一商品明暗与质感</span>
-                      </span>
-                    </label>
-                    <label className="flex items-center gap-2 text-sm">
-                      <span className="text-zinc-500">替换背景</span>
-                      <select
-                        value={backgroundStyle}
-                        onChange={(e) => {
-                          resetPreflight();
-                          setBackgroundStyle(
-                            e.target.value as
-                              | ''
-                              | 'white_studio'
-                              | 'warm_lifestyle'
-                              | 'cool_minimal',
-                          );
-                        }}
-                        className="rounded border border-zinc-200 bg-white px-2 py-1 text-xs outline-none focus:border-brand-500"
-                      >
-                        <option value="">不替换</option>
-                        <option value="white_studio">白底棚拍</option>
-                        <option value="warm_lifestyle">暖色生活方式</option>
-                        <option value="cool_minimal">冷色极简</option>
-                      </select>
-                    </label>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="flex cursor-pointer items-start gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={removeWatermark}
+                          onChange={(e) => {
+                            resetPreflight();
+                            setRemoveWatermark(e.target.checked);
+                          }}
+                          className="mt-0.5"
+                        />
+                        <span>
+                          <span className="font-medium text-zinc-700">检测并去除水印</span>
+                          <span className="ml-1 text-xs text-zinc-400">检测、蒙版与重绘</span>
+                        </span>
+                      </label>
+                      <label className="flex cursor-pointer items-start gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={relightImages}
+                          onChange={(e) => {
+                            resetPreflight();
+                            setRelightImages(e.target.checked);
+                          }}
+                          className="mt-0.5"
+                        />
+                        <span>
+                          <span className="font-medium text-zinc-700">优化光线</span>
+                          <span className="ml-1 text-xs text-zinc-400">统一商品明暗与质感</span>
+                        </span>
+                      </label>
+                      <label className="flex items-center gap-2 text-sm">
+                        <span className="text-zinc-500">替换背景</span>
+                        <select
+                          value={backgroundStyle}
+                          onChange={(e) => {
+                            resetPreflight();
+                            setBackgroundStyle(
+                              e.target.value as
+                                | ''
+                                | 'white_studio'
+                                | 'warm_lifestyle'
+                                | 'cool_minimal',
+                            );
+                          }}
+                          className="rounded border border-zinc-200 bg-white px-2 py-1 text-xs outline-none focus:border-brand-500"
+                        >
+                          <option value="">不替换</option>
+                          <option value="white_studio">白底棚拍</option>
+                          <option value="warm_lifestyle">暖色生活方式</option>
+                          <option value="cool_minimal">冷色极简</option>
+                        </select>
+                      </label>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
               <p className="mt-2 text-[11px] leading-4 text-zinc-400">
-                文本 AI 配置自有 Key 后不计平台额度；主图处理使用平台额度。
+                {isAuditTestMode
+                  ? '文本 AI 配置自有 Key 后不计平台额度。'
+                  : '文本 AI 配置自有 Key 后不计平台额度；主图处理使用平台额度。'}
               </p>
             </fieldset>
 

@@ -576,6 +576,37 @@ describe('ExceptionCenterService', () => {
     expect(reconcile).toHaveBeenCalledTimes(5);
   });
 
+  it('flags a non-free account without an active subscription', async () => {
+    const prisma = prismaFixture();
+    prisma.user.findUnique.mockResolvedValue({ plan: 'pro', subscriptions: [] });
+    const service = createService(prisma);
+    const internals = service as unknown as {
+      scanEntitlement(
+        userId: bigint,
+        now: Date,
+      ): Promise<Array<{ code: string; reason: string; sourceFingerprint: string }>>;
+    };
+
+    await expect(internals.scanEntitlement(USER_ID, NOW)).resolves.toEqual([
+      expect.objectContaining({
+        code: 'entitlement_active_subscription_missing',
+        reason: '账号套餐不是免费版，但当前没有任何标记为有效的本地订购记录。',
+        sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
+  });
+
+  it('does not require an active subscription for the free invitation plan', async () => {
+    const prisma = prismaFixture();
+    prisma.user.findUnique.mockResolvedValue({ plan: 'free', subscriptions: [] });
+    const service = createService(prisma);
+    const internals = service as unknown as {
+      scanEntitlement(userId: bigint, now: Date): Promise<unknown[]>;
+    };
+
+    await expect(internals.scanEntitlement(USER_ID, NOW)).resolves.toEqual([]);
+  });
+
   it('scanner reconciliation scopes out producer cases before automatic resolution', async () => {
     const prisma = prismaFixture();
     prisma.exceptionCase.findMany.mockResolvedValue([]);

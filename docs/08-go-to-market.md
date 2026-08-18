@@ -1,12 +1,14 @@
 # 商业化与上架验证方案
 
-> 最近更新：2026-08-10
+> 最近更新：2026-08-18
 >
 > 本文档记录商业假设、定价原则和渠道实验，不作为产品进度表。执行顺序以
 > [00-roadmap.md](./00-roadmap.md) 为准，能否上线以
 > [10-production-readiness.md](./10-production-readiness.md) 为准。
 >
 > **当前环境边界**：内测运行依赖已收敛为 Cloudflare + Supabase（PostgreSQL / Auth / Storage），不再要求本机 Redis/Postgres；旧运行容器和运行卷已删除，保留未挂载的历史备份卷。2026-08-08 已完成 staging 43→45 备份恢复演练与真实迁移；2026-08-10 的 `d30d302` 又确认 45/45、schema diff、42/42 public 表 RLS/ACL、`database + runtimeState` readiness、18/18 smoke 和 runtime-state 动态验证。该结果只证明内部测试基础设施基线，不代表已可上线：真实 Auth 邮件、抖店/1688 E2E、独立生产资源、监控与合规门禁仍未完成。
+>
+> **2026-08-18 加速路径**：用 10 个工作日形成“邀请制审核测试版”的可提交审核条件。完整批量能力、正式价格和 10～30 家规模验证后移到审核/灰度期；真实 Auth、抖店/1688 小额闭环、商业回调、独立生产、监控恢复和合规不裁剪。执行以 [10 个工作日发布控制表](./13-audit-test-release.md) 为准。
 
 ## 1. 商业目标
 

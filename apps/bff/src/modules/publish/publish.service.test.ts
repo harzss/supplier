@@ -20,7 +20,13 @@ import type { PricingPreviewReceiptService } from './pricing-preview-receipt.ser
 import { pricingSourceFingerprint } from './pricing-source-fingerprint';
 import type { PublishDraftService } from './publish-draft.service';
 
-const USER: CurrentUser = { userId: 1n, plan: 'pro' };
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 const CLIENT_REQUEST_ID = '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1';
 const SOURCE_OFFER_ID = '554456348334';
 const TASK_CREATED_AT = new Date('2026-08-04T07:00:00.000Z');
@@ -1559,6 +1565,16 @@ describe('PublishService', () => {
         ([input]) => input.data.finishedAt instanceof Date,
       ),
     ).toBe(false);
+
+    lost = false;
+    fixture.findProductByExternalId.mockResolvedValueOnce({ platformProductId: '998877' });
+    await expect(fixture.service.executeQueued(3n)).resolves.toMatchObject({ status: 'success' });
+    expect(fixture.publishProduct).toHaveBeenCalledOnce();
+    expect(fixture.findProductByExternalId).toHaveBeenLastCalledWith(
+      'plain-access-token',
+      expect.stringMatching(/^supplier-/),
+    );
+    expect(fixture.prisma.publishedProduct.upsert).toHaveBeenCalled();
   });
 
   it('checkpoints a generated title before the next paid stage and reuses it after takeover', async () => {
@@ -1665,10 +1681,10 @@ describe('PublishService', () => {
       },
       publishedProducts: [],
     });
-    fixture.publishProduct
-      .mockResolvedValueOnce({ platformProductId: '998877' })
-      .mockRejectedValueOnce(new Error('outerProductId already exists'));
-    fixture.findProductByExternalId.mockResolvedValueOnce({ platformProductId: '998877' });
+    fixture.publishProduct.mockResolvedValueOnce({ platformProductId: '998877' });
+    fixture.findProductByExternalId
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ platformProductId: '998877' });
     fixture.prisma.publishedProduct.upsert
       .mockRejectedValueOnce(new Error('db unavailable'))
       .mockResolvedValueOnce({});
@@ -1676,14 +1692,11 @@ describe('PublishService', () => {
     await expect(fixture.service.executeQueued(3n)).resolves.toMatchObject({ status: 'failed' });
     await expect(fixture.service.executeQueued(3n)).resolves.toMatchObject({ status: 'success' });
 
-    expect(fixture.publishProduct).toHaveBeenCalledTimes(2);
+    expect(fixture.publishProduct).toHaveBeenCalledTimes(1);
     expect(fixture.publishProduct.mock.calls[0]?.[1]).toMatchObject({
       externalProductId: 'supplier-retry-1',
     });
-    expect(fixture.publishProduct.mock.calls[1]?.[1]).toMatchObject({
-      externalProductId: 'supplier-retry-1',
-    });
-    expect(fixture.findProductByExternalId).toHaveBeenCalledWith(
+    expect(fixture.findProductByExternalId).toHaveBeenLastCalledWith(
       'plain-access-token',
       'supplier-retry-1',
     );

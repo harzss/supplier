@@ -14,6 +14,7 @@ import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
 import { RuntimeStateService } from '../../common/runtime-state.service';
 import { AfterSaleService } from '../after-sale/after-sale.service';
+import { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import {
   findSourceBindingRoute,
@@ -73,18 +74,31 @@ export class OrderSyncService {
     private readonly config: ConfigService,
     private readonly runtimeState: RuntimeStateService,
     private readonly afterSales: AfterSaleService,
+    private readonly access: EntitlementAccessService,
   ) {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
   }
 
   async sync(user: CurrentUser, shopId: string): Promise<OrderSyncResult> {
     const id = parseId(shopId);
-    return this.syncShop(user.userId, id);
+    return this.syncShop(user.userId, id, user.entitlementRevision);
   }
 
-  async syncShop(userId: bigint, id: bigint): Promise<OrderSyncResult> {
+  async syncShop(userId: bigint, id: bigint, expectedRevision?: number): Promise<OrderSyncResult> {
+    const entitlement = await this.access.assertActive(userId, expectedRevision);
+    const entitlementRevision = entitlement.revision;
     const shop = await this.prisma.shop.findFirst({
-      where: { id, userId, status: 'active', ...runtimeShopWhere(this.demoMode) },
+      where: {
+        id,
+        userId,
+        status: 'active',
+        user: {
+          status: 'active',
+          entitlementAccessStatus: 'active',
+          entitlementRevision,
+        },
+        ...runtimeShopWhere(this.demoMode),
+      },
     });
     if (!shop) throw new NotFoundException('店铺不存在或授权已失效');
 
@@ -93,16 +107,32 @@ export class OrderSyncService {
     const attemptedAt = new Date();
 
     try {
-      await this.prisma.shop.update({
-        where: { id: shop.id },
+      const started = await this.prisma.shop.updateMany({
+        where: {
+          id: shop.id,
+          status: 'active',
+          user: {
+            status: 'active',
+            entitlementAccessStatus: 'active',
+            entitlementRevision,
+          },
+        },
         data: { orderSyncAttemptAt: attemptedAt, orderSyncError: null },
       });
-      const result = await this.pullOrders(shop, attemptedAt, lock);
+      if (started.count !== 1) {
+        throw new ServiceUnavailableException('订单同步执行权已失效，请由当前任务继续');
+      }
+      const result = await this.pullOrders(shop, attemptedAt, lock, entitlementRevision);
       const completed = await this.prisma.shop.updateMany({
         where: {
           id: shop.id,
           status: 'active',
           orderSyncAttemptAt: attemptedAt,
+          user: {
+            status: 'active',
+            entitlementAccessStatus: 'active',
+            entitlementRevision,
+          },
         },
         data: {
           lastOrderSyncAt: attemptedAt,
@@ -123,6 +153,7 @@ export class OrderSyncService {
   }
 
   async refreshOrder(user: CurrentUser, orderIdValue: string): Promise<OrderRefreshResult> {
+    await this.access.assertActive(user.userId, user.entitlementRevision);
     const orderId = parseOrderId(orderIdValue);
     const local = await this.prisma.order.findFirst({
       where: {
@@ -130,6 +161,11 @@ export class OrderSyncService {
         shop: {
           userId: user.userId,
           status: 'active',
+          user: {
+            status: 'active',
+            entitlementAccessStatus: 'active',
+            entitlementRevision: user.entitlementRevision,
+          },
           ...runtimeShopWhere(this.demoMode),
         },
       },
@@ -144,15 +180,15 @@ export class OrderSyncService {
       const accessToken = local.shop.accessTokenEnc
         ? await this.shopTokens.getAccessToken(local.shop.id, user.userId)
         : 'mock-token';
-      await this.renewSyncLock(local.shopId, lock);
+      await this.renewSyncLock(local.shopId, lock, user.userId, user.entitlementRevision);
       const platformOrder = await adapter.getOrder(accessToken, local.platformOrderId);
-      await this.renewSyncLock(local.shopId, lock);
+      await this.renewSyncLock(local.shopId, lock, user.userId, user.entitlementRevision);
       if (platformOrder.platformOrderId !== local.platformOrderId) {
         throw new ServiceUnavailableException(
           '平台订单详情与请求订单不一致，已停止刷新并保留原状态',
         );
       }
-      await this.upsertOrders(local.shopId, [platformOrder]);
+      await this.upsertOrders(local.shopId, [platformOrder], user.userId, user.entitlementRevision);
       const refreshed = await this.prisma.order.findUnique({
         where: { id: local.id },
         select: { status: true, afterSaleStatus: true },
@@ -175,6 +211,7 @@ export class OrderSyncService {
     >,
     syncEnd: Date,
     lock: string,
+    entitlementRevision: number,
   ): Promise<OrderSyncResult> {
     const overlapMs = Number(this.config.get('DOUYIN_ORDER_SYNC_OVERLAP_SECONDS') ?? 300) * 1000;
     const lookbackMs =
@@ -196,7 +233,7 @@ export class OrderSyncService {
     let skipped = 0;
     const seenOrderIds = new Set<string>();
     for (let page = 0; page < maxPages; page++) {
-      await this.renewSyncLock(shop.id, lock);
+      await this.renewSyncLock(shop.id, lock, shop.userId, entitlementRevision);
       const platformOrders = await adapter.listOrders(accessToken, {
         cursor: String(page),
         pageSize: PAGE_SIZE,
@@ -204,13 +241,18 @@ export class OrderSyncService {
         startTime: syncStart,
         endTime: syncEnd,
       });
-      await this.renewSyncLock(shop.id, lock);
+      await this.renewSyncLock(shop.id, lock, shop.userId, entitlementRevision);
       const freshOrders = platformOrders.filter((order) => {
         if (seenOrderIds.has(order.platformOrderId)) return false;
         seenOrderIds.add(order.platformOrderId);
         return true;
       });
-      const pageResult = await this.upsertOrders(shop.id, freshOrders);
+      const pageResult = await this.upsertOrders(
+        shop.id,
+        freshOrders,
+        shop.userId,
+        entitlementRevision,
+      );
       synced += pageResult.synced;
       skipped += pageResult.skipped;
       if (platformOrders.length < PAGE_SIZE) {
@@ -225,6 +267,8 @@ export class OrderSyncService {
   private async upsertOrders(
     shopId: bigint,
     platformOrders: PlatformOrder[],
+    userId: bigint,
+    entitlementRevision: number,
   ): Promise<{ synced: number; skipped: number }> {
     const platformStatuses = platformOrders.map((order) => {
       const status = syncedStatus(order.status);
@@ -238,7 +282,7 @@ export class OrderSyncService {
       const platformStatus = platformStatuses[index]!;
       const afterSaleStatus = summarizeAfterSale(order.skuList);
       const status = afterSaleStatus === 'refunded' ? 'refunded' : platformStatus;
-      await this.upsertOrder(shopId, order, status, afterSaleStatus);
+      await this.upsertOrder(shopId, order, status, afterSaleStatus, userId, entitlementRevision);
       synced++;
     }
 
@@ -262,7 +306,13 @@ export class OrderSyncService {
     }
   }
 
-  private async renewSyncLock(shopId: bigint, value: string): Promise<void> {
+  private async renewSyncLock(
+    shopId: bigint,
+    value: string,
+    userId: bigint,
+    entitlementRevision: number,
+  ): Promise<void> {
+    await this.access.assertActive(userId, entitlementRevision);
     let renewed: boolean;
     try {
       renewed = await this.runtimeState.renewLease(
@@ -306,6 +356,8 @@ export class OrderSyncService {
     order: PlatformOrder,
     status: SyncedOrderStatus,
     afterSaleStatus: OrderAfterSaleStatus,
+    userId: bigint,
+    entitlementRevision: number,
   ): Promise<void> {
     const receiverPhoneEnc = order.receiverPhone ? this.crypto.encrypt(order.receiverPhone) : null;
     const receiverNameEnc = order.receiverName ? this.crypto.encrypt(order.receiverName) : null;
@@ -330,6 +382,7 @@ export class OrderSyncService {
       skuInfo: order.skuList as unknown as Prisma.InputJsonValue,
     };
     await this.withSerializableTransaction(async (tx) => {
+      await this.access.assertActive(userId, entitlementRevision, tx);
       const productIds = [
         ...new Set(
           order.skuList

@@ -94,7 +94,8 @@ describe('EntitlementService.checkAiQuota', () => {
 describe('EntitlementService.buildView', () => {
   it('returns plan view with usage and billing availability', async () => {
     const { service: svc } = makeService(3);
-    const view = await svc.buildView(1n, 'free');
+    const view = await svc.buildView(1n, 'free', 'active');
+    expect(view.accessStatus).toBe('active');
     expect(view.plan).toBe('free');
     expect(view.planName).toBe('内测版');
     expect(view.aiUsage.used).toBe(3);
@@ -113,10 +114,26 @@ describe('EntitlementService.buildView', () => {
     expect(view.features).not.toContain('ai.detail');
   });
 
+  it('returns suspended access without exposing any subscription identifier', async () => {
+    const { service: svc } = makeService(3, 'supabase');
+
+    const view = await svc.buildView(1n, 'free', 'suspended');
+
+    expect(view.accessStatus).toBe('suspended');
+    expect(view.planName).toBe('权益已暂停');
+    expect(view.features).toEqual([]);
+    expect(view.quotas).toEqual({ shopsMax: 0, publishMonthly: 0 });
+    expect(view.aiUsage).toEqual({ used: 3, limit: 0, remaining: 0, exceeded: true });
+    expect(view.plans).toEqual([]);
+    expect(view).not.toHaveProperty('entitlementSource');
+    expect(view).not.toHaveProperty('entitlementRevision');
+    expect(view).not.toHaveProperty('subscriptionId');
+  });
+
   it('hides internal plan identifiers and plan catalog in Supabase mode', async () => {
     const { service: svc } = makeService(3, 'supabase');
 
-    const view = await svc.buildView(1n, 'pro');
+    const view = await svc.buildView(1n, 'pro', 'active');
 
     expect(view.plan).toBeNull();
     expect(view.planName).toBe('邀请制内测');

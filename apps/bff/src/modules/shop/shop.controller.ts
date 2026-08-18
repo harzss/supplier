@@ -15,6 +15,7 @@ import { Public } from '../entitlement/public.decorator';
 import { AuditAction } from '../observability/audit.decorator';
 import { AuditService } from '../observability/audit.service';
 import { Alibaba1688ReadinessService } from './alibaba1688-readiness.service';
+import { AllowSuspendedAccess } from '../entitlement/allow-suspended-access.decorator';
 
 @ApiTags('shops')
 @Controller('shops')
@@ -29,6 +30,7 @@ export class ShopController {
   ) {}
 
   /** 当前用户的店铺列表 */
+  @AllowSuspendedAccess()
   @Get()
   list(@CurrentUser() user: CurrentUserType) {
     return this.shops.list(user.userId);
@@ -41,6 +43,7 @@ export class ShopController {
   }
 
   /** 停用本系统中的店铺授权并清除本地 Token，历史数据继续保留 */
+  @AllowSuspendedAccess()
   @AuditAction('shop.disconnect', 'shop')
   @Post(':id/disconnect')
   disconnect(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {

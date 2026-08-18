@@ -16,7 +16,13 @@ import { sourceBindingFingerprint, sourceBindingRoutesFingerprint } from './sour
 
 const NOW = new Date('2026-08-04T08:00:00.000Z');
 const CLIENT_REQUEST_ID = '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1';
-const USER = { userId: 1n, plan: 'pro' } as CurrentUser;
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 
 describe('ProductBatchService', () => {
   it('exposes SKU price eligibility and range in the candidate list', async () => {
@@ -1839,7 +1845,11 @@ describe('ProductBatchService', () => {
     await expect(fixture.service.claimNext('worker-reconcile')).resolves.toBeNull();
 
     expect(fixture.prisma.productBatchTask.updateMany).toHaveBeenCalledWith({
-      where: { id: 41n, stateRevision: 3 },
+      where: {
+        id: 41n,
+        stateRevision: 3,
+        user: { entitlementAccessStatus: 'active' },
+      },
       data: {
         status: 'succeeded',
         stateRevision: { increment: 1 },
@@ -2179,6 +2189,15 @@ describe('ProductBatchService', () => {
 
     await expect(fixture.service.claimNext('worker-1')).resolves.toEqual(claimed);
 
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: expect.objectContaining({
+            user: { entitlementAccessStatus: 'active' },
+          }),
+        }),
+      }),
+    );
     expect(fixture.prisma.productBatchItem.updateMany).toHaveBeenLastCalledWith({
       where: {
         id: 51n,
@@ -2188,6 +2207,7 @@ describe('ProductBatchService', () => {
           cancelRequestedAt: null,
           status: { in: ['queued', 'running'] },
           action: { not: 'edit_sku' },
+          user: { entitlementAccessStatus: 'active' },
         },
       },
       data: expect.objectContaining({
@@ -2196,6 +2216,94 @@ describe('ProductBatchService', () => {
         lockedBy: 'worker-1',
       }),
     });
+    expect(fixture.prisma.productBatchTask.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 41n,
+        status: 'queued',
+        user: { entitlementAccessStatus: 'active' },
+      },
+      data: { status: 'running', stateRevision: { increment: 1 }, startedAt: expect.any(Date) },
+    });
+  });
+
+  it('does not claim, stale-recover, or reconcile work for a suspended user', async () => {
+    const fixture = createFixture();
+    const stale = {
+      id: 51n,
+      taskId: 41n,
+      status: 'running',
+      attempts: 1,
+      maxAttempts: 3,
+      lockedBy: 'dead-worker',
+      expectedMutationRevision: 1,
+      task: { action: 'offline', cancelRequestedAt: null },
+    };
+    const candidate = {
+      id: 52n,
+      taskId: 42n,
+      status: 'pending',
+      attempts: 0,
+      startedAt: null,
+    };
+    fixture.prisma.productBatchItem.findMany.mockImplementation(async ({ where }: any) =>
+      where?.task?.user?.entitlementAccessStatus === 'active' ? [] : [stale],
+    );
+    fixture.prisma.productBatchItem.findFirst.mockImplementation(async ({ where }: any) =>
+      where?.task?.user?.entitlementAccessStatus === 'active' ? null : candidate,
+    );
+    fixture.prisma.productBatchTask.findMany.mockImplementation(async ({ where }: any) =>
+      where?.user?.entitlementAccessStatus === 'active' ? [] : [{ id: 41n }],
+    );
+
+    await expect(fixture.service.claimNext('worker-suspended')).resolves.toBeNull();
+
+    expect(fixture.prisma.productBatchItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: { user: { entitlementAccessStatus: 'active' } },
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: expect.objectContaining({
+            user: { entitlementAccessStatus: 'active' },
+          }),
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchTask.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          user: { entitlementAccessStatus: 'active' },
+        }),
+      }),
+    );
+    expect(fixture.prisma.productBatchItem.updateMany).not.toHaveBeenCalled();
+    expect(fixture.prisma.productBatchTask.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('stops a claimed item before adapter creation when access is suspended', async () => {
+    const fixture = createFixture();
+    const item = executionRecord();
+    fixture.prepareExecution(item);
+    fixture.prisma.productBatchItem.count.mockResolvedValue(0);
+
+    await expect(fixture.service.executeClaimed(item)).resolves.toBe('stale');
+
+    expect(fixture.prisma.productBatchItem.count).toHaveBeenCalledWith({
+      where: {
+        id: item.id,
+        status: 'running',
+        attempts: item.attempts,
+        lockedBy: item.lockedBy,
+        expectedMutationRevision: item.expectedMutationRevision,
+        task: { user: { entitlementAccessStatus: 'active' } },
+      },
+    });
+    expect(fixture.adapters.create).not.toHaveBeenCalled();
+    expect(fixture.adapter.offlineProduct).not.toHaveBeenCalled();
   });
 
   it('recovers a stale running item into retry wait before claiming new work', async () => {
@@ -2208,6 +2316,7 @@ describe('ProductBatchService', () => {
         attempts: 1,
         maxAttempts: 3,
         lockedBy: 'dead-worker',
+        expectedMutationRevision: 1,
         task: { cancelRequestedAt: null },
       },
     ]);
@@ -2229,6 +2338,8 @@ describe('ProductBatchService', () => {
         status: 'running',
         attempts: 1,
         lockedBy: 'dead-worker',
+        expectedMutationRevision: 1,
+        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: expect.objectContaining({
         status: 'retry_wait',
@@ -2428,7 +2539,11 @@ describe('ProductBatchService', () => {
     await expect(fixture.service.claimNext('worker-2')).resolves.toBeNull();
 
     expect(fixture.prisma.productBatchTask.updateMany).toHaveBeenCalledWith({
-      where: { id: 41n, stateRevision: 3 },
+      where: {
+        id: 41n,
+        stateRevision: 3,
+        user: { entitlementAccessStatus: 'active' },
+      },
       data: {
         status: 'succeeded',
         stateRevision: { increment: 1 },
@@ -3310,6 +3425,85 @@ describe('ProductBatchService', () => {
         data: expect.objectContaining({
           status: 'failed',
           errorCode: 'ONLINE_RESULT_UNKNOWN',
+        }),
+      }),
+    );
+  });
+
+  it('quarantines and records an unknown result when access is suspended after online starts', async () => {
+    const fixture = createFixture();
+    const item = onlineExecutionRecord();
+    fixture.prepareExecution(item);
+    let accessActive = true;
+    fixture.prisma.productBatchItem.count.mockImplementation(async ({ where }: any) =>
+      where?.task?.user?.entitlementAccessStatus === 'active' && !accessActive ? 0 : 1,
+    );
+    fixture.prisma.productBatchItem.updateMany.mockImplementation(async ({ where }: any) => ({
+      count: where?.task?.user?.entitlementAccessStatus === 'active' && !accessActive ? 0 : 1,
+    }));
+    fixture.adapter.getProductState.mockResolvedValue(platformState('offline'));
+    fixture.adapter.getProductInventory.mockResolvedValue(
+      platformInventory(
+        [
+          ['sku-a', 7],
+          ['sku-b', 13],
+        ],
+        'offline',
+      ),
+    );
+    fixture.adapter.onlineProduct.mockImplementationOnce(async () => {
+      accessActive = false;
+      (item as unknown as { errorCode: string }).errorCode = 'ONLINE_WRITE_STARTED';
+    });
+
+    let thrown: unknown;
+    try {
+      await fixture.service.executeClaimed(item);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(accessActive).toBe(false);
+    expect(fixture.adapter.onlineProduct).toHaveBeenCalledOnce();
+    expect(fixture.adapter.offlineProduct).toHaveBeenCalledWith('shop-token', '998877');
+    await expect(fixture.service.failClaimedItem(item, thrown)).resolves.toBe('failed');
+
+    const quarantineCommit = fixture.prisma.productBatchItem.updateMany.mock.calls.find(
+      ([args]: any[]) => args.data?.result?.quarantineRevision === 2,
+    )?.[0];
+    expect(quarantineCommit?.where).toMatchObject({
+      id: item.id,
+      status: 'running',
+      attempts: item.attempts,
+      lockedBy: item.lockedBy,
+      expectedMutationRevision: item.expectedMutationRevision,
+    });
+    expect(quarantineCommit?.where).not.toHaveProperty('task');
+
+    const unknownCommit = fixture.prisma.productBatchItem.updateMany.mock.calls.find(
+      ([args]: any[]) =>
+        args.data?.status === 'failed' && args.data?.errorCode === 'ONLINE_RESULT_UNKNOWN',
+    )?.[0];
+    expect(unknownCommit?.where).toMatchObject({
+      id: item.id,
+      status: 'running',
+      attempts: item.attempts,
+      lockedBy: item.lockedBy,
+      expectedMutationRevision: item.expectedMutationRevision,
+      errorCode: { in: ['ONLINE_WRITE_STARTED', 'ONLINE_RESULT_UNKNOWN'] },
+    });
+    expect(unknownCommit?.where).not.toHaveProperty('task');
+
+    fixture.prisma.productBatchItem.findFirst.mockImplementation(async ({ where }: any) =>
+      where?.task?.user?.entitlementAccessStatus === 'active' ? null : item,
+    );
+    await expect(fixture.service.claimNext('worker-after-suspension')).resolves.toBeNull();
+    expect(fixture.prisma.productBatchItem.findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: expect.objectContaining({
+            user: { entitlementAccessStatus: 'active' },
+          }),
         }),
       }),
     );

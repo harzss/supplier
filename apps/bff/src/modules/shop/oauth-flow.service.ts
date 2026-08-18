@@ -8,6 +8,7 @@ import {
   type OAuthResultPayload,
 } from './oauth-state.service';
 import { ShopService } from './shop.service';
+import { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 
 export interface OAuthAuthorizationResult {
   platform: OAuthPlatform;
@@ -42,6 +43,7 @@ export class OAuthFlowService {
     private readonly config: OAuthConfigService,
     private readonly state: OAuthStateService,
     private readonly shops: ShopService,
+    private readonly access: EntitlementAccessService,
   ) {}
 
   async authorize(
@@ -49,6 +51,7 @@ export class OAuthFlowService {
     platform: OAuthPlatform,
     returnTo?: string,
   ): Promise<OAuthAuthorizationResult> {
+    await this.access.assertActive(userId);
     const platformConfig = this.config.getPlatformConfig(platform);
     const state = await this.state.issue(userId, platform, platformConfig.redirectUri, returnTo);
     const adapter = this.createAdapter(platform, platformConfig);
@@ -68,12 +71,15 @@ export class OAuthFlowService {
     const payload = await this.state.consume(state, platform, platformConfig.redirectUri);
     const userId = BigInt(payload.userId);
     try {
+      const entitlement = await this.access.assertActive(userId);
       const adapter = this.createAdapter(platform, platformConfig);
       const tokenSet = await adapter.exchangeToken(code);
+      const confirmedEntitlement = await this.access.assertActive(userId, entitlement.revision);
       const shop = await this.shops.saveAuthorized(
         userId,
         platform,
         tokenSet,
+        confirmedEntitlement.revision,
         platform === 'alibaba_1688' ? 'buyer' : 'seller',
       );
       return {

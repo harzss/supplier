@@ -338,7 +338,16 @@ export class PublishService {
       },
     });
     const dto = taskDto(queuedTask);
-    const user: CurrentUser = { userId: queuedTask.userId, plan: queuedTask.user.plan };
+    const user: CurrentUser = {
+      userId: queuedTask.userId,
+      plan:
+        queuedTask.user.entitlementAccessStatus === 'active'
+          ? queuedTask.user.plan
+          : ('free' as const),
+      entitlementSource: queuedTask.user.entitlementSource,
+      accessStatus: queuedTask.user.entitlementAccessStatus,
+      entitlementRevision: queuedTask.user.entitlementRevision,
+    };
     const categoryIdByPlatform = new Map(
       confirmedMappings.map((mapping) => [mapping.platform, mapping.categoryId]),
     );
@@ -1675,6 +1684,15 @@ export class PublishService {
     const externalProductId = input.externalProductId!;
     if (requireRecovery && !adapter.findProductByExternalId) {
       throw new Error('当前平台暂不支持安全幂等铺货');
+    }
+    if (requireRecovery && adapter.findProductByExternalId) {
+      await assertPublishExecutionOwned(lease);
+      const existing = await adapter.findProductByExternalId(accessToken, externalProductId);
+      await assertPublishExecutionOwned(lease);
+      if (existing) {
+        this.logger.warn(`平台已有相同外部编码商品，已在发布前恢复：${externalProductId}`);
+        return existing;
+      }
     }
     try {
       await assertPublishExecutionOwned(lease);

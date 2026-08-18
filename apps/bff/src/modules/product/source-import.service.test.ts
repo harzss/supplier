@@ -14,7 +14,13 @@ import { SourceImportService, type SourceImportExecutionRecord } from './source-
 
 const NOW = new Date('2026-08-04T12:00:00.000Z');
 const CLIENT_REQUEST_ID = '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1';
-const USER = { userId: 1n, plan: 'pro' } as CurrentUser;
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 
 afterEach(() => vi.useRealTimers());
 
@@ -88,7 +94,13 @@ describe('SourceImportService preview and task controls', () => {
 
   it('scopes previews and existing collection state to the current tenant', async () => {
     const fixture = createFixture();
-    const otherUser = { userId: 7n, plan: 'pro' } as CurrentUser;
+    const otherUser: CurrentUser = {
+      userId: 7n,
+      plan: 'pro',
+      entitlementSource: 'internal_beta',
+      accessStatus: 'active',
+      entitlementRevision: 1,
+    };
     fixture.adapters.resolveBuyerShop.mockResolvedValue(null);
     fixture.prisma.sourceImportTask.findUnique.mockResolvedValue(null);
     fixture.prisma.sourceProduct.findMany.mockResolvedValue([]);
@@ -258,6 +270,56 @@ describe('SourceImportService worker safety', () => {
     await expect(fixture.service.claimNext('worker-b')).resolves.toBeNull();
 
     expect(fixture.prisma.sourceImportTask.updateMany).toHaveBeenCalledTimes(1);
+    expect(fixture.prisma.sourceImportItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: expect.objectContaining({
+            user: { entitlementAccessStatus: 'active' },
+          }),
+        }),
+      }),
+    );
+    expect(fixture.prisma.sourceImportItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: expect.objectContaining({
+            user: { entitlementAccessStatus: 'active' },
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('does not claim or automatically recover work for a suspended user', async () => {
+    const fixture = createFixture();
+    fixture.prisma.sourceImportItem.findFirst.mockResolvedValue(null);
+
+    await expect(fixture.service.claimNext('worker')).resolves.toBeNull();
+
+    expect(fixture.prisma.sourceImportItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: { user: { entitlementAccessStatus: 'active' } },
+        }),
+      }),
+    );
+    expect(fixture.prisma.sourceImportItem.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: expect.objectContaining({
+            user: { entitlementAccessStatus: 'active' },
+          }),
+        }),
+      }),
+    );
+    expect(fixture.prisma.sourceImportTask.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          user: { entitlementAccessStatus: 'active' },
+        }),
+      }),
+    );
+    expect(fixture.prisma.sourceImportItem.updateMany).not.toHaveBeenCalled();
   });
 
   it('preserves a running item when stale recovery races with task cancellation', async () => {
@@ -275,7 +337,11 @@ describe('SourceImportService worker safety', () => {
     expect(fixture.prisma.sourceImportItem.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          task: { status: { in: ['queued', 'running'] }, cancelRequestedAt: null },
+          task: {
+            status: { in: ['queued', 'running'] },
+            cancelRequestedAt: null,
+            user: { entitlementAccessStatus: 'active' },
+          },
         }),
       }),
     );
@@ -290,6 +356,35 @@ describe('SourceImportService worker safety', () => {
 
     await expect(fixture.service.executeClaimed(claimed)).resolves.toBe('stale');
     expect(fixture.adapters.create).not.toHaveBeenCalled();
+  });
+
+  it('does not create an adapter after a claimed user is suspended', async () => {
+    const fixture = createFixture();
+    const claimed = executionRecord();
+    fixture.prisma.sourceImportItem.findUnique.mockResolvedValue(claimed);
+    fixture.prisma.sourceImportItem.findFirst.mockResolvedValue(null);
+
+    await expect(fixture.service.executeClaimed(claimed)).resolves.toBe('stale');
+
+    expect(fixture.adapters.create).not.toHaveBeenCalled();
+    expect(fixture.rateLimiter.take).not.toHaveBeenCalled();
+  });
+
+  it('rechecks active ownership immediately before the remote fetch', async () => {
+    const fixture = createFixture();
+    const claimed = executionRecord();
+    const fetchProduct = vi.fn();
+    fixture.prisma.sourceImportItem.findUnique.mockResolvedValue(claimed);
+    fixture.prisma.sourceImportItem.findFirst
+      .mockResolvedValueOnce({ id: claimed.id })
+      .mockResolvedValueOnce(null);
+    fixture.adapters.create.mockResolvedValue({ demo: true, adapter: { fetchProduct } });
+
+    await expect(fixture.service.executeClaimed(claimed)).resolves.toBe('stale');
+
+    expect(fixture.adapters.create).toHaveBeenCalledOnce();
+    expect(fixture.rateLimiter.take).toHaveBeenCalledOnce();
+    expect(fetchProduct).not.toHaveBeenCalled();
   });
 
   it('retries a serializable global-cache conflict and atomically completes all records', async () => {
@@ -695,6 +790,7 @@ describe('SourceImportService worker safety', () => {
         status: {
           in: ['queued', 'running', 'cancelling', 'cancelled', 'partial', 'succeeded', 'failed'],
         },
+        user: { entitlementAccessStatus: 'active' },
       },
       take: 100,
       orderBy: { id: 'asc' },

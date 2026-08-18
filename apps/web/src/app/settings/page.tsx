@@ -73,6 +73,7 @@ export default function SettingsPage() {
   };
 
   const usage = ent.data?.aiUsage;
+  const accessSuspended = ent.data?.accessStatus === 'suspended';
   const unlimited = usage?.limit === -1;
   const pct =
     usage && usage.limit > 0 ? Math.min(100, Math.round((usage.used / usage.limit) * 100)) : 0;
@@ -90,24 +91,34 @@ export default function SettingsPage() {
         <section className="ledger-panel-dark settings-plan-hero overflow-hidden p-5 sm:p-6">
           <div className="mb-8 flex items-start justify-between gap-4">
             <div>
-              <p className="text-xs font-medium text-[#949baa]">邀请制内测 · 当前能力档位</p>
+              <p className="text-xs font-medium text-[#949baa]">邀请制测试 · 当前权益状态</p>
               <h2 className="mt-2 text-3xl font-semibold tracking-tight">
-                {isDemoAuthMode ? (ent.data?.planName ?? '当前权限') : '邀请制内测'}
+                {ent.data?.planName ?? (isDemoAuthMode ? '当前权限' : '邀请制内测')}
               </h2>
             </div>
-            <span className="rounded-full border border-[#3b3f4b] bg-white/5 px-2.5 py-1 text-[10px] font-semibold text-[#d9dce4]">
-              {isDemoAuthMode ? '演示预览' : '已启用'}
+            <span
+              className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${
+                accessSuspended
+                  ? 'border-amber-400/40 bg-amber-400/10 text-amber-200'
+                  : 'border-[#3b3f4b] bg-white/5 text-[#d9dce4]'
+              }`}
+            >
+              {accessSuspended ? '已暂停' : isDemoAuthMode ? '演示预览' : '已启用'}
             </span>
           </div>
 
           <div className="mb-7 rounded-2xl border border-white/10 bg-white/[0.04] p-4 sm:p-5">
             <p className="text-xs font-medium text-[#949baa]">内测期软件订阅费</p>
             <p className="mt-1 text-3xl font-semibold tracking-tight tabular-nums">
-              ¥0
-              <span className="ml-2 text-xs font-medium text-[#949baa]">/ 内测期</span>
+              {accessSuspended ? '暂停' : '¥0'}
+              <span className="ml-2 text-xs font-medium text-[#949baa]">
+                {accessSuspended ? '等待权威订购恢复' : '/ 内测期'}
+              </span>
             </p>
             <p className="mt-3 text-xs leading-5 text-[#b4bac5]">
-              当前免费不代表永久免费，平台不会自动扣费。正式套餐会在价格验证完成后另行通知。
+              {accessSuspended
+                ? 'AI、铺货、采集、采购和自动任务均已停止；历史数据与凭证清理入口仍然保留。'
+                : '当前免费不代表永久免费，平台不会自动扣费。正式套餐会在价格验证完成后另行通知。'}
             </p>
             <p className="mt-1 text-xs leading-5 text-[#858d9c]">
               模型 API、1688、销售平台及其他第三方服务产生的费用，由对应服务商另行收取。
@@ -269,6 +280,7 @@ export default function SettingsPage() {
                   value={provider}
                   onChange={(e) => setProvider(e.target.value)}
                   className="field-control"
+                  disabled={accessSuspended}
                 >
                   {PROVIDERS.map((p) => (
                     <option key={p.value} value={p.value}>
@@ -287,6 +299,7 @@ export default function SettingsPage() {
                   placeholder="例如 sk-..."
                   autoComplete="off"
                   className="field-control"
+                  disabled={accessSuspended}
                 />
               </label>
               <label className="field-label">
@@ -298,15 +311,20 @@ export default function SettingsPage() {
                   onChange={(e) => setLabel(e.target.value)}
                   placeholder="例如：运营团队 DeepSeek"
                   className="field-control"
+                  disabled={accessSuspended}
                 />
               </label>
               <button
                 type="button"
                 onClick={() => saveKey.mutate()}
-                disabled={saveKey.isPending || apiKey.length < 8}
+                disabled={accessSuspended || saveKey.isPending || apiKey.length < 8}
                 className="primary-button w-full"
               >
-                {saveKey.isPending ? '保存中…' : '保存密钥'}
+                {accessSuspended
+                  ? '权益暂停期间不可新增密钥'
+                  : saveKey.isPending
+                    ? '保存中…'
+                    : '保存密钥'}
               </button>
               {saveKey.isError && (
                 <p className="text-sm text-red-600" role="alert">
@@ -328,8 +346,8 @@ export default function SettingsPage() {
         </section>
       </div>
 
-      <ShopsSection />
-      <MediaReadinessSection />
+      <ShopsSection accessSuspended={accessSuspended} />
+      {accessSuspended ? null : <MediaReadinessSection />}
 
       <section
         id="capacity-options"
@@ -407,29 +425,37 @@ export default function SettingsPage() {
           <article className="flex flex-col gap-5 bg-[var(--surface)] p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-semibold tracking-tight">邀请制内测</h3>
-                <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-semibold text-brand-700">
-                  当前
+                <h3 className="text-lg font-semibold tracking-tight">
+                  {accessSuspended ? '权益已暂停' : '邀请制内测'}
+                </h3>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${accessSuspended ? 'bg-amber-100 text-amber-800' : 'bg-brand-100 text-brand-700'}`}
+                >
+                  {accessSuspended ? '暂停' : '当前'}
                 </span>
               </div>
               <p className="mt-1 text-sm text-[var(--muted)]">
-                当前实际额度与能力以上方数据为准。正式套餐和价格尚未开放。
+                {accessSuspended
+                  ? '只有权威服务市场订购或对账结果可以恢复能力；旧任务不会自动重放。'
+                  : '当前实际额度与能力以上方数据为准。正式套餐和价格尚未开放。'}
               </p>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" disabled className="primary-button">
-                当前
-              </button>
-              <button
-                type="button"
-                aria-controls="capacity-request-help"
-                aria-expanded={capacityRequestPlan !== null}
-                onClick={() => setCapacityRequestPlan('当前内测')}
-                className="secondary-button"
-              >
-                申请扩容
-              </button>
-            </div>
+            {accessSuspended ? null : (
+              <div className="flex flex-wrap gap-2">
+                <button type="button" disabled className="primary-button">
+                  当前
+                </button>
+                <button
+                  type="button"
+                  aria-controls="capacity-request-help"
+                  aria-expanded={capacityRequestPlan !== null}
+                  onClick={() => setCapacityRequestPlan('当前内测')}
+                  className="secondary-button"
+                >
+                  申请扩容
+                </button>
+              </div>
+            )}
           </article>
         )}
         {capacityRequestPlan ? (

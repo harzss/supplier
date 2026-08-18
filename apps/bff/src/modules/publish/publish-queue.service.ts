@@ -27,6 +27,7 @@ export class PublishQueueService {
         where: {
           status: { in: ['queued', 'retry_wait'] },
           nextRunAt: { lte: now },
+          task: { user: { entitlementAccessStatus: 'active' } },
         },
         orderBy: [{ nextRunAt: 'asc' }, { id: 'asc' }],
       });
@@ -36,6 +37,7 @@ export class PublishQueueService {
           id: candidate.id,
           status: candidate.status,
           attempts: candidate.attempts,
+          task: { user: { entitlementAccessStatus: 'active' } },
         },
         data: {
           status: 'running',
@@ -59,6 +61,7 @@ export class PublishQueueService {
         status: 'running',
         attempts: job.attempts,
         lockedBy: job.lockedBy,
+        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: {
         status: 'completed',
@@ -161,6 +164,7 @@ export class PublishQueueService {
       where: {
         status: 'running',
         lockedAt: { lt: new Date(now.getTime() - PUBLISH_JOB_STALE_MS) },
+        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: {
         status: 'retry_wait',
@@ -178,6 +182,7 @@ export class PublishQueueService {
         status: 'pending',
         job: { is: null },
         createdAt: { lt: new Date(now.getTime() - ORPHAN_TASK_GRACE_MS) },
+        user: { entitlementAccessStatus: 'active' },
       },
       orderBy: { createdAt: 'asc' },
       take: 50,
@@ -204,6 +209,7 @@ function ownedJobWhere(job: PublishJob) {
     status: 'running' as const,
     attempts: job.attempts,
     lockedBy: job.lockedBy,
+    task: { user: { entitlementAccessStatus: 'active' as const } },
   };
 }
 

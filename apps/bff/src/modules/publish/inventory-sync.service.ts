@@ -116,6 +116,7 @@ export class InventorySyncService {
           inventoryTargetFingerprint: { not: null },
           inventoryTargetVersion: { gt: 0 },
           inventoryNextRunAt: { lte: now },
+          task: { user: { entitlementAccessStatus: 'active' } },
           batchItems: {
             none: {
               status: { in: ['running', 'retry_wait', 'failed'] },
@@ -146,6 +147,7 @@ export class InventorySyncService {
           inventorySyncAttempts: candidate.inventorySyncAttempts,
           inventoryTargetFingerprint: candidate.inventoryTargetFingerprint,
           inventoryTargetVersion: candidate.inventoryTargetVersion,
+          task: { user: { entitlementAccessStatus: 'active' } },
           batchItems: {
             none: {
               status: { in: ['running', 'retry_wait', 'failed'] },
@@ -237,6 +239,7 @@ export class InventorySyncService {
             inventoryLockedBy: lockedBy,
             inventoryTargetFingerprint: targetFingerprint,
             inventoryTargetVersion: targetVersion,
+            task: { user: { entitlementAccessStatus: 'active' } },
             ...sourceBindingOwnershipWhere(sourceBindingGuard),
           },
           data: {
@@ -261,6 +264,7 @@ export class InventorySyncService {
             inventoryLockedBy: lockedBy,
             inventoryTargetFingerprint: targetFingerprint,
             inventoryTargetVersion: targetVersion,
+            task: { user: { entitlementAccessStatus: 'active' } },
             ...sourceBindingOwnershipWhere(sourceBindingGuard),
           },
           data: {
@@ -278,10 +282,6 @@ export class InventorySyncService {
       }
       if (!record.platformProductId) throw new Error('已发布商品缺少平台商品 ID');
 
-      const adapter = this.adapters.create(record.shop);
-      const token = isDemoShop(record.shop)
-        ? 'mock-token'
-        : await this.shopTokens.getAccessToken(record.shop.id, record.task.userId);
       await this.platformProductLocks.renew(record.id, platformLock);
       if (
         !(await this.isExecutionOwned(
@@ -295,6 +295,10 @@ export class InventorySyncService {
       ) {
         return 'stale';
       }
+      const adapter = this.adapters.create(record.shop);
+      const token = isDemoShop(record.shop)
+        ? 'mock-token'
+        : await this.shopTokens.getAccessToken(record.shop.id, record.task.userId);
 
       let reason = 'stock_updated';
       let offline = false;
@@ -458,6 +462,7 @@ export class InventorySyncService {
         inventoryLockedBy: lockedBy,
         inventoryTargetFingerprint: targetFingerprint,
         inventoryTargetVersion: targetVersion,
+        task: { user: { entitlementAccessStatus: 'active' } },
         ...sourceBindingOwnershipWhere(job.sourceBindingGuard ?? null),
       },
       data: {
@@ -547,6 +552,7 @@ export class InventorySyncService {
           inventoryFingerprint: targetFingerprint,
           inventoryVersion: targetVersion,
         }),
+        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: {
         ...(offline ? { status: 'offline' as const } : {}),
@@ -591,13 +597,14 @@ export class InventorySyncService {
   ): Promise<boolean> {
     await this.platformProductLocks.renew(record.id, platformLock);
     if (
-      !(await this.isExecutionOwned(
+      !(await this.isExecutionLeaseCurrent(
         record.id,
         targetFingerprint,
         targetVersion,
         attempts,
         lockedBy,
         sourceBindingGuard,
+        false,
       ))
     ) {
       return false;
@@ -671,8 +678,33 @@ export class InventorySyncService {
     lockedBy: string,
     sourceBindingGuard: SourceBindingGuard | null,
   ): Promise<boolean> {
+    return this.isExecutionLeaseCurrent(
+      publishedProductId,
+      targetFingerprint,
+      targetVersion,
+      attempts,
+      lockedBy,
+      sourceBindingGuard,
+      true,
+    );
+  }
+
+  private async isExecutionLeaseCurrent(
+    publishedProductId: bigint,
+    targetFingerprint: string,
+    targetVersion: number,
+    attempts: number,
+    lockedBy: string,
+    sourceBindingGuard: SourceBindingGuard | null,
+    requireActiveAccess: boolean,
+  ): Promise<boolean> {
     const owned = await this.prisma.publishedProduct.findUnique({
-      where: { id: publishedProductId },
+      where: {
+        id: publishedProductId,
+        ...(requireActiveAccess
+          ? { task: { user: { entitlementAccessStatus: 'active' as const } } }
+          : {}),
+      },
       select: {
         sourceProductId: true,
         inventorySyncStatus: true,
@@ -700,6 +732,7 @@ export class InventorySyncService {
         status: 'online',
         inventorySyncStatus: 'syncing',
         inventoryLockedAt: { lt: new Date(now.getTime() - STALE_LOCK_MS) },
+        task: { user: { entitlementAccessStatus: 'active' } },
         ...(this.demoMode ? {} : { shop: runtimeShopWhere(this.demoMode) }),
       },
       data: {

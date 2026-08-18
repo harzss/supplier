@@ -939,9 +939,22 @@ export class ExceptionCenterService {
       where: { id: userId },
       select: {
         plan: true,
+        entitlementSource: true,
+        entitlementAccessStatus: true,
         subscriptions: {
           where: { status: 'active' },
           orderBy: [{ startDate: 'asc' }, { id: 'asc' }],
+        },
+        marketplaceProjections: {
+          where: { origin: 'marketplace' },
+          orderBy: [{ providerRevision: 'desc' }, { id: 'desc' }],
+          select: {
+            id: true,
+            internalPlan: true,
+            lifecycleState: true,
+            accessStatus: true,
+            providerRevision: true,
+          },
         },
       },
     });
@@ -957,7 +970,31 @@ export class ExceptionCenterService {
     );
     let code: CaseCode | null = null;
     let reason = '';
-    if (user.subscriptions.length === 0 && user.plan !== 'free') {
+    if (user.entitlementSource === 'marketplace') {
+      const activeProjections = user.marketplaceProjections.filter(
+        (projection) => projection.accessStatus === 'active',
+      );
+      if (user.entitlementAccessStatus === 'active' && activeProjections.length === 0) {
+        code = 'entitlement_active_subscription_missing';
+        reason = '服务市场账号仍为启用状态，但当前没有可证明的有效订购投影。';
+      } else if (activeProjections.length > 1) {
+        code = 'entitlement_multiple_active_subscriptions';
+        reason = '当前账号存在多条同时生效的服务市场订购投影。';
+      } else if (
+        user.entitlementAccessStatus === 'suspended' &&
+        (user.plan !== 'free' || activeProjections.length > 0)
+      ) {
+        code = 'entitlement_plan_mismatch';
+        reason = '服务市场权益已暂停，但账号仍保留套餐或有效订购投影。';
+      } else if (
+        user.entitlementAccessStatus === 'active' &&
+        activeProjections.length === 1 &&
+        user.plan !== activeProjections[0]!.internalPlan
+      ) {
+        code = 'entitlement_plan_mismatch';
+        reason = '账号套餐与当前有效的服务市场订购投影不一致。';
+      }
+    } else if (user.subscriptions.length === 0 && user.plan !== 'free') {
       code = 'entitlement_active_subscription_missing';
       reason = '账号套餐不是免费版，但当前没有任何标记为有效的本地订购记录。';
     } else if (invalid.length > 0) {
@@ -978,12 +1015,21 @@ export class ExceptionCenterService {
         sourceFingerprint: fingerprint({
           code,
           userPlan: user.plan,
+          entitlementSource: user.entitlementSource,
+          entitlementAccessStatus: user.entitlementAccessStatus,
           subscriptions: user.subscriptions.map((subscription) => ({
             id: subscription.id.toString(),
             plan: subscription.plan,
             startDate: utcDateKey(subscription.startDate),
             endDate: utcDateKey(subscription.endDate),
             status: subscription.status,
+          })),
+          marketplaceProjections: user.marketplaceProjections.map((projection) => ({
+            id: projection.id.toString(),
+            plan: projection.internalPlan,
+            lifecycleState: projection.lifecycleState,
+            accessStatus: projection.accessStatus,
+            providerRevision: projection.providerRevision?.toFixed(0) ?? null,
           })),
         }),
         subjectType: 'user',

@@ -2,6 +2,7 @@ import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { LlmError, type ChatResult } from '@supplier/llm-client';
 import type { LlmModel } from '@supplier/shared-types';
 import { AiUsageService, type PlatformUsageReservation } from '../entitlement/ai-usage.service';
+import { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import type { TitleGenerateDto } from './dto/title-generate.dto';
@@ -62,9 +63,11 @@ export class AiGatewayService {
     private readonly resolver: LlmResolverService,
     private readonly entitlement: EntitlementService,
     private readonly usage: AiUsageService,
+    private readonly access: EntitlementAccessService,
   ) {}
 
   async generateTitle(user: CurrentUser, dto: TitleGenerateDto): Promise<TitleResponse> {
+    await this.access.assertActive(user.userId, user.entitlementRevision);
     // 1. 功能门禁（ai.title 属基础功能，免费可用）
     this.entitlement.assertFeature(user.plan, 'ai.title');
 
@@ -80,6 +83,7 @@ export class AiGatewayService {
     });
     const cached = await this.cache.get<TitleCore>(cacheKey);
     if (cached) {
+      await this.access.assertActive(user.userId, user.entitlementRevision);
       return {
         ...cached,
         cached: true,
@@ -102,9 +106,16 @@ export class AiGatewayService {
       // 5. 平台调用先原子预占额度；BYOK 由用户自付，不占平台额度
       const reservation = resolution.viaByok
         ? null
-        : await this.usage.reservePlatform(user.userId, user.plan, 'title', model);
+        : await this.usage.reservePlatform(
+            user.userId,
+            user.plan,
+            'title',
+            model,
+            user.entitlementRevision,
+          );
       let llmResult: ChatResult;
       try {
+        await this.access.assertActive(user.userId, user.entitlementRevision);
         llmResult = await resolution.client.chat({
           model,
           messages,
@@ -122,6 +133,7 @@ export class AiGatewayService {
         ) {
           this.logger.warn('Falling back to stub titles (no LLM provider configured)');
           core = this.stubResponse(dto);
+          await this.access.assertActive(user.userId, user.entitlementRevision);
           await this.cache.set(cacheKey, core, 3600);
           return { ...core, billing: await this.buildBilling(user, resolution.viaByok) };
         }
@@ -139,6 +151,7 @@ export class AiGatewayService {
         llmResult.model,
         llmResult.usage,
       );
+      await this.access.assertActive(user.userId, user.entitlementRevision);
       const parsed = parseAndFilterTitles(llmResult.content, dto.targetPlatform);
       core = {
         titles: parsed.titles,
@@ -151,6 +164,7 @@ export class AiGatewayService {
     }
 
     // 7. 写缓存（stub 也缓存，避免重复失败调用）
+    await this.access.assertActive(user.userId, user.entitlementRevision);
     await this.cache.set(
       cacheKey,
       {
@@ -167,6 +181,7 @@ export class AiGatewayService {
   }
 
   async generateDetail(user: CurrentUser, dto: DetailGenerateDto): Promise<DetailResponse> {
+    await this.access.assertActive(user.userId, user.entitlementRevision);
     this.entitlement.assertFeature(user.plan, 'ai.detail');
     const resolution = await this.resolver.resolve(user.userId);
     const cacheKey = this.cache.buildKey('detail', {
@@ -178,6 +193,7 @@ export class AiGatewayService {
     });
     const cached = await this.cache.get<DetailCore>(cacheKey);
     if (cached) {
+      await this.access.assertActive(user.userId, user.entitlementRevision);
       return {
         ...cached,
         cached: true,
@@ -196,9 +212,16 @@ export class AiGatewayService {
     } else {
       const reservation = resolution.viaByok
         ? null
-        : await this.usage.reservePlatform(user.userId, user.plan, 'detail', model);
+        : await this.usage.reservePlatform(
+            user.userId,
+            user.plan,
+            'detail',
+            model,
+            user.entitlementRevision,
+          );
       let llmResult: ChatResult;
       try {
+        await this.access.assertActive(user.userId, user.entitlementRevision);
         llmResult = await resolution.client.chat({
           model,
           messages: buildDetailMessages(dto),
@@ -216,6 +239,7 @@ export class AiGatewayService {
         ) {
           this.logger.warn('Falling back to stub detail (no LLM provider configured)');
           core = this.stubDetail(dto);
+          await this.access.assertActive(user.userId, user.entitlementRevision);
           await this.cache.set(cacheKey, core, 3600);
           return { ...core, billing: await this.buildBilling(user, resolution.viaByok) };
         }
@@ -232,6 +256,7 @@ export class AiGatewayService {
         llmResult.model,
         llmResult.usage,
       );
+      await this.access.assertActive(user.userId, user.entitlementRevision);
       const parsed = parseDetailContent(llmResult.content);
       core = {
         ...parsed,
@@ -242,6 +267,7 @@ export class AiGatewayService {
       billing = reservation ? billingFromReservation(reservation) : { viaByok: true, quota: null };
     }
 
+    await this.access.assertActive(user.userId, user.entitlementRevision);
     await this.cache.set(cacheKey, core, 3600);
     return { ...core, billing: billing ?? (await this.buildBilling(user, resolution.viaByok)) };
   }

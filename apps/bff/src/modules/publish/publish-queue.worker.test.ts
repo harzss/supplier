@@ -126,7 +126,7 @@ describe('PublishQueueWorker', () => {
     }
   });
 
-  it('does not complete or fail an attempt after lease ownership is lost', async () => {
+  it('does not call the platform adapter or change state after suspension loses ownership', async () => {
     const queue = {
       claimNext: vi.fn().mockResolvedValue(JOB),
       renew: vi
@@ -135,12 +135,14 @@ describe('PublishQueueWorker', () => {
       complete: vi.fn(),
       fail: vi.fn(),
     } as unknown as PublishQueueService;
+    const adapterCall = vi.fn();
     const publish = {
       executeQueued: vi
         .fn()
         .mockImplementation(async (_taskId: bigint, lease: PublishExecutionLease) => {
           await lease.assertOwned();
-          throw new Error('unreachable');
+          adapterCall();
+          return { status: 'success', results: [] };
         }),
     } as unknown as PublishService;
     const worker = new PublishQueueWorker(
@@ -151,6 +153,7 @@ describe('PublishQueueWorker', () => {
     );
 
     await expect(worker.runOnce()).resolves.toBe(true);
+    expect(adapterCall).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
     expect(queue.fail).not.toHaveBeenCalled();
   });

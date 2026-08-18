@@ -9,8 +9,8 @@ import { OrderSyncWorker } from './order-sync.worker';
 describe('OrderSyncWorker', () => {
   it('syncs every active real Douyin seller shop and continues after one failure', async () => {
     const findMany = vi.fn().mockResolvedValue([
-      { id: 9n, userId: 1n },
-      { id: 10n, userId: 2n },
+      { id: 9n, userId: 1n, user: { entitlementRevision: 7 } },
+      { id: 10n, userId: 2n, user: { entitlementRevision: 8 } },
     ]);
     const syncShop = vi
       .fn()
@@ -32,13 +32,14 @@ describe('OrderSyncWorker', () => {
         role: 'seller',
         status: 'active',
         accessTokenEnc: { not: null },
+        user: { status: 'active', entitlementAccessStatus: 'active' },
         NOT: { platformShopId: { startsWith: 'demo-' } },
       },
       orderBy: [{ lastOrderSyncAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, userId: true },
+      select: { id: true, userId: true, user: { select: { entitlementRevision: true } } },
     });
-    expect(syncShop).toHaveBeenNthCalledWith(1, 1n, 9n);
-    expect(syncShop).toHaveBeenNthCalledWith(2, 2n, 10n);
+    expect(syncShop).toHaveBeenNthCalledWith(1, 1n, 9n, 7);
+    expect(syncShop).toHaveBeenNthCalledWith(2, 2n, 10n, 8);
     expect(result).toEqual({ attempted: 2, succeeded: 1, busy: 0, failed: 1 });
     expect(alerts.resolve).toHaveBeenCalledWith('order_sync.shop.9', {
       synced: 1,
@@ -58,7 +59,11 @@ describe('OrderSyncWorker', () => {
     const worker = new OrderSyncWorker(
       { get: vi.fn() } as unknown as ConfigService,
       {
-        shop: { findMany: vi.fn().mockResolvedValue([{ id: 9n, userId: 1n }]) },
+        shop: {
+          findMany: vi
+            .fn()
+            .mockResolvedValue([{ id: 9n, userId: 1n, user: { entitlementRevision: 7 } }]),
+        },
       } as unknown as PrismaService,
       {
         syncShop: vi
@@ -82,7 +87,11 @@ describe('OrderSyncWorker', () => {
     const worker = new OrderSyncWorker(
       { get: vi.fn() } as unknown as ConfigService,
       {
-        shop: { findMany: vi.fn().mockResolvedValue([{ id: 9n, userId: 1n }]) },
+        shop: {
+          findMany: vi
+            .fn()
+            .mockResolvedValue([{ id: 9n, userId: 1n, user: { entitlementRevision: 7 } }]),
+        },
       } as unknown as PrismaService,
       {
         syncShop: vi
@@ -101,5 +110,31 @@ describe('OrderSyncWorker', () => {
       failed: 0,
     });
     expect(alerts.raise).not.toHaveBeenCalled();
+  });
+
+  it('does not select a suspended user shop as a worker candidate', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const syncShop = vi.fn();
+    const worker = new OrderSyncWorker(
+      { get: vi.fn() } as unknown as ConfigService,
+      { shop: { findMany } } as unknown as PrismaService,
+      { syncShop } as unknown as OrderSyncService,
+      { raise: vi.fn(), resolve: vi.fn() } as unknown as AlertService,
+    );
+
+    await expect(worker.runOnce()).resolves.toEqual({
+      attempted: 0,
+      succeeded: 0,
+      busy: 0,
+      failed: 0,
+    });
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          user: { status: 'active', entitlementAccessStatus: 'active' },
+        }),
+      }),
+    );
+    expect(syncShop).not.toHaveBeenCalled();
   });
 });

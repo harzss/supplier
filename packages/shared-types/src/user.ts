@@ -1,4 +1,6 @@
 export type UserPlan = 'free' | 'basic' | 'pro' | 'flagship' | 'enterprise';
+export type EntitlementSource = 'internal_beta' | 'marketplace';
+export type EntitlementAccessStatus = 'active' | 'suspended';
 
 export interface User {
   id: string;
@@ -7,6 +9,9 @@ export interface User {
   nickname: string;
   avatarUrl?: string;
   plan: UserPlan;
+  entitlementSource: EntitlementSource;
+  accessStatus: EntitlementAccessStatus;
+  entitlementRevision: number;
   status: 'active' | 'disabled';
   createdAt: Date;
 }

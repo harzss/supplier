@@ -53,7 +53,10 @@ export class Alibaba1688PurchaseAuditWorker implements OnModuleInit, OnModuleDes
       where: {
         orderId1688: { not: null },
         everShipped: true,
-        order: { status: { in: ['shipped', 'received'] } },
+        order: {
+          status: { in: ['shipped', 'received'] },
+          shop: { user: { status: 'active', entitlementAccessStatus: 'active' } },
+        },
         AND: [
           { OR: [{ settledAuditNextAt: null }, { settledAuditNextAt: { lte: now } }] },
           {
@@ -86,7 +89,11 @@ export class Alibaba1688PurchaseAuditWorker implements OnModuleInit, OnModuleDes
         settledAuditNextAt: true,
         exceptionStatus: true,
         exceptionRevision: true,
-        order: { select: { shop: { select: { userId: true } } } },
+        order: {
+          select: {
+            shop: { select: { userId: true, user: { select: { entitlementRevision: true } } } },
+          },
+        },
       },
     });
 
@@ -108,7 +115,17 @@ export class Alibaba1688PurchaseAuditWorker implements OnModuleInit, OnModuleDes
                 ? ['shipped', 'received', 'failed']
                 : ['shipped', 'received'],
           },
-          order: { status: { in: ['shipped', 'received'] } },
+          order: {
+            status: { in: ['shipped', 'received'] },
+            shop: {
+              userId: candidate.order.shop.userId,
+              user: {
+                status: 'active',
+                entitlementAccessStatus: 'active',
+                entitlementRevision: candidate.order.shop.user.entitlementRevision,
+              },
+            },
+          },
         },
         data: { settledAuditNextAt: nextAuditAt },
       });
@@ -126,6 +143,7 @@ export class Alibaba1688PurchaseAuditWorker implements OnModuleInit, OnModuleDes
         const outcome = await this.purchases.auditSettledPurchase(
           candidate.order.shop.userId,
           candidate.id,
+          candidate.order.shop.user.entitlementRevision,
         );
         if (outcome === 'action_required') {
           if (await this.raiseActionRequired(candidate, alertKey)) actionRequired++;

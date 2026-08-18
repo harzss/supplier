@@ -6,7 +6,13 @@ import type { CurrentUser } from '../entitlement/user-context.service';
 import { FINANCIAL_RECONCILIATION_ORDER_WHERE } from './financial-reconciliation';
 import { maskReceiverName, OrderService, maskPhone, type OrderView } from './order.service';
 
-const USER: CurrentUser = { userId: 1n, plan: 'pro' };
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 
 function authConfig(authMode: 'demo' | 'supabase' = 'demo'): ConfigService {
   return { get: (key: string) => (key === 'AUTH_MODE' ? authMode : undefined) } as ConfigService;

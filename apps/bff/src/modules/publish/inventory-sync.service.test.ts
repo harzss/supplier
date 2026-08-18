@@ -159,6 +159,7 @@ describe('InventorySyncService', () => {
     expect(findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
+          task: { user: { entitlementAccessStatus: 'active' } },
           shop: { NOT: { platformShopId: { startsWith: 'demo-' } } },
           batchItems: {
             none: expect.objectContaining({
@@ -173,6 +174,39 @@ describe('InventorySyncService', () => {
         }),
       }),
     );
+  });
+
+  it('does not claim or stale-recover inventory work for a suspended user', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const service = new InventorySyncService(
+      { get: vi.fn() } as unknown as ConfigService,
+      {
+        publishedProduct: { findFirst, updateMany },
+      } as unknown as PrismaService,
+      {} as PlatformAdapterFactory,
+      {} as ShopTokenService,
+      productLocks(),
+    );
+
+    await expect(service.claimNext('worker-1')).resolves.toBeNull();
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          inventorySyncStatus: 'syncing',
+          task: { user: { entitlementAccessStatus: 'active' } },
+        }),
+      }),
+    );
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          task: { user: { entitlementAccessStatus: 'active' } },
+        }),
+      }),
+    );
+    expect(updateMany).toHaveBeenCalledOnce();
   });
 
   it('claims a job with the exact current source binding guard', async () => {
@@ -207,6 +241,7 @@ describe('InventorySyncService', () => {
       2,
       expect.objectContaining({
         where: expect.objectContaining({
+          task: { user: { entitlementAccessStatus: 'active' } },
           batchItems: {
             none: expect.objectContaining({
               OR: expect.arrayContaining([
@@ -934,6 +969,7 @@ describe('InventorySyncService', () => {
   });
 
   it('quarantines an unknown write and stays offline when v4 lands after v5', async () => {
+    let suspended = false;
     let platformState = 'online' as 'online' | 'offline';
     let platformStocks = [
       ['spec-white', 5],
@@ -949,6 +985,7 @@ describe('InventorySyncService', () => {
       };
       const error = new Error('Douyin inventory sync request failed');
       error.name = 'PlatformMutationResultUnknownError';
+      suspended = true;
       throw error;
     });
     const offlineProduct = vi.fn().mockImplementation(async () => {
@@ -963,11 +1000,16 @@ describe('InventorySyncService', () => {
       .fn()
       .mockResolvedValueOnce({ count: 0 })
       .mockResolvedValueOnce({ count: 1 });
+    const findUnique = vi
+      .fn()
+      .mockImplementation(({ where }: { where: { task?: unknown } }) =>
+        suspended && where.task ? null : inventoryRecord(),
+      );
     const service = new InventorySyncService(
       { get: vi.fn() } as unknown as ConfigService,
       {
         publishedProduct: {
-          findUnique: vi.fn().mockResolvedValue(inventoryRecord()),
+          findUnique,
           updateMany,
         },
       } as unknown as PrismaService,
@@ -1012,6 +1054,8 @@ describe('InventorySyncService', () => {
     const quarantineData = updateMany.mock.calls[1]![0].data;
     expect(quarantineData).not.toHaveProperty('inventoryTargetFingerprint');
     expect(quarantineData).not.toHaveProperty('inventoryTargetVersion');
+    expect(findUnique).toHaveBeenNthCalledWith(4, expect.objectContaining({ where: { id: 7n } }));
+    expect(findUnique.mock.calls[3]![0].where).not.toHaveProperty('task');
   });
 
   it('does not mark an old target synced when the source changed before completion', async () => {
@@ -1546,6 +1590,38 @@ describe('InventorySyncService', () => {
     expect(locks.release).toHaveBeenCalledWith(7n, 'product-lock');
   });
 
+  it('does not create a platform adapter after a claimed user is suspended', async () => {
+    const create = vi.fn();
+    const findUnique = vi.fn().mockResolvedValueOnce(inventoryRecord()).mockResolvedValueOnce(null);
+    const locks = productLocks();
+    const service = new InventorySyncService(
+      { get: vi.fn() } as unknown as ConfigService,
+      {
+        publishedProduct: {
+          findUnique,
+          updateMany: vi.fn(),
+        },
+      } as unknown as PrismaService,
+      { create } as unknown as PlatformAdapterFactory,
+      {} as ShopTokenService,
+      locks,
+    );
+
+    await expect(service.execute(JOB)).resolves.toBe('stale');
+
+    expect(findUnique).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: {
+          id: 7n,
+          task: { user: { entitlementAccessStatus: 'active' } },
+        },
+      }),
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(locks.release).toHaveBeenCalledWith(7n, 'product-lock');
+  });
+
   it('does not fail a job after another worker has taken ownership', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 0 });
     const service = new InventorySyncService(
@@ -1562,6 +1638,7 @@ describe('InventorySyncService', () => {
         where: expect.objectContaining({
           inventoryLockedBy: 'worker-1',
           inventorySyncAttempts: 1,
+          task: { user: { entitlementAccessStatus: 'active' } },
         }),
       }),
     );

@@ -3,7 +3,13 @@ import type { CurrentUser } from '../entitlement/user-context.service';
 import { ProductBatchController } from './product-batch.controller';
 import type { ProductBatchService, ProductSkuEditContext } from './product-batch.service';
 
-const USER = { userId: 1n, plan: 'pro' } as CurrentUser;
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 
 describe('ProductBatchController', () => {
   it('returns the SKU context contract without reshaping current dimensions or full rules', async () => {

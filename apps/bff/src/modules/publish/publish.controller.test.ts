@@ -6,7 +6,13 @@ import { PublishController } from './publish.controller';
 import type { PublishQueueService } from './publish-queue.service';
 import type { PublishService } from './publish.service';
 
-const USER: CurrentUser = { userId: 1n, plan: 'pro' };
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 
 describe('PublishController', () => {
   it('delegates preflight to the publish service without touching the queue', async () => {

@@ -2094,6 +2094,7 @@ export class ProductBatchService {
           task: {
             status: { in: ['queued', 'running'] },
             cancelRequestedAt: null,
+            user: { entitlementAccessStatus: 'active' },
             ...(this.isSkuEditEnabled() ? {} : { action: { not: 'edit_sku' as const } }),
           },
         },
@@ -2108,6 +2109,7 @@ export class ProductBatchService {
           task: {
             cancelRequestedAt: null,
             status: { in: ['queued', 'running'] },
+            user: { entitlementAccessStatus: 'active' },
             ...(this.isSkuEditEnabled() ? {} : { action: { not: 'edit_sku' as const } }),
           },
         },
@@ -2123,7 +2125,11 @@ export class ProductBatchService {
       });
       if (claimed.count !== 1) continue;
       await this.prisma.productBatchTask.updateMany({
-        where: { id: candidate.taskId, status: 'queued' },
+        where: {
+          id: candidate.taskId,
+          status: 'queued',
+          user: { entitlementAccessStatus: 'active' },
+        },
         data: { status: 'running', stateRevision: { increment: 1 }, startedAt: now },
       });
       return this.prisma.productBatchItem.findUnique({
@@ -2295,6 +2301,7 @@ export class ProductBatchService {
         throw new ProductBatchItemError('PRODUCT_CHANGED', '商品平台绑定已变化', false);
       }
 
+      if (!(await this.assertItemOwned(current))) return 'stale';
       const adapter = this.adapters.create(product.shop);
       const token = isDemoShop(product.shop)
         ? 'mock-token'
@@ -2494,7 +2501,10 @@ export class ProductBatchService {
     const updated = await this.prisma.productBatchItem.updateMany({
       where: {
         ...ownedItemWhere(item),
-        task: { cancelRequestedAt: null },
+        task: {
+          cancelRequestedAt: null,
+          user: { entitlementAccessStatus: 'active' },
+        },
       },
       data: {
         lockedAt: now,
@@ -3005,7 +3015,7 @@ export class ProductBatchService {
       );
     }
     await this.platformProductLocks.renew(product.id, lock);
-    if (!(await this.renewClaimedItemLease(item, false))) return 'stale';
+    if (!(await this.renewClaimedItemLease(item, true))) return 'stale';
 
     let committed = false;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -3316,7 +3326,7 @@ export class ProductBatchService {
         true,
       );
     }
-    if (!(await this.renewClaimedItemLease(item, false))) {
+    if (!(await this.renewClaimedItemLease(item, true))) {
       throw new ProductBatchItemError(
         'OFFLINE_WRITE_GUARD_LOST',
         '下架写入前任务所有权已变化，平台请求尚未提交',
@@ -3436,7 +3446,10 @@ export class ProductBatchService {
     const updated = await this.prisma.productBatchItem.updateMany({
       where: {
         ...ownedItemWhere(item),
-        task: { cancelRequestedAt: null },
+        task: {
+          cancelRequestedAt: null,
+          user: { entitlementAccessStatus: 'active' },
+        },
       },
       data: {
         lockedAt: now,
@@ -4099,7 +4112,10 @@ export class ProductBatchService {
     const updated = await this.prisma.productBatchItem.updateMany({
       where: {
         ...ownedItemWhere(item),
-        task: { cancelRequestedAt: null },
+        task: {
+          cancelRequestedAt: null,
+          user: { entitlementAccessStatus: 'active' },
+        },
       },
       data: {
         lockedAt: now,
@@ -4121,7 +4137,7 @@ export class ProductBatchService {
   ): Promise<boolean> {
     const now = new Date();
     const updated = await this.prisma.productBatchItem.updateMany({
-      where: ownedItemWhere(item),
+      where: baseOwnedItemWhere(item),
       data: {
         lockedAt: now,
         result: {
@@ -4614,6 +4630,9 @@ export class ProductBatchService {
             taskId: true,
             publishedProductId: true,
             status: true,
+            attempts: true,
+            lockedBy: true,
+            expectedMutationRevision: true,
             errorCode: true,
             result: true,
           },
@@ -4688,6 +4707,9 @@ export class ProductBatchService {
             taskId: currentItem.taskId,
             publishedProductId: currentItem.publishedProductId,
             status: currentItem.status,
+            attempts: currentItem.attempts,
+            lockedBy: currentItem.lockedBy,
+            expectedMutationRevision: currentItem.expectedMutationRevision,
             errorCode: currentItem.errorCode,
           },
           data: {
@@ -4869,7 +4891,10 @@ export class ProductBatchService {
     const updated = await this.prisma.productBatchItem.updateMany({
       where: {
         ...ownedItemWhere(item),
-        task: { cancelRequestedAt: null },
+        task: {
+          cancelRequestedAt: null,
+          user: { entitlementAccessStatus: 'active' },
+        },
       },
       data: {
         lockedAt: now,
@@ -4979,7 +5004,7 @@ export class ProductBatchService {
   ): Promise<'processed' | 'stale'> {
     const product = item.publishedProduct;
     await this.platformProductLocks.renew(product.id, lock);
-    if (!(await this.renewClaimedItemLease(item, false))) return 'stale';
+    if (!(await this.renewClaimedItemLease(item, true))) return 'stale';
     const now = new Date();
     const failure = titleResultFailure(platformState);
     const result = {
@@ -5123,10 +5148,15 @@ export class ProductBatchService {
     requireActiveTask: boolean,
   ): Promise<boolean> {
     const updated = await this.prisma.productBatchItem.updateMany({
-      where: {
-        ...ownedItemWhere(item),
-        ...(requireActiveTask ? { task: { cancelRequestedAt: null } } : {}),
-      },
+      where: requireActiveTask
+        ? {
+            ...ownedItemWhere(item),
+            task: {
+              cancelRequestedAt: null,
+              user: { entitlementAccessStatus: 'active' as const },
+            },
+          }
+        : baseOwnedItemWhere(item),
       data: { lockedAt: new Date() },
     });
     return updated.count === 1;
@@ -5956,7 +5986,7 @@ export class ProductBatchService {
     ) {
       const unknown = await this.prisma.productBatchItem.updateMany({
         where: {
-          ...ownedItemWhere(item),
+          ...baseOwnedItemWhere(item),
           errorCode: { in: [...UNRESOLVED_SKU_CODES] },
         },
         data: {
@@ -5979,7 +6009,7 @@ export class ProductBatchService {
     ) {
       const unknown = await this.prisma.productBatchItem.updateMany({
         where: {
-          ...ownedItemWhere(item),
+          ...baseOwnedItemWhere(item),
           errorCode: { in: [...UNRESOLVED_TITLE_CODES] },
         },
         data: {
@@ -6002,7 +6032,7 @@ export class ProductBatchService {
     ) {
       const unknown = await this.prisma.productBatchItem.updateMany({
         where: {
-          ...ownedItemWhere(item),
+          ...baseOwnedItemWhere(item),
           errorCode: { in: [...UNRESOLVED_ONLINE_CODES] },
         },
         data: {
@@ -6025,7 +6055,7 @@ export class ProductBatchService {
     ) {
       const unknown = await this.prisma.productBatchItem.updateMany({
         where: {
-          ...ownedItemWhere(item),
+          ...baseOwnedItemWhere(item),
           errorCode: { in: [...UNRESOLVED_OFFLINE_CODES] },
         },
         data: {
@@ -6045,7 +6075,10 @@ export class ProductBatchService {
     const cancelled = await this.prisma.productBatchItem.updateMany({
       where: {
         ...ownedItemWhere(item),
-        task: { cancelRequestedAt: { not: null } },
+        task: {
+          cancelRequestedAt: { not: null },
+          user: { entitlementAccessStatus: 'active' },
+        },
       },
       data: {
         status: 'cancelled',
@@ -6126,7 +6159,11 @@ export class ProductBatchService {
 
   private async recoverStaleItems(now: Date): Promise<void> {
     const stale = await this.prisma.productBatchItem.findMany({
-      where: { status: 'running', lockedAt: { lt: new Date(now.getTime() - STALE_ITEM_MS) } },
+      where: {
+        status: 'running',
+        lockedAt: { lt: new Date(now.getTime() - STALE_ITEM_MS) },
+        task: { user: { entitlementAccessStatus: 'active' } },
+      },
       orderBy: { lockedAt: 'asc' },
       take: 100,
       include: { task: true },
@@ -6156,12 +6193,7 @@ export class ProductBatchService {
         titleResultUnknown || onlineResultUnknown || offlineResultUnknown || skuResultUnknown;
       const failed = unresolvedMutation || (!cancelled && item.attempts >= item.maxAttempts);
       const updated = await this.prisma.productBatchItem.updateMany({
-        where: {
-          id: item.id,
-          status: 'running',
-          attempts: item.attempts,
-          lockedBy: item.lockedBy,
-        },
+        where: ownedItemWhere(item),
         data: {
           status: unresolvedMutation
             ? 'failed'
@@ -6203,7 +6235,7 @@ export class ProductBatchService {
     for (const taskId of taskIds) await this.refreshTask(taskId);
   }
 
-  private async refreshTask(taskId: bigint): Promise<void> {
+  private async refreshTask(taskId: bigint, requireActiveAccess = false): Promise<void> {
     for (let attempt = 0; attempt < 5; attempt++) {
       const task = await this.prisma.productBatchTask.findUnique({
         where: { id: taskId },
@@ -6234,7 +6266,11 @@ export class ProductBatchService {
         finishedAt === null ? task.finishedAt == null : task.finishedAt != null;
       if (task.status === status && finishedStateMatches) return;
       const updated = await this.prisma.productBatchTask.updateMany({
-        where: { id: task.id, stateRevision: task.stateRevision },
+        where: {
+          id: task.id,
+          stateRevision: task.stateRevision,
+          ...(requireActiveAccess ? { user: { entitlementAccessStatus: 'active' as const } } : {}),
+        },
         data: { status, stateRevision: { increment: 1 }, finishedAt },
       });
       if (updated.count === 1) return;
@@ -6249,6 +6285,7 @@ export class ProductBatchService {
       where: {
         ...(this.lastTaskReconcileCursor ? { id: { gt: this.lastTaskReconcileCursor } } : {}),
         confirmedAt: { not: null },
+        user: { entitlementAccessStatus: 'active' },
         status: {
           in: ['queued', 'running', 'cancelling', ...TERMINAL_TASK_STATUSES],
         },
@@ -6257,7 +6294,7 @@ export class ProductBatchService {
       take: 100,
       select: { id: true },
     });
-    for (const task of tasks) await this.refreshTask(task.id);
+    for (const task of tasks) await this.refreshTask(task.id, true);
     this.lastTaskReconcileCursor = tasks.length === 100 ? (tasks.at(-1)?.id ?? null) : null;
   }
 
@@ -9181,12 +9218,30 @@ function parsePositiveId(value: string, label: string): bigint {
   }
 }
 
-function ownedItemWhere(item: Pick<ProductBatchItem, 'id' | 'attempts' | 'lockedBy'>) {
+function baseOwnedItemWhere(
+  item: Pick<
+    ProductBatchItem,
+    'id' | 'status' | 'attempts' | 'lockedBy' | 'expectedMutationRevision'
+  >,
+) {
   return {
     id: item.id,
     status: 'running' as const,
     attempts: item.attempts,
     lockedBy: item.lockedBy,
+    expectedMutationRevision: item.expectedMutationRevision,
+  };
+}
+
+function ownedItemWhere(
+  item: Pick<
+    ProductBatchItem,
+    'id' | 'status' | 'attempts' | 'lockedBy' | 'expectedMutationRevision'
+  >,
+) {
+  return {
+    ...baseOwnedItemWhere(item),
+    task: { user: { entitlementAccessStatus: 'active' as const } },
   };
 }
 

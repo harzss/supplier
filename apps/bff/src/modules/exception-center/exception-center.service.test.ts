@@ -578,7 +578,13 @@ describe('ExceptionCenterService', () => {
 
   it('flags a non-free account without an active subscription', async () => {
     const prisma = prismaFixture();
-    prisma.user.findUnique.mockResolvedValue({ plan: 'pro', subscriptions: [] });
+    prisma.user.findUnique.mockResolvedValue({
+      plan: 'pro',
+      entitlementSource: 'internal_beta',
+      entitlementAccessStatus: 'active',
+      subscriptions: [],
+      marketplaceProjections: [],
+    });
     const service = createService(prisma);
     const internals = service as unknown as {
       scanEntitlement(
@@ -598,13 +604,85 @@ describe('ExceptionCenterService', () => {
 
   it('does not require an active subscription for the free invitation plan', async () => {
     const prisma = prismaFixture();
-    prisma.user.findUnique.mockResolvedValue({ plan: 'free', subscriptions: [] });
+    prisma.user.findUnique.mockResolvedValue({
+      plan: 'free',
+      entitlementSource: 'internal_beta',
+      entitlementAccessStatus: 'active',
+      subscriptions: [],
+      marketplaceProjections: [],
+    });
     const service = createService(prisma);
     const internals = service as unknown as {
       scanEntitlement(userId: bigint, now: Date): Promise<unknown[]>;
     };
 
     await expect(internals.scanEntitlement(USER_ID, NOW)).resolves.toEqual([]);
+  });
+
+  it('accepts an active marketplace projection without requiring a legacy subscription', async () => {
+    const prisma = prismaFixture();
+    prisma.user.findUnique.mockResolvedValue({
+      plan: 'pro',
+      entitlementSource: 'marketplace',
+      entitlementAccessStatus: 'active',
+      subscriptions: [],
+      marketplaceProjections: [
+        {
+          id: 9n,
+          internalPlan: 'pro',
+          lifecycleState: 'active',
+          accessStatus: 'active',
+          providerRevision: { toFixed: () => '7' },
+        },
+      ],
+    });
+    const service = createService(prisma);
+    const internals = service as unknown as {
+      scanEntitlement(userId: bigint, now: Date): Promise<unknown[]>;
+    };
+
+    await expect(internals.scanEntitlement(USER_ID, NOW)).resolves.toEqual([]);
+  });
+
+  it('flags a suspended marketplace account that still retains a paid plan', async () => {
+    const prisma = prismaFixture();
+    prisma.user.findUnique.mockResolvedValue({
+      plan: 'pro',
+      entitlementSource: 'marketplace',
+      entitlementAccessStatus: 'suspended',
+      subscriptions: [],
+      marketplaceProjections: [],
+    });
+    const service = createService(prisma);
+    const internals = service as unknown as {
+      scanEntitlement(userId: bigint, now: Date): Promise<Array<{ code: string; reason: string }>>;
+    };
+
+    await expect(internals.scanEntitlement(USER_ID, NOW)).resolves.toEqual([
+      expect.objectContaining({
+        code: 'entitlement_plan_mismatch',
+        reason: '服务市场权益已暂停，但账号仍保留套餐或有效订购投影。',
+      }),
+    ]);
+  });
+
+  it('flags an active marketplace account without an active projection', async () => {
+    const prisma = prismaFixture();
+    prisma.user.findUnique.mockResolvedValue({
+      plan: 'free',
+      entitlementSource: 'marketplace',
+      entitlementAccessStatus: 'active',
+      subscriptions: [],
+      marketplaceProjections: [],
+    });
+    const service = createService(prisma);
+    const internals = service as unknown as {
+      scanEntitlement(userId: bigint, now: Date): Promise<Array<{ code: string }>>;
+    };
+
+    await expect(internals.scanEntitlement(USER_ID, NOW)).resolves.toEqual([
+      expect.objectContaining({ code: 'entitlement_active_subscription_missing' }),
+    ]);
   });
 
   it('scanner reconciliation scopes out producer cases before automatic resolution', async () => {

@@ -7,7 +7,13 @@ import type { ShopTokenService } from '../shop/shop-token.service';
 import { FulfillmentService } from './fulfillment.service';
 import type { OrderService } from './order.service';
 
-const USER: CurrentUser = { userId: 1n, plan: 'pro' };
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 
 describe('FulfillmentService token usage', () => {
   it('allows deterministic mock purchasing only for demo shops', async () => {

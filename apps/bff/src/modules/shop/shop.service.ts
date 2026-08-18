@@ -12,6 +12,7 @@ import type { TokenSet, UserPlan } from '@supplier/shared-types';
 import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
 import { EntitlementService } from '../entitlement/entitlement.service';
+import { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 import { AlertService } from '../observability/alert.service';
 import { runtimeShopWhere } from './platform-adapter.factory';
 
@@ -50,6 +51,7 @@ export class ShopService {
     private readonly entitlement: EntitlementService,
     private readonly crypto: CryptoService,
     private readonly alerts: AlertService,
+    private readonly access: EntitlementAccessService,
     config: ConfigService,
   ) {
     this.demoMode = (config.get<string>('AUTH_MODE') ?? 'demo') === 'demo';
@@ -96,6 +98,7 @@ export class ShopService {
     userId: bigint,
     platform: Platform,
     tokenSet: TokenSet,
+    expectedEntitlementRevision: number,
     role: ShopRole = 'seller',
   ): Promise<ShopView> {
     if (!tokenSet.platformShopId) {
@@ -115,6 +118,7 @@ export class ShopService {
       ? this.crypto.encrypt(tokenSet.refreshToken)
       : undefined;
     const shop = await this.withSerializableTransaction(async (tx) => {
+      await this.access.assertActive(userId, expectedEntitlementRevision, tx);
       const existing = await tx.shop.findUnique({
         where: { uk_user_platform_shop: unique },
       });

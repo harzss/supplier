@@ -1,14 +1,21 @@
 import type { ConfigService } from '@nestjs/config';
-import { ServiceUnavailableException } from '@nestjs/common';
+import { ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CryptoService } from '../../common/crypto.module';
 import type { PrismaService } from '../../common/prisma.module';
+import type { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import { OAuthConfigService } from '../shop/oauth-config.service';
 import type { ShopTokenService } from '../shop/shop-token.service';
 import { Alibaba1688PurchaseService } from './alibaba1688-purchase.service';
 
-const USER: CurrentUser = { userId: 1n, plan: 'pro' };
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 const CALLBACK = 'https://supplier.example.com/api/shops/oauth/alibaba_1688/callback';
 
 function config(values: Record<string, string>): ConfigService {
@@ -24,6 +31,10 @@ function enabledConfig(): ConfigService {
     ALIBABA_1688_PURCHASE_ENABLED: 'true',
     OAUTH_CALLBACK_ALLOWLIST: CALLBACK,
   });
+}
+
+function entitlementAccess(assertActive = vi.fn().mockResolvedValue({ revision: 7 })) {
+  return { service: { assertActive } as unknown as EntitlementAccessService, assertActive };
 }
 
 function orderItem(id: bigint, supplier: string, offerId: string, platformItemId: string) {
@@ -1898,6 +1909,79 @@ describe('Alibaba1688PurchaseService', () => {
     });
   });
 
+  it.each([
+    ['before the remote order read', 1, 0],
+    ['after the remote order read', 2, 1],
+  ] as const)(
+    'stops %s when entitlement is suspended without mutating the settled snapshot',
+    async (_label, activeChecks, expectedFetches) => {
+      const values = enabledConfig();
+      const localItem = orderItem(11n, 'supplier-a', '111111', 'sku-order-1');
+      const purchaseUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const prisma = {
+        purchaseOrder: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: 101n,
+            orderId: 5n,
+            buyerShopId: 20n,
+            orderId1688: '900001',
+            status: 'shipped',
+            syncRevision: 2,
+            purchaseCost: 8.5,
+            everShipped: true,
+            exceptionStatus: 'none',
+            items: [
+              {
+                orderItemId: 11n,
+                offerId: '111111',
+                specId: 'spec-11',
+                quantity: 1,
+                orderItem: localItem,
+              },
+            ],
+            shipments: [
+              {
+                id: 201n,
+                trackingNo: 'SF111',
+                carrier: '顺丰速运',
+                status: 'ACCEPT',
+                items: [{ orderItemId: 11n, quantity: 1, orderItem: localItem }],
+              },
+            ],
+          }),
+          updateMany: purchaseUpdateMany,
+          findUnique: vi.fn(),
+        },
+      } as unknown as PrismaService;
+      const fetcher = vi.fn().mockResolvedValue(buyerOrderResponse('waitbuyerreceive'));
+      vi.stubGlobal('fetch', fetcher);
+      const assertActive = vi.fn();
+      for (let index = 0; index < activeChecks; index++) {
+        assertActive.mockResolvedValueOnce({ revision: 7 });
+      }
+      assertActive.mockRejectedValueOnce(new ForbiddenException({ code: 'ENTITLEMENT_SUSPENDED' }));
+      const service = new Alibaba1688PurchaseService(
+        prisma,
+        new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' })),
+        values,
+        new OAuthConfigService(values),
+        { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
+        undefined,
+        entitlementAccess(assertActive).service,
+      );
+
+      await expect(service.auditSettledPurchase(1n, 101n, 7)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      expect(fetcher).toHaveBeenCalledTimes(expectedFetches);
+      expect(purchaseUpdateMany).toHaveBeenCalledTimes(1);
+      expect(purchaseUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { syncRevision: { increment: 1 } } }),
+      );
+    },
+  );
+
   it('preserves the original snapshot when settled-order logistics routing changes', async () => {
     const values = enabledConfig();
     const crypto = new CryptoService(config({ ENCRYPTION_KEY: 'unit-key' }));
@@ -1954,6 +2038,7 @@ describe('Alibaba1688PurchaseService', () => {
       }),
     );
     const materializeOrder = vi.fn().mockResolvedValue(undefined);
+    const access = entitlementAccess();
     const service = new Alibaba1688PurchaseService(
       prisma,
       crypto,
@@ -1961,9 +2046,10 @@ describe('Alibaba1688PurchaseService', () => {
       new OAuthConfigService(values),
       { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
       { materializeOrder } as never,
+      access.service,
     );
 
-    await expect(service.auditSettledPurchase(1n, 101n)).resolves.toBe('action_required');
+    await expect(service.auditSettledPurchase(1n, 101n, 7)).resolves.toBe('action_required');
 
     expect(flagUpdate).toHaveBeenNthCalledWith(2, {
       where: {
@@ -1971,7 +2057,17 @@ describe('Alibaba1688PurchaseService', () => {
         syncRevision: 3,
         exceptionStatus: { in: ['none', 'resolved'] },
         status: { in: ['shipped', 'received'] },
-        order: { status: { in: ['shipped', 'received'] } },
+        order: {
+          status: { in: ['shipped', 'received'] },
+          shop: {
+            userId: 1n,
+            user: {
+              status: 'active',
+              entitlementAccessStatus: 'active',
+              entitlementRevision: 7,
+            },
+          },
+        },
       },
       data: expect.objectContaining({
         retryEligible: false,
@@ -1983,6 +2079,7 @@ describe('Alibaba1688PurchaseService', () => {
     expect(transaction).toHaveBeenCalledTimes(2);
     expect(materializeOrder).toHaveBeenCalledTimes(2);
     expect(materializeOrder).toHaveBeenLastCalledWith(prisma, 5n);
+    expect(access.assertActive).toHaveBeenCalledWith(1n, 7);
   });
 
   it('builds an immutable settled-logistics repair proposal from verified remote data', async () => {
@@ -2145,15 +2242,18 @@ describe('Alibaba1688PurchaseService', () => {
         ),
       ),
     );
+    const access = entitlementAccess();
     const service = new Alibaba1688PurchaseService(
       prisma,
       crypto,
       values,
       new OAuthConfigService(values),
       { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
+      undefined,
+      access.service,
     );
 
-    await expect(service.auditSettledPurchase(1n, 101n)).resolves.toBe('action_required');
+    await expect(service.auditSettledPurchase(1n, 101n, 7)).resolves.toBe('action_required');
 
     expect(updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2163,6 +2263,7 @@ describe('Alibaba1688PurchaseService', () => {
         }),
       }),
     );
+    expect(access.assertActive).toHaveBeenCalledWith(1n, 7);
   });
 
   it('updates a healthy settled shipment without rewriting its cost', async () => {
@@ -2223,15 +2324,18 @@ describe('Alibaba1688PurchaseService', () => {
           : logisticsResponse('SF111');
       }),
     );
+    const access = entitlementAccess();
     const service = new Alibaba1688PurchaseService(
       prisma,
       crypto,
       values,
       new OAuthConfigService(values),
       { getAccessToken: vi.fn().mockResolvedValue('buyer-token') } as unknown as ShopTokenService,
+      undefined,
+      access.service,
     );
 
-    await expect(service.auditSettledPurchase(1n, 101n)).resolves.toBe('checked');
+    await expect(service.auditSettledPurchase(1n, 101n, 7)).resolves.toBe('checked');
 
     expect(purchaseWrite).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2241,6 +2345,7 @@ describe('Alibaba1688PurchaseService', () => {
     expect(shipmentUpsert).toHaveBeenCalledWith(
       expect.objectContaining({ update: expect.objectContaining({ status: 'ACCEPT' }) }),
     );
+    expect(access.assertActive).toHaveBeenCalledWith(1n, 7);
   });
 
   it('rejects duplicate remote tracking numbers before any purchase or shipment write', async () => {

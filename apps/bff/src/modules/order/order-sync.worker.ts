@@ -43,10 +43,11 @@ export class OrderSyncWorker implements OnModuleInit, OnModuleDestroy {
         role: 'seller',
         status: 'active',
         accessTokenEnc: { not: null },
+        user: { status: 'active', entitlementAccessStatus: 'active' },
         NOT: { platformShopId: { startsWith: 'demo-' } },
       },
       orderBy: [{ lastOrderSyncAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, userId: true },
+      select: { id: true, userId: true, user: { select: { entitlementRevision: true } } },
     });
 
     let succeeded = 0;
@@ -54,7 +55,11 @@ export class OrderSyncWorker implements OnModuleInit, OnModuleDestroy {
     let failed = 0;
     for (const shop of shops) {
       try {
-        const result = await this.orderSync.syncShop(shop.userId, shop.id);
+        const result = await this.orderSync.syncShop(
+          shop.userId,
+          shop.id,
+          shop.user.entitlementRevision,
+        );
         await this.alerts.resolve(`order_sync.shop.${shop.id}`, {
           synced: result.synced,
           skipped: result.skipped,

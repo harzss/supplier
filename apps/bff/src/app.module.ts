@@ -28,6 +28,7 @@ import { ActivationModule } from './modules/activation/activation.module';
 import { SourceImportModule } from './modules/product/source-import.module';
 import { ExceptionCenterModule } from './modules/exception-center/exception-center.module';
 import { AfterSaleModule } from './modules/after-sale/after-sale.module';
+import { MarketplaceModule } from './modules/marketplace/marketplace.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { AfterSaleModule } from './modules/after-sale/after-sale.module';
     RuntimeStateModule,
     CryptoModule,
     ObservabilityModule,
+    MarketplaceModule,
     AfterSaleModule,
     ExceptionCenterModule,
     HealthModule,

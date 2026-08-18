@@ -5,6 +5,7 @@ import { CurrentUser } from '../entitlement/current-user.decorator';
 import type { CurrentUser as CurrentUserType } from '../entitlement/user-context.service';
 import { SaveLlmKeyDto } from './dto/save-llm-key.dto';
 import { LlmCredentialService } from './llm-credential.service';
+import { AllowSuspendedAccess } from '../entitlement/allow-suspended-access.decorator';
 
 @ApiTags('settings')
 @Controller('settings')
@@ -12,6 +13,7 @@ export class SettingsController {
   constructor(private readonly credentials: LlmCredentialService) {}
 
   /** 查看当前 BYOK 密钥（脱敏） */
+  @AllowSuspendedAccess()
   @Get('llm-key')
   getKey(@CurrentUser() user: CurrentUserType) {
     return this.credentials.get(user.userId);
@@ -29,6 +31,7 @@ export class SettingsController {
   }
 
   /** 删除 BYOK 密钥 */
+  @AllowSuspendedAccess()
   @Delete('llm-key')
   removeKey(@CurrentUser() user: CurrentUserType) {
     return this.credentials.remove(user.userId);

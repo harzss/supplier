@@ -13,7 +13,7 @@ describe('Alibaba1688PurchaseAuditWorker', () => {
       settledAuditNextAt: null,
       exceptionStatus: 'none' as const,
       exceptionRevision: 0,
-      order: { shop: { userId: 1n } },
+      order: { shop: { userId: 1n, user: { entitlementRevision: 7 } } },
     }));
     const findMany = vi.fn().mockResolvedValue(candidates);
     const findUnique = vi.fn().mockResolvedValue({
@@ -50,7 +50,10 @@ describe('Alibaba1688PurchaseAuditWorker', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           everShipped: true,
-          order: { status: { in: ['shipped', 'received'] } },
+          order: {
+            status: { in: ['shipped', 'received'] },
+            shop: { user: { status: 'active', entitlementAccessStatus: 'active' } },
+          },
           AND: expect.arrayContaining([
             expect.objectContaining({
               OR: expect.arrayContaining([expect.objectContaining({ settledAuditNextAt: null })]),
@@ -73,6 +76,7 @@ describe('Alibaba1688PurchaseAuditWorker', () => {
       }),
     );
     expect(updateMany).toHaveBeenCalledTimes(4);
+    expect(auditSettledPurchase).toHaveBeenNthCalledWith(1, 1n, 1n, 7);
     expect(resolve).toHaveBeenCalledWith('purchase_audit.purchase.1', {
       purchaseOrderId: 1n,
       orderId: 11n,
@@ -99,7 +103,7 @@ describe('Alibaba1688PurchaseAuditWorker', () => {
       settledAuditNextAt: new Date('2026-07-22T00:00:00.000Z'),
       exceptionStatus: 'action_required' as const,
       exceptionRevision: 4,
-      order: { shop: { userId: 2n } },
+      order: { shop: { userId: 2n, user: { entitlementRevision: 8 } } },
     };
     const auditSettledPurchase = vi.fn();
     const raise = vi.fn().mockResolvedValue(undefined);
@@ -142,7 +146,7 @@ describe('Alibaba1688PurchaseAuditWorker', () => {
       settledAuditNextAt: new Date('2026-07-22T00:00:00.000Z'),
       exceptionStatus: 'action_required' as const,
       exceptionRevision: 4,
-      order: { shop: { userId: 2n } },
+      order: { shop: { userId: 2n, user: { entitlementRevision: 8 } } },
     };
     const raise = vi.fn();
     const resolve = vi.fn().mockResolvedValue(undefined);
@@ -175,8 +179,9 @@ describe('Alibaba1688PurchaseAuditWorker', () => {
     });
   });
 
-  it('skips a purchase claimed by another worker', async () => {
+  it('stops before the adapter when entitlement changes before the claim', async () => {
     const auditSettledPurchase = vi.fn();
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
     const worker = new Alibaba1688PurchaseAuditWorker(
       { get: () => undefined } as ConfigService,
       {
@@ -188,10 +193,10 @@ describe('Alibaba1688PurchaseAuditWorker', () => {
               settledAuditNextAt: null,
               exceptionStatus: 'none',
               exceptionRevision: 0,
-              order: { shop: { userId: 1n } },
+              order: { shop: { userId: 1n, user: { entitlementRevision: 7 } } },
             },
           ]),
-          updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+          updateMany,
         },
       } as unknown as PrismaService,
       { auditSettledPurchase } as unknown as Alibaba1688PurchaseService,
@@ -205,6 +210,53 @@ describe('Alibaba1688PurchaseAuditWorker', () => {
       skipped: 1,
       failed: 0,
     });
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          order: {
+            status: { in: ['shipped', 'received'] },
+            shop: {
+              userId: 1n,
+              user: {
+                status: 'active',
+                entitlementAccessStatus: 'active',
+                entitlementRevision: 7,
+              },
+            },
+          },
+        }),
+      }),
+    );
+    expect(auditSettledPurchase).not.toHaveBeenCalled();
+  });
+
+  it('does not select a settled purchase owned by a suspended user', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const auditSettledPurchase = vi.fn();
+    const worker = new Alibaba1688PurchaseAuditWorker(
+      { get: () => undefined } as ConfigService,
+      { purchaseOrder: { findMany } } as unknown as PrismaService,
+      { auditSettledPurchase } as unknown as Alibaba1688PurchaseService,
+      { raise: vi.fn(), resolve: vi.fn() } as unknown as AlertService,
+    );
+
+    await expect(worker.runOnce()).resolves.toEqual({
+      attempted: 0,
+      checked: 0,
+      actionRequired: 0,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          order: {
+            status: { in: ['shipped', 'received'] },
+            shop: { user: { status: 'active', entitlementAccessStatus: 'active' } },
+          },
+        }),
+      }),
+    );
     expect(auditSettledPurchase).not.toHaveBeenCalled();
   });
 });

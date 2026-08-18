@@ -23,7 +23,7 @@ interface OAuthFeedback {
 }
 
 /** 店铺管理：销售店铺与 1688 买家 OAuth + 演示店铺。 */
-export function ShopsSection() {
+export function ShopsSection({ accessSuspended = false }: { accessSuspended?: boolean }) {
   const qc = useQueryClient();
   const oauthCallbackRef = useRef<OAuthCallbackResult | null | undefined>(undefined);
   const [feedback, setFeedback] = useState<OAuthFeedback | null>(null);
@@ -31,10 +31,12 @@ export function ShopsSection() {
   const readiness = useQuery({
     queryKey: ['douyinReadiness'],
     queryFn: () => api.douyinReadiness(),
+    enabled: !accessSuspended,
   });
   const alibaba1688Readiness = useQuery({
     queryKey: ['alibaba1688Readiness'],
     queryFn: () => api.alibaba1688Readiness(),
+    enabled: !accessSuspended,
   });
   const connect = useMutation({
     mutationFn: (platform: string) => api.connectShop({ platform }),
@@ -89,6 +91,10 @@ export function ShopsSection() {
     }
     const callback = oauthCallbackRef.current;
     if (!callback) return;
+    if (accessSuspended) {
+      setFeedback({ type: 'error', message: '权益已暂停，不能继续新的平台授权。' });
+      return;
+    }
 
     if (callback.kind === 'unverified_error') {
       const platformLabel = callback.platform === 'douyin' ? '抖店' : '1688 买家账号';
@@ -137,7 +143,7 @@ export function ShopsSection() {
     return () => {
       cancelled = true;
     };
-  }, [qc]);
+  }, [accessSuspended, qc]);
 
   return (
     <section id="shops" className="ledger-panel mt-8 scroll-mt-24 p-5 sm:p-6">
@@ -167,53 +173,61 @@ export function ShopsSection() {
         </div>
       ) : null}
 
-      <div className="mb-5 grid gap-3 lg:grid-cols-2">
-        <div className="flex flex-col gap-4 rounded-2xl border border-zinc-900 bg-zinc-950 p-5 text-white sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-sm font-black text-zinc-950">
-              抖店
-            </div>
-            <div>
-              <div className="font-semibold">授权抖音小店</div>
-              <p className="mt-1 max-w-xl text-xs leading-5 text-zinc-400">
-                用于铺货、同步订单与回传物流；Token 加密保存。
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={() => authorize.mutate('douyin')}
-            disabled={authorize.isPending}
-            className="shrink-0 rounded-xl bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-brand-600 disabled:cursor-wait disabled:opacity-60"
-          >
-            {authorize.isPending && authorize.variables === 'douyin'
-              ? '正在准备授权…'
-              : '前往官方授权'}
-          </button>
-        </div>
+      {accessSuspended ? (
+        <p className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+          权益暂停期间不能新增或刷新授权，也不会同步订单；你仍可查看现有店铺并清除本系统保存的授权凭证。
+        </p>
+      ) : null}
 
-        <div className="flex flex-col gap-4 rounded-2xl border border-amber-200 bg-amber-50 p-5 text-zinc-900 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500 text-xs font-black text-white">
-              1688
+      {accessSuspended ? null : (
+        <div className="mb-5 grid gap-3 lg:grid-cols-2">
+          <div className="flex flex-col gap-4 rounded-2xl border border-zinc-900 bg-zinc-950 p-5 text-white sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-sm font-black text-zinc-950">
+                抖店
+              </div>
+              <div>
+                <div className="font-semibold">授权抖音小店</div>
+                <p className="mt-1 max-w-xl text-xs leading-5 text-zinc-400">
+                  用于铺货、同步订单与回传物流；Token 加密保存。
+                </p>
+              </div>
             </div>
-            <div>
-              <div className="font-semibold">授权 1688 买家账号</div>
-              <p className="mt-1 max-w-xl text-xs leading-5 text-amber-800/80">
-                仅作为采购方，用于创建采购单、查订单与物流。
-              </p>
-            </div>
+            <button
+              onClick={() => authorize.mutate('douyin')}
+              disabled={authorize.isPending}
+              className="shrink-0 rounded-xl bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-brand-600 disabled:cursor-wait disabled:opacity-60"
+            >
+              {authorize.isPending && authorize.variables === 'douyin'
+                ? '正在准备授权…'
+                : '前往官方授权'}
+            </button>
           </div>
-          <button
-            onClick={() => authorize.mutate('alibaba_1688')}
-            disabled={authorize.isPending}
-            className="shrink-0 rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
-          >
-            {authorize.isPending && authorize.variables === 'alibaba_1688'
-              ? '正在准备授权…'
-              : '前往官方授权'}
-          </button>
+
+          <div className="flex flex-col gap-4 rounded-2xl border border-amber-200 bg-amber-50 p-5 text-zinc-900 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500 text-xs font-black text-white">
+                1688
+              </div>
+              <div>
+                <div className="font-semibold">授权 1688 买家账号</div>
+                <p className="mt-1 max-w-xl text-xs leading-5 text-amber-800/80">
+                  仅作为采购方，用于创建采购单、查订单与物流。
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => authorize.mutate('alibaba_1688')}
+              disabled={authorize.isPending}
+              className="shrink-0 rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
+            >
+              {authorize.isPending && authorize.variables === 'alibaba_1688'
+                ? '正在准备授权…'
+                : '前往官方授权'}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {authorize.isError ? (
         <p className="mb-4 text-sm text-red-600">
@@ -221,22 +235,24 @@ export function ShopsSection() {
         </p>
       ) : null}
 
-      <div className="mb-5 grid gap-3 xl:grid-cols-2">
-        <ReadinessPanel
-          title="抖店联调准备度"
-          readyText="已具备测试店铺端到端联调条件"
-          pendingText="补齐未通过项后即可开始真实发布"
-          data={readiness.data}
-          error={readiness.isError}
-        />
-        <ReadinessPanel
-          title="1688 采购准备度"
-          readyText="已具备真实采购联调条件"
-          pendingText="未通过项会持续阻断真实下单"
-          data={alibaba1688Readiness.data}
-          error={alibaba1688Readiness.isError}
-        />
-      </div>
+      {accessSuspended ? null : (
+        <div className="mb-5 grid gap-3 xl:grid-cols-2">
+          <ReadinessPanel
+            title="抖店联调准备度"
+            readyText="已具备测试店铺端到端联调条件"
+            pendingText="补齐未通过项后即可开始真实发布"
+            data={readiness.data}
+            error={readiness.isError}
+          />
+          <ReadinessPanel
+            title="1688 采购准备度"
+            readyText="已具备真实采购联调条件"
+            pendingText="未通过项会持续阻断真实下单"
+            data={alibaba1688Readiness.data}
+            error={alibaba1688Readiness.isError}
+          />
+        </div>
+      )}
 
       {shops.data && shops.data.length > 0 ? (
         <ul className="mb-4 space-y-2">
@@ -278,7 +294,8 @@ export function ShopsSection() {
                 <span className={statusClass(s.status, s.connectionType)}>
                   {statusLabel(s.status, s.connectionType)}
                 </span>
-                {s.connectionType === 'oauth' &&
+                {!accessSuspended &&
+                s.connectionType === 'oauth' &&
                 s.platform === 'douyin' &&
                 s.role === 'seller' &&
                 s.status === 'active' ? (
@@ -290,7 +307,7 @@ export function ShopsSection() {
                     {syncOrders.isPending && syncOrders.variables === s.id ? '同步中…' : '同步订单'}
                   </button>
                 ) : null}
-                {s.connectionType === 'oauth' && isOAuthPlatform(s.platform) ? (
+                {!accessSuspended && s.connectionType === 'oauth' && isOAuthPlatform(s.platform) ? (
                   <button
                     onClick={() => {
                       if (isOAuthPlatform(s.platform)) authorize.mutate(s.platform);

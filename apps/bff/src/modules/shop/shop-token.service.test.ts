@@ -6,6 +6,7 @@ import type { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAuthConfigService } from './oauth-config.service';
 import { ShopTokenService } from './shop-token.service';
 import type { AlertService } from '../observability/alert.service';
+import type { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 
 const CALLBACK = 'https://supplier.example.com/api/shops/oauth/douyin/callback';
 const ALIBABA_1688_CALLBACK = 'https://supplier.example.com/api/shops/oauth/alibaba_1688/callback';
@@ -104,6 +105,9 @@ function makeService(opts: {
   runtimeState.lockAvailable = opts.lockAvailable ?? true;
   runtimeState.storeFailures = opts.runtimeStateStoreFailures ?? 0;
   const alerts = { raise: vi.fn(), resolve: vi.fn() } as unknown as AlertService;
+  const access = {
+    assertActive: vi.fn().mockResolvedValue({ revision: 1 }),
+  };
   return {
     service: new ShopTokenService(
       prisma,
@@ -111,11 +115,13 @@ function makeService(opts: {
       makeConfig(),
       runtimeState as unknown as RuntimeStateService,
       alerts,
+      access as unknown as EntitlementAccessService,
     ),
     crypto,
     runtimeState,
     updates,
     alerts,
+    access,
     shop,
   };
 }
@@ -125,6 +131,17 @@ afterEach(() => {
 });
 
 describe('ShopTokenService', () => {
+  it('rejects suspended access before reading or refreshing a shop token', async () => {
+    const state = makeService({ expiresInMs: 10 * 60 * 1000 });
+    state.access.assertActive.mockRejectedValueOnce(
+      Object.assign(new Error('suspended'), { status: 403 }),
+    );
+
+    await expect(state.service.getAccessToken(9n, 42n)).rejects.toMatchObject({ status: 403 });
+    expect(state.runtimeState.acquireLease).not.toHaveBeenCalled();
+    expect(state.updates).toEqual([]);
+  });
+
   it('decrypts a token that is not close to expiry', async () => {
     const { service, runtimeState } = makeService({ expiresInMs: 10 * 60 * 1000 });
 
@@ -175,7 +192,45 @@ describe('ShopTokenService', () => {
     expect(crypto.decrypt(String(updates[0]?.refreshTokenEnc))).toBe('new-refresh-token');
   });
 
-  it('recovers a rotated token from encrypted runtime state after database persistence fails', async () => {
+  it('journals and persists a rotated token before rejecting a changed entitlement revision', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              err_no: 0,
+              data: {
+                access_token: 'new-access-token',
+                refresh_token: 'new-refresh-token',
+                expires_in: 3600,
+                shop_id: '4463798',
+              },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const state = makeService({ expiresInMs: -1 });
+    state.access.assertActive
+      .mockResolvedValueOnce({ revision: 1 })
+      .mockResolvedValueOnce({ revision: 1 })
+      .mockRejectedValueOnce(Object.assign(new Error('revision changed'), { status: 409 }));
+
+    await expect(state.service.getAccessToken(9n, 42n)).rejects.toMatchObject({ status: 409 });
+    expect(state.runtimeState.store).toHaveBeenCalledWith(
+      'oauth:refresh-result:9',
+      expect.any(String),
+      86_400_000,
+    );
+    expect(state.updates).toHaveLength(1);
+    expect(state.crypto.decrypt(String(state.updates[0]?.accessTokenEnc))).toBe('new-access-token');
+    expect(state.crypto.decrypt(String(state.updates[0]?.refreshTokenEnc))).toBe(
+      'new-refresh-token',
+    );
+  });
+
+  it('recovers a rotated token across an entitlement revision after database persistence fails', async () => {
     const fetcher = vi.fn(
       async () =>
         new Response(
@@ -195,6 +250,7 @@ describe('ShopTokenService', () => {
     const state = makeService({ expiresInMs: -1, tokenPersistenceFailures: 3 });
 
     await expect(state.service.getAccessToken(9n, 42n)).rejects.toThrow('店铺授权刷新结果待恢复');
+    state.access.assertActive.mockResolvedValue({ revision: 2 });
     await expect(state.service.getAccessToken(9n, 42n)).resolves.toBe('new-access-token');
 
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -410,13 +466,17 @@ describe('ShopTokenService', () => {
       }),
     );
 
-    await expect(state.service.getAccessToken(9n, 42n)).rejects.toThrow('店铺授权已过期');
+    await expect(state.service.getAccessToken(9n, 42n)).rejects.toThrow('店铺授权刷新结果待恢复');
     expect(state.shop).toMatchObject({
       status: 'revoked',
       accessTokenEnc: null,
       refreshTokenEnc: null,
     });
     expect(state.updates).toHaveLength(0);
-    expect(state.alerts.raise).not.toHaveBeenCalled();
+    expect(state.runtimeState.store).toHaveBeenCalledWith(
+      'oauth:refresh-result:9',
+      expect.any(String),
+      86_400_000,
+    );
   });
 });

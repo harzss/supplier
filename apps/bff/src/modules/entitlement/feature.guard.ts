@@ -3,12 +3,13 @@ import {
   type ExecutionContext,
   ForbiddenException,
   Injectable,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { canUseFeature, type FeatureId } from '@supplier/entitlements';
-import type { UserPlan } from '@supplier/shared-types';
 import { REQUIRE_FEATURE } from './require-feature.decorator';
 import type { CurrentUser } from './user-context.service';
+import { entitlementSuspended } from './entitlement-access.service';
 
 /** 声明式功能门禁：读取 @RequireFeature 元数据，校验当前用户套餐是否有权 */
 @Injectable()
@@ -23,8 +24,15 @@ export class FeatureGuard implements CanActivate {
     if (!feature) return true;
 
     const req = ctx.switchToHttp().getRequest<{ currentUser?: CurrentUser }>();
-    const plan: UserPlan = req.currentUser?.plan ?? 'free';
-    if (!canUseFeature(plan, feature)) {
+    const currentUser = req.currentUser;
+    if (!currentUser) {
+      throw new UnauthorizedException({
+        code: 'CURRENT_USER_CONTEXT_MISSING',
+        message: '当前用户上下文不可用，请重新登录',
+      });
+    }
+    if (currentUser.accessStatus !== 'active') throw entitlementSuspended();
+    if (!canUseFeature(currentUser.plan, feature)) {
       throw new ForbiddenException({
         code: 'FEATURE_LOCKED',
         feature,

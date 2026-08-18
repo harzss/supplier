@@ -5,6 +5,7 @@ import { OAuthConfigService } from './oauth-config.service';
 import { OAuthExchangeFailure, OAuthFlowService } from './oauth-flow.service';
 import type { OAuthStateService } from './oauth-state.service';
 import type { ShopService } from './shop.service';
+import type { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 
 const CALLBACK = 'https://supplier.example.com/api/shops/oauth/douyin/callback';
 const ALIBABA_1688_CALLBACK = 'https://supplier.example.com/api/shops/oauth/alibaba_1688/callback';
@@ -63,6 +64,12 @@ function makeShops() {
   };
 }
 
+function makeAccess() {
+  return {
+    assertActive: vi.fn().mockResolvedValue({ revision: 7 }),
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -74,6 +81,7 @@ describe('OAuthFlowService', () => {
       makeConfig(),
       state as unknown as OAuthStateService,
       makeShops() as unknown as ShopService,
+      makeAccess() as unknown as EntitlementAccessService,
     );
 
     const result = await service.authorize(42n, 'douyin', RETURN_TO);
@@ -112,6 +120,7 @@ describe('OAuthFlowService', () => {
       makeConfig(),
       state as unknown as OAuthStateService,
       shops as unknown as ShopService,
+      makeAccess() as unknown as EntitlementAccessService,
     );
 
     const result = await service.exchange('douyin', 'auth-code', STATE);
@@ -126,11 +135,73 @@ describe('OAuthFlowService', () => {
         refreshToken: 'refresh-token',
         platformShopId: '4463798',
       }),
+      7,
       'seller',
     );
     expect(result.shop.id).toBe('9');
     expect(result.returnTo).toBe(RETURN_TO);
     expect(result).not.toHaveProperty('tokenSet');
+  });
+
+  it('does not exchange an authorization code for a suspended account', async () => {
+    const state = makeState();
+    const shops = makeShops();
+    const access = makeAccess();
+    access.assertActive.mockRejectedValueOnce(
+      Object.assign(new Error('suspended'), { status: 403 }),
+    );
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const service = new OAuthFlowService(
+      makeConfig(),
+      state as unknown as OAuthStateService,
+      shops as unknown as ShopService,
+      access as unknown as EntitlementAccessService,
+    );
+
+    const failure = await service.exchange('douyin', 'auth-code', STATE).catch((error) => error);
+
+    expect(state.consume).toHaveBeenCalled();
+    expect(failure).toMatchObject({ originalError: { status: 403 } });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(shops.saveAuthorized).not.toHaveBeenCalled();
+  });
+
+  it('does not persist OAuth tokens after the entitlement revision changes', async () => {
+    const state = makeState();
+    const shops = makeShops();
+    const access = makeAccess();
+    access.assertActive
+      .mockResolvedValueOnce({ revision: 7 })
+      .mockRejectedValueOnce(Object.assign(new Error('revision changed'), { status: 409 }));
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            err_no: 0,
+            data: {
+              access_token: 'access-token',
+              refresh_token: 'refresh-token',
+              expires_in: 3600,
+              shop_id: '4463798',
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal('fetch', fetcher);
+    const service = new OAuthFlowService(
+      makeConfig(),
+      state as unknown as OAuthStateService,
+      shops as unknown as ShopService,
+      access as unknown as EntitlementAccessService,
+    );
+
+    const failure = await service.exchange('douyin', 'auth-code', STATE).catch((error) => error);
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(failure).toMatchObject({ originalError: { status: 409 } });
+    expect(shops.saveAuthorized).not.toHaveBeenCalled();
   });
 
   it('stores 1688 OAuth credentials as a buyer account', async () => {
@@ -164,6 +235,7 @@ describe('OAuthFlowService', () => {
       makeConfig(),
       state as unknown as OAuthStateService,
       shops as unknown as ShopService,
+      makeAccess() as unknown as EntitlementAccessService,
     );
 
     const authorization = await service.authorize(42n, 'alibaba_1688');
@@ -181,6 +253,7 @@ describe('OAuthFlowService', () => {
         refreshToken: '1688-refresh-token',
         platformShopId: 'member-1688',
       }),
+      7,
       'buyer',
     );
     expect(result.platform).toBe('alibaba_1688');
@@ -214,6 +287,7 @@ describe('OAuthFlowService', () => {
       makeConfig(),
       state as unknown as OAuthStateService,
       shops as unknown as ShopService,
+      makeAccess() as unknown as EntitlementAccessService,
     );
 
     const failure = await service.exchange('douyin', 'auth-code', STATE).catch((error) => error);
@@ -234,6 +308,7 @@ describe('OAuthFlowService', () => {
       makeConfig(),
       state as unknown as OAuthStateService,
       makeShops() as unknown as ShopService,
+      makeAccess() as unknown as EntitlementAccessService,
     );
 
     const failure = await service.exchange('douyin', 'auth-code', STATE).catch((error) => error);
@@ -255,6 +330,7 @@ describe('OAuthFlowService', () => {
       makeConfig(),
       state as unknown as OAuthStateService,
       makeShops() as unknown as ShopService,
+      makeAccess() as unknown as EntitlementAccessService,
     );
 
     await expect(service.exchange('douyin', 'auth-code', STATE)).rejects.toBe(stateError);
@@ -266,6 +342,7 @@ describe('OAuthFlowService', () => {
       makeConfig(),
       state as unknown as OAuthStateService,
       makeShops() as unknown as ShopService,
+      makeAccess() as unknown as EntitlementAccessService,
     );
     const result = {
       platform: 'douyin' as const,

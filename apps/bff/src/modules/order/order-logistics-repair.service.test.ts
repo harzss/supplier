@@ -12,7 +12,13 @@ import {
 } from './order-logistics-repair.service';
 import type { OrderService, OrderView } from './order.service';
 
-const USER: CurrentUser = { userId: 1n, plan: 'pro' };
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 const NOW = new Date('2026-07-22T12:00:00.000Z');
 
 function repair(status: 'pending' | 'running' | 'completed' = 'pending') {

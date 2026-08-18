@@ -471,6 +471,7 @@ export class SourceImportService {
           task: {
             status: { in: ['queued', 'running'] },
             cancelRequestedAt: null,
+            user: { entitlementAccessStatus: 'active' },
           },
         },
         orderBy: [{ nextRunAt: 'asc' }, { id: 'asc' }],
@@ -481,7 +482,11 @@ export class SourceImportService {
           id: candidate.id,
           status: candidate.status,
           attempts: candidate.attempts,
-          task: { status: { in: ['queued', 'running'] }, cancelRequestedAt: null },
+          task: {
+            status: { in: ['queued', 'running'] },
+            cancelRequestedAt: null,
+            user: { entitlementAccessStatus: 'active' },
+          },
         },
         data: {
           status: 'running',
@@ -500,12 +505,18 @@ export class SourceImportService {
           status: 'queued',
           cancelRequestedAt: null,
           startedAt: null,
+          user: { entitlementAccessStatus: 'active' },
         },
         data: { status: 'running', stateRevision: { increment: 1 }, startedAt: now },
       });
       if (firstStart.count === 0) {
         await this.prisma.sourceImportTask.updateMany({
-          where: { id: candidate.taskId, status: 'queued', cancelRequestedAt: null },
+          where: {
+            id: candidate.taskId,
+            status: 'queued',
+            cancelRequestedAt: null,
+            user: { entitlementAccessStatus: 'active' },
+          },
           data: { status: 'running', stateRevision: { increment: 1 } },
         });
       }
@@ -525,9 +536,11 @@ export class SourceImportService {
     if (!current || !ownedItem(current, item)) return 'stale';
     if (current.task.cancelRequestedAt) return this.cancelClaimedItem(current);
     if (!['queued', 'running'].includes(current.task.status)) return 'stale';
+    if (!(await this.isExecutionOwned(current))) return 'stale';
 
     const context = await this.adapters.create(current.task.userId, current.task.buyerShopId);
     await this.rateLimiter.take(context.demo);
+    if (!(await this.isExecutionOwned(current))) return 'stale';
     const fetchStartedAt = new Date();
     const product = await context.adapter.fetchProduct(current.offerId);
     if (product && product.productId1688 !== current.offerId) {
@@ -550,7 +563,10 @@ export class SourceImportService {
         status: 'running',
         attempts: item.attempts,
         lockedBy: item.lockedBy,
-        task: { cancelRequestedAt: { not: null } },
+        task: {
+          cancelRequestedAt: { not: null },
+          user: { entitlementAccessStatus: 'active' },
+        },
       },
       data: {
         status: 'cancelled',
@@ -757,6 +773,7 @@ export class SourceImportService {
         status: 'running',
         attempts: item.attempts,
         lockedBy: item.lockedBy,
+        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: {
         status: 'cancelled',
@@ -772,7 +789,11 @@ export class SourceImportService {
 
   private async recoverStaleItems(now: Date): Promise<void> {
     const stale = await this.prisma.sourceImportItem.findMany({
-      where: { status: 'running', lockedAt: { lt: new Date(now.getTime() - STALE_ITEM_MS) } },
+      where: {
+        status: 'running',
+        lockedAt: { lt: new Date(now.getTime() - STALE_ITEM_MS) },
+        task: { user: { entitlementAccessStatus: 'active' } },
+      },
       take: 100,
       orderBy: { lockedAt: 'asc' },
       include: { task: true },
@@ -788,8 +809,15 @@ export class SourceImportService {
           attempts: item.attempts,
           lockedBy: item.lockedBy,
           task: cancelled
-            ? { cancelRequestedAt: { not: null } }
-            : { status: { in: ['queued', 'running'] }, cancelRequestedAt: null },
+            ? {
+                cancelRequestedAt: { not: null },
+                user: { entitlementAccessStatus: 'active' },
+              }
+            : {
+                status: { in: ['queued', 'running'] },
+                cancelRequestedAt: null,
+                user: { entitlementAccessStatus: 'active' },
+              },
         },
         data: {
           status: cancelled ? 'cancelled' : failed ? 'failed' : 'retry_wait',
@@ -815,6 +843,7 @@ export class SourceImportService {
         ...(this.lastTaskReconcileCursor ? { id: { gt: this.lastTaskReconcileCursor } } : {}),
         confirmedAt: { not: null },
         status: { in: ['queued', 'running', 'cancelling', ...TERMINAL_TASK_STATUSES] },
+        user: { entitlementAccessStatus: 'active' },
       },
       take: 100,
       orderBy: { id: 'asc' },
@@ -856,7 +885,11 @@ export class SourceImportService {
       const nextFinishedAt = active > 0 ? null : (task.finishedAt ?? finishedAt);
       if (task.status === status && sameInstant(task.finishedAt, nextFinishedAt)) return;
       const changed = await this.prisma.sourceImportTask.updateMany({
-        where: { id: task.id, stateRevision: task.stateRevision },
+        where: {
+          id: task.id,
+          stateRevision: task.stateRevision,
+          user: { entitlementAccessStatus: 'active' },
+        },
         data: {
           status,
           stateRevision: { increment: 1 },
@@ -865,6 +898,14 @@ export class SourceImportService {
       });
       if (changed.count === 1) return;
     }
+  }
+
+  private async isExecutionOwned(item: SourceImportExecutionRecord): Promise<boolean> {
+    const owned = await this.prisma.sourceImportItem.findFirst({
+      where: ownedItemWhere(item),
+      select: { id: true },
+    });
+    return Boolean(owned);
   }
 
   private async requireTask(userId: bigint, taskId: bigint): Promise<SourceImportTaskRecord> {
@@ -944,7 +985,11 @@ function ownedItemWhere(item: SourceImportExecutionRecord): Prisma.SourceImportI
     status: 'running',
     attempts: item.attempts,
     lockedBy: item.lockedBy,
-    task: { status: { in: ['queued', 'running'] }, cancelRequestedAt: null },
+    task: {
+      status: { in: ['queued', 'running'] },
+      cancelRequestedAt: null,
+      user: { entitlementAccessStatus: 'active' },
+    },
   };
 }
 

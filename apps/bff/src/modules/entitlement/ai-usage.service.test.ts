@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
 import type { AlertService } from '../observability/alert.service';
 import { AiUsageService, type PlatformUsageReservation } from './ai-usage.service';
+import type { EntitlementAccessService } from './entitlement-access.service';
 
 const RESERVATION: PlatformUsageReservation = {
   id: 12n,
@@ -22,7 +23,7 @@ describe('AiUsageService', () => {
     const fixture = createFixture(7);
 
     await expect(
-      fixture.service.reservePlatform(1n, 'basic', 'detail', 'qwen-max'),
+      fixture.service.reservePlatform(1n, 'basic', 'detail', 'qwen-max', 3),
     ).resolves.toMatchObject({
       id: 12n,
       module: 'detail',
@@ -32,6 +33,7 @@ describe('AiUsageService', () => {
     expect(fixture.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
       isolationLevel: 'Serializable',
     });
+    expect(fixture.access.assertActive).toHaveBeenCalledWith(1n, 3, fixture.tx);
     expect(fixture.tx.aiUsageLog.count).toHaveBeenCalledWith({
       where: {
         userId: 1n,
@@ -56,7 +58,7 @@ describe('AiUsageService', () => {
     const fixture = createFixture(500);
 
     const error = (await fixture.service
-      .reservePlatform(1n, 'basic', 'detail', 'qwen-max')
+      .reservePlatform(1n, 'basic', 'detail', 'qwen-max', 3)
       .catch((reason: unknown) => reason)) as { status: number; getResponse: () => unknown };
     expect(error).toMatchObject({ status: 402 });
     expect(error.getResponse()).toMatchObject({
@@ -66,11 +68,24 @@ describe('AiUsageService', () => {
     expect(fixture.tx.aiUsageLog.create).not.toHaveBeenCalled();
   });
 
+  it('does not count usage or reserve capacity for a suspended account', async () => {
+    const fixture = createFixture(0);
+    fixture.access.assertActive.mockRejectedValueOnce(
+      Object.assign(new Error('suspended'), { status: 403 }),
+    );
+
+    await expect(
+      fixture.service.reservePlatform(1n, 'basic', 'detail', 'qwen-max', 3),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(fixture.tx.aiUsageLog.count).not.toHaveBeenCalled();
+    expect(fixture.tx.aiUsageLog.create).not.toHaveBeenCalled();
+  });
+
   it('does not suggest BYOK when image-processing quota is exhausted', async () => {
     const fixture = createFixture(500);
 
     const error = (await fixture.service
-      .reservePlatform(1n, 'basic', 'image_compose', 'image-pipeline')
+      .reservePlatform(1n, 'basic', 'image_compose', 'image-pipeline', 3)
       .catch((reason: unknown) => reason)) as { status: number; getResponse: () => unknown };
 
     expect(error).toMatchObject({ status: 402 });
@@ -87,7 +102,7 @@ describe('AiUsageService', () => {
     fixture.prisma.$transaction.mockRejectedValueOnce(conflict);
 
     await expect(
-      fixture.service.reservePlatform(1n, 'basic', 'detail', 'qwen-max'),
+      fixture.service.reservePlatform(1n, 'basic', 'detail', 'qwen-max', 3),
     ).resolves.toMatchObject({ id: 12n });
     expect(fixture.prisma.$transaction).toHaveBeenCalledTimes(2);
   });
@@ -163,13 +178,16 @@ function createFixture(used: number) {
     },
   };
   const alerts = { raise: vi.fn().mockResolvedValue(undefined) };
+  const access = { assertActive: vi.fn().mockResolvedValue({ revision: 3 }) };
   return {
     service: new AiUsageService(
       prisma as unknown as PrismaService,
       alerts as unknown as AlertService,
+      access as unknown as EntitlementAccessService,
     ),
     prisma,
     tx,
     alerts,
+    access,
   };
 }

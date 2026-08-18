@@ -13,10 +13,11 @@ import {
   type QuotaCheck,
   type QuotaKey,
 } from '@supplier/entitlements';
-import type { UserPlan } from '@supplier/shared-types';
+import type { EntitlementAccessStatus, UserPlan } from '@supplier/shared-types';
 import { PrismaService } from '../../common/prisma.module';
 
 export interface EntitlementView {
+  accessStatus: EntitlementAccessStatus;
   plan: PlanId | null;
   planName: string;
   features: FeatureId[];
@@ -96,26 +97,37 @@ export class EntitlementService {
   }
 
   /** 供前端展示：当前套餐、功能、用量与套餐开放状态 */
-  async buildView(userId: bigint, plan: UserPlan): Promise<EntitlementView> {
+  async buildView(
+    userId: bigint,
+    plan: UserPlan,
+    accessStatus: EntitlementAccessStatus,
+  ): Promise<EntitlementView> {
     const p = getPlan(plan);
     const used = await this.getMonthlyAiUsage(userId);
-    const ai = checkQuota(plan, 'ai.calls.monthly', used);
+    const active = accessStatus === 'active';
+    const ai = active
+      ? checkQuota(plan, 'ai.calls.monthly', used)
+      : { used, limit: 0, remaining: 0, exceeded: true };
     return {
+      accessStatus,
       plan: this.demoMode ? plan : null,
-      planName: this.demoMode ? p.name : '邀请制内测',
-      features: p.features,
+      planName: active ? (this.demoMode ? p.name : '邀请制内测') : '权益已暂停',
+      features: active ? p.features : [],
       aiUsage: { used: ai.used, limit: ai.limit, remaining: ai.remaining, exceeded: ai.exceeded },
-      quotas: { shopsMax: p.quotas['shops.max'], publishMonthly: p.quotas['publish.monthly'] },
-      plans: this.demoMode
-        ? listPlans().map((x) => ({
-            id: x.id,
-            name: x.name,
-            billingStatus: x.billingStatus,
-            billingLabel: x.billingLabel,
-            highlight: x.highlight,
-            features: x.features,
-          }))
-        : [],
+      quotas: active
+        ? { shopsMax: p.quotas['shops.max'], publishMonthly: p.quotas['publish.monthly'] }
+        : { shopsMax: 0, publishMonthly: 0 },
+      plans:
+        active && this.demoMode
+          ? listPlans().map((x) => ({
+              id: x.id,
+              name: x.name,
+              billingStatus: x.billingStatus,
+              billingLabel: x.billingLabel,
+              highlight: x.highlight,
+              features: x.features,
+            }))
+          : [],
     };
   }
 }

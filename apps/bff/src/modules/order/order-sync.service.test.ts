@@ -1,3 +1,4 @@
+import { ForbiddenException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -8,9 +9,16 @@ import type { PrismaService } from '../../common/prisma.module';
 import type { RuntimeStateService } from '../../common/runtime-state.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import type { AfterSaleService } from '../after-sale/after-sale.service';
+import type { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 import { OrderSyncService } from './order-sync.service';
 
-const USER: CurrentUser = { userId: 1n, plan: 'pro' };
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 
 function runtimeConfig(overrides: Record<string, unknown> = {}): ConfigService {
   const values: Record<string, unknown> = {
@@ -32,6 +40,10 @@ function runtimeState(leaseToken: string | null = 'owned-token'): RuntimeStateSe
 
 function afterSales(materializeOrder = vi.fn().mockResolvedValue({ change: 'ignored' })) {
   return { materializeOrder } as unknown as AfterSaleService;
+}
+
+function entitlementAccess(assertActive = vi.fn().mockResolvedValue({ revision: 1 })) {
+  return { service: { assertActive } as unknown as EntitlementAccessService, assertActive };
 }
 
 function sourceBindingHarness(
@@ -86,6 +98,14 @@ function sourceBindingHarness(
       },
     ],
   };
+  const transactionClient = {
+    publishedProduct: { findMany: transactionPublishedProductFindMany },
+    order: { findUnique: vi.fn().mockResolvedValue(null), upsert: orderUpsert },
+    orderItem: {
+      upsert: orderItemUpsert,
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+  };
   const prisma = {
     order: {
       findFirst: vi.fn().mockResolvedValue({
@@ -106,17 +126,9 @@ function sourceBindingHarness(
     publishedProduct: {
       findMany: stalePublishedProductFindMany,
     },
-    $transaction: vi.fn(async (callback) =>
-      callback({
-        publishedProduct: { findMany: transactionPublishedProductFindMany },
-        order: { findUnique: vi.fn().mockResolvedValue(null), upsert: orderUpsert },
-        orderItem: {
-          upsert: orderItemUpsert,
-          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
-        },
-      }),
-    ),
+    $transaction: vi.fn(async (callback) => callback(transactionClient)),
   } as unknown as PrismaService;
+  const access = entitlementAccess();
   const service = new OrderSyncService(
     prisma,
     new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
@@ -130,17 +142,255 @@ function sourceBindingHarness(
     runtimeConfig(),
     runtimeState(),
     afterSales(),
+    access.service,
   );
   return {
+    assertActive: access.assertActive,
     orderItemUpsert,
     paidAt,
     service,
     stalePublishedProductFindMany,
+    transactionClient,
     transactionPublishedProductFindMany,
   };
 }
 
+function syncFenceHarness(
+  options: {
+    listOrders?: ReturnType<typeof vi.fn>;
+    assertActive?: ReturnType<typeof vi.fn>;
+    shopUpdateMany?: ReturnType<typeof vi.fn>;
+  } = {},
+) {
+  const listOrders = options.listOrders ?? vi.fn().mockResolvedValue([]);
+  const assertActive = options.assertActive ?? vi.fn().mockResolvedValue({ revision: 1 });
+  const shopUpdateMany = options.shopUpdateMany ?? vi.fn().mockResolvedValue({ count: 1 });
+  const runtimeStateStore = runtimeState();
+  const prisma = {
+    shop: {
+      findFirst: vi.fn().mockResolvedValue({
+        id: 9n,
+        userId: 1n,
+        platform: 'douyin',
+        platformShopId: '4463798',
+        accessTokenEnc: 'encrypted-token',
+        status: 'active',
+        lastOrderSyncAt: null,
+      }),
+      updateMany: shopUpdateMany,
+    },
+    $transaction: vi.fn(async (callback) =>
+      callback({
+        publishedProduct: { findMany: vi.fn().mockResolvedValue([]) },
+        order: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          upsert: vi.fn().mockResolvedValue({ id: 20n }),
+        },
+        orderItem: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+          upsert: vi.fn().mockResolvedValue({}),
+        },
+      }),
+    ),
+  } as unknown as PrismaService;
+  const access = entitlementAccess(assertActive);
+  const service = new OrderSyncService(
+    prisma,
+    new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
+    { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
+    { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
+    runtimeConfig(),
+    runtimeStateStore,
+    afterSales(),
+    access.service,
+  );
+  return { service, prisma, listOrders, assertActive, shopUpdateMany, runtimeStateStore };
+}
+
 describe('OrderSyncService', () => {
+  it('stops after the shop claim when entitlement is suspended before the first adapter call', async () => {
+    const assertActive = vi
+      .fn()
+      .mockResolvedValueOnce({ revision: 1 })
+      .mockRejectedValueOnce(new ForbiddenException({ code: 'ENTITLEMENT_SUSPENDED' }));
+    const fixture = syncFenceHarness({ assertActive });
+
+    await expect(fixture.service.sync(USER, '9')).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(fixture.listOrders).not.toHaveBeenCalled();
+    expect(fixture.runtimeStateStore.renewLease).not.toHaveBeenCalled();
+    expect(fixture.prisma.$transaction).not.toHaveBeenCalled();
+    expect(fixture.shopUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ lastOrderSyncAt: expect.any(Date) }),
+      }),
+    );
+  });
+
+  it('stops between pages when the entitlement revision changes', async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      platformOrderId: `fenced-order-${index}`,
+      buyerNick: '',
+      receiverName: '',
+      receiverPhone: '',
+      receiverAddress: '',
+      amount: 10,
+      status: 'paid',
+      paidAt: new Date('2026-08-18T00:00:00.000Z'),
+      skuList: [],
+    }));
+    const listOrders = vi.fn().mockResolvedValue(firstPage);
+    let pageFenceChecks = 0;
+    const assertActive = vi.fn().mockImplementation(async (_userId, _revision, reader) => {
+      if (reader) return { revision: 1 };
+      pageFenceChecks++;
+      if (pageFenceChecks === 4) {
+        throw new ForbiddenException({ code: 'ENTITLEMENT_SUSPENDED' });
+      }
+      return { revision: 1 };
+    });
+    const fixture = syncFenceHarness({ assertActive, listOrders });
+
+    await expect(fixture.service.sync(USER, '9')).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(listOrders).toHaveBeenCalledTimes(1);
+    expect(assertActive).toHaveBeenLastCalledWith(1n, 1);
+    expect(fixture.shopUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ lastOrderSyncAt: expect.any(Date) }),
+      }),
+    );
+  });
+
+  it('stops later order transactions when access is suspended after a page fence', async () => {
+    const platformOrders = Array.from({ length: 3 }, (_, index) => ({
+      platformOrderId: `page-fenced-order-${index}`,
+      buyerNick: '',
+      receiverName: '',
+      receiverPhone: '',
+      receiverAddress: '',
+      amount: 10,
+      status: 'paid',
+      paidAt: new Date('2026-08-18T00:00:00.000Z'),
+      skuList: [],
+    }));
+    const listOrders = vi.fn().mockResolvedValue(platformOrders);
+    const firstOrderUpsert = vi.fn().mockResolvedValue({ id: 20n });
+    const blockedOrderUpsert = vi.fn().mockResolvedValue({ id: 21n });
+    const firstPurchaseUpdate = vi.fn();
+    const blockedPurchaseUpdate = vi.fn();
+    const firstTransaction = {
+      publishedProduct: { findMany: vi.fn().mockResolvedValue([]) },
+      order: { findUnique: vi.fn().mockResolvedValue(null), upsert: firstOrderUpsert },
+      orderItem: {
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        upsert: vi.fn(),
+      },
+      purchaseOrder: { updateMany: firstPurchaseUpdate },
+    };
+    const blockedTransaction = {
+      publishedProduct: { findMany: vi.fn().mockResolvedValue([]) },
+      order: { findUnique: vi.fn().mockResolvedValue(null), upsert: blockedOrderUpsert },
+      orderItem: {
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        upsert: vi.fn(),
+      },
+      purchaseOrder: { updateMany: blockedPurchaseUpdate },
+    };
+    let accessSuspended = false;
+    const assertActive = vi.fn().mockImplementation(async (_userId, _revision, reader) => {
+      if (reader && accessSuspended) {
+        throw new ForbiddenException({ code: 'ENTITLEMENT_SUSPENDED' });
+      }
+      return { revision: 1 };
+    });
+    let transactionIndex = 0;
+    const transaction = vi.fn(async (callback) => {
+      const reader = transactionIndex++ === 0 ? firstTransaction : blockedTransaction;
+      const result = await callback(reader);
+      if (reader === firstTransaction) accessSuspended = true;
+      return result;
+    });
+    const shopUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const materializeOrder = vi.fn().mockResolvedValue({ change: 'created' });
+    const prisma = {
+      shop: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 9n,
+          userId: 1n,
+          platform: 'douyin',
+          platformShopId: '4463798',
+          accessTokenEnc: 'encrypted-token',
+          status: 'active',
+          lastOrderSyncAt: null,
+        }),
+        updateMany: shopUpdateMany,
+      },
+      $transaction: transaction,
+    } as unknown as PrismaService;
+    const service = new OrderSyncService(
+      prisma,
+      new CryptoService({ get: () => 'unit-key' } as unknown as ConfigService),
+      { getAccessToken: vi.fn().mockResolvedValue('plain-token') } as unknown as ShopTokenService,
+      { create: vi.fn().mockReturnValue({ listOrders }) } as unknown as PlatformAdapterFactory,
+      runtimeConfig(),
+      runtimeState(),
+      afterSales(materializeOrder),
+      entitlementAccess(assertActive).service,
+    );
+
+    await expect(service.sync(USER, '9')).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(listOrders).toHaveBeenCalledOnce();
+    expect(transaction).toHaveBeenCalledTimes(2);
+    expect(firstOrderUpsert).toHaveBeenCalledOnce();
+    expect(blockedOrderUpsert).not.toHaveBeenCalled();
+    expect(blockedTransaction.publishedProduct.findMany).not.toHaveBeenCalled();
+    expect(blockedTransaction.order.findUnique).not.toHaveBeenCalled();
+    expect(blockedTransaction.orderItem.deleteMany).not.toHaveBeenCalled();
+    expect(materializeOrder).toHaveBeenCalledTimes(1);
+    expect(firstPurchaseUpdate).not.toHaveBeenCalled();
+    expect(blockedPurchaseUpdate).not.toHaveBeenCalled();
+    expect(shopUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ lastOrderSyncAt: expect.any(Date) }),
+      }),
+    );
+    expect(assertActive).toHaveBeenLastCalledWith(1n, 1, blockedTransaction);
+  });
+
+  it('does not advance the watermark when entitlement changes before completion', async () => {
+    const shopUpdateMany = vi
+      .fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    const fixture = syncFenceHarness({ shopUpdateMany });
+
+    await expect(fixture.service.sync(USER, '9')).rejects.toThrow('订单同步执行权已失效');
+
+    expect(fixture.listOrders).toHaveBeenCalledTimes(1);
+    expect(shopUpdateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          user: {
+            status: 'active',
+            entitlementAccessStatus: 'active',
+            entitlementRevision: 1,
+          },
+        }),
+        data: expect.objectContaining({ lastOrderSyncAt: expect.any(Date) }),
+      }),
+    );
+    expect(shopUpdateMany).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        data: expect.objectContaining({ orderSyncError: expect.any(String) }),
+      }),
+    );
+  });
+
   it('rejects legacy demo shops before acquiring a sync lock in supabase auth mode', async () => {
     const findFirst = vi.fn().mockResolvedValue(null);
     const runtimeStateStore = runtimeState();
@@ -152,6 +402,7 @@ describe('OrderSyncService', () => {
       runtimeConfig({ AUTH_MODE: 'supabase' }),
       runtimeStateStore,
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.syncShop(1n, 9n)).rejects.toThrow('店铺不存在或授权已失效');
@@ -160,6 +411,11 @@ describe('OrderSyncService', () => {
         id: 9n,
         userId: 1n,
         status: 'active',
+        user: {
+          status: 'active',
+          entitlementAccessStatus: 'active',
+          entitlementRevision: 1,
+        },
         NOT: { platformShopId: { startsWith: 'demo-' } },
       },
     });
@@ -229,6 +485,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(materializeOrder),
+      entitlementAccess().service,
     );
 
     await expect(service.refreshOrder(USER, '20')).resolves.toEqual({
@@ -273,6 +530,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeStateStore,
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.refreshOrder(USER, '20')).rejects.toThrow(
@@ -343,6 +601,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.refreshOrder(USER, '20')).rejects.toThrow('平台订单详情与请求订单不一致');
@@ -418,6 +677,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.refreshOrder(USER, '20')).resolves.toMatchObject({ status: 'paid' });
@@ -515,6 +775,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(),
+      entitlementAccess().service,
     );
 
     const result = await service.sync(USER, '9');
@@ -576,8 +837,10 @@ describe('OrderSyncService', () => {
     const paidAt = new Date('2026-08-04T08:00:00.000Z');
     const {
       orderItemUpsert,
+      assertActive,
       service,
       stalePublishedProductFindMany,
+      transactionClient,
       transactionPublishedProductFindMany,
     } = sourceBindingHarness([
       {
@@ -627,6 +890,7 @@ describe('OrderSyncService', () => {
     });
     expect(stalePublishedProductFindMany).not.toHaveBeenCalled();
     expect(transactionPublishedProductFindMany).toHaveBeenCalledTimes(1);
+    expect(assertActive).toHaveBeenLastCalledWith(1n, 1, transactionClient);
   });
 
   it('keeps a delayed pre-switch order on the historical source binding', async () => {
@@ -800,6 +1064,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(materializeOrder),
+      entitlementAccess().service,
     );
 
     await service.sync(USER, '9');
@@ -875,6 +1140,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow(
@@ -1012,6 +1278,7 @@ describe('OrderSyncService', () => {
         runtimeConfig(),
         runtimeState(),
         afterSales(),
+        entitlementAccess().service,
       );
 
       await service.sync(USER, '9');
@@ -1134,6 +1401,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(),
+      entitlementAccess().service,
     );
 
     await service.sync(USER, '9');
@@ -1198,6 +1466,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(),
+      entitlementAccess().service,
     );
 
     const result = await service.sync(USER, '9');
@@ -1210,7 +1479,16 @@ describe('OrderSyncService', () => {
     expect(listOrders.mock.calls[1]![1]).toEqual({ ...firstQuery, cursor: '1' });
     expect(result).toEqual({ shopId: '9', synced: 101, skipped: 0 });
     expect(shopUpdate).toHaveBeenLastCalledWith({
-      where: { id: 9n, status: 'active', orderSyncAttemptAt: firstQuery.endTime },
+      where: {
+        id: 9n,
+        status: 'active',
+        orderSyncAttemptAt: firstQuery.endTime,
+        user: {
+          status: 'active',
+          entitlementAccessStatus: 'active',
+          entitlementRevision: 1,
+        },
+      },
       data: {
         lastOrderSyncAt: firstQuery.endTime,
         orderSyncAttemptAt: firstQuery.endTime,
@@ -1221,7 +1499,10 @@ describe('OrderSyncService', () => {
 
   it('stops before database writes when the distributed lock is lost during a platform page', async () => {
     const shopUpdate = vi.fn().mockResolvedValue({});
-    const shopUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const shopUpdateMany = vi
+      .fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValue({ count: 0 });
     const transaction = vi.fn();
     const publishedProductFindMany = vi.fn();
     const renewLease = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
@@ -1268,6 +1549,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeStateStore,
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow('订单同步执行权已失效');
@@ -1322,6 +1604,7 @@ describe('OrderSyncService', () => {
       runtimeConfig({ DOUYIN_ORDER_SYNC_MAX_PAGES: 1 }),
       runtimeState(),
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow('订单同步超过 1 页安全上限');
@@ -1382,6 +1665,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(),
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow(
@@ -1428,6 +1712,7 @@ describe('OrderSyncService', () => {
       runtimeConfig(),
       runtimeState(null),
       afterSales(),
+      entitlementAccess().service,
     );
 
     await expect(service.sync(USER, '9')).rejects.toThrow('该店铺订单正在同步');

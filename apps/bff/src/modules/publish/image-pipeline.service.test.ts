@@ -5,7 +5,13 @@ import type { AiUsageService } from '../entitlement/ai-usage.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import { ImagePipelineService } from './image-pipeline.service';
 
-const USER: CurrentUser = { userId: 1n, plan: 'pro' };
+const USER: CurrentUser = {
+  userId: 1n,
+  plan: 'pro',
+  entitlementSource: 'internal_beta',
+  accessStatus: 'active',
+  entitlementRevision: 1,
+};
 
 afterEach(() => vi.unstubAllGlobals());
 

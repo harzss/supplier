@@ -202,6 +202,27 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
     10,
     'SOURCE_IMPORT_MAX_ATTEMPTS',
   );
+  environment.MARKETPLACE_EVENT_POLL_MS = integer(
+    environment.MARKETPLACE_EVENT_POLL_MS,
+    2_000,
+    500,
+    60_000,
+    'MARKETPLACE_EVENT_POLL_MS',
+  );
+  environment.MARKETPLACE_EVENT_BATCH_SIZE = integer(
+    environment.MARKETPLACE_EVENT_BATCH_SIZE,
+    20,
+    1,
+    100,
+    'MARKETPLACE_EVENT_BATCH_SIZE',
+  );
+  environment.MARKETPLACE_EVENT_LEASE_MS = integer(
+    environment.MARKETPLACE_EVENT_LEASE_MS,
+    60_000,
+    5_000,
+    300_000,
+    'MARKETPLACE_EVENT_LEASE_MS',
+  );
   validateOptionalBoolean(environment.SWAGGER_ENABLED, 'SWAGGER_ENABLED');
   validateOptionalBoolean(
     environment.EXCEPTION_CENTER_SCAN_ENABLED,
@@ -232,6 +253,15 @@ export function validateEnvironment(input: RuntimeEnvironment): RuntimeEnvironme
   validateOptionalBoolean(environment.SOURCE_IMPORT_ENABLED, 'SOURCE_IMPORT_ENABLED');
   if (typeof environment.SOURCE_IMPORT_ENABLED === 'boolean') {
     environment.SOURCE_IMPORT_ENABLED = String(environment.SOURCE_IMPORT_ENABLED);
+  }
+  validateOptionalBoolean(
+    environment.MARKETPLACE_EVENT_PROCESSING_ENABLED,
+    'MARKETPLACE_EVENT_PROCESSING_ENABLED',
+  );
+  if (typeof environment.MARKETPLACE_EVENT_PROCESSING_ENABLED === 'boolean') {
+    environment.MARKETPLACE_EVENT_PROCESSING_ENABLED = String(
+      environment.MARKETPLACE_EVENT_PROCESSING_ENABLED,
+    );
   }
   validateOptionalBoolean(
     environment.ALIBABA_1688_PURCHASE_ENABLED,

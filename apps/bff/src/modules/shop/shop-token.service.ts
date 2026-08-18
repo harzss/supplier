@@ -17,6 +17,7 @@ import { PrismaService } from '../../common/prisma.module';
 import { RuntimeStateService } from '../../common/runtime-state.service';
 import { OAuthConfigService } from './oauth-config.service';
 import { AlertService } from '../observability/alert.service';
+import { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 
 const REFRESH_WINDOW_MS = 5 * 60 * 1000;
 const REFRESH_LOCK_TTL_MS = 60_000;
@@ -39,6 +40,7 @@ type TokenShop = Pick<
 
 interface PendingTokenRefresh {
   version: 1;
+  entitlementRevision: number;
   userId: string;
   platform: Platform;
   platformShopId: string;
@@ -59,20 +61,24 @@ export class ShopTokenService {
     private readonly oauthConfig: OAuthConfigService,
     private readonly runtimeState: RuntimeStateService,
     private readonly alerts: AlertService,
+    private readonly access: EntitlementAccessService,
   ) {}
 
   async getAccessToken(shopId: bigint, userId: bigint): Promise<string> {
+    const entitlement = await this.access.assertActive(userId);
     const shop = await this.loadShop(shopId, userId);
     this.assertUsable(shop);
 
     const now = Date.now();
     if (shop.tokenExpireAt && shop.tokenExpireAt.getTime() > now + REFRESH_WINDOW_MS) {
+      await this.access.assertActive(userId, entitlement.revision);
       return this.decryptAccessToken(shop);
     }
 
     const lock = await this.acquireRefreshLock(shop.id);
     if (!lock) {
       if (shop.tokenExpireAt && shop.tokenExpireAt.getTime() > now) {
+        await this.access.assertActive(userId, entitlement.revision);
         return this.decryptAccessToken(shop);
       }
       throw new ServiceUnavailableException('店铺授权正在刷新，请稍后重试');
@@ -81,18 +87,19 @@ export class ShopTokenService {
     try {
       let latest = await this.loadShop(shopId, userId);
       this.assertUsable(latest);
-      latest = await this.recoverPendingRefresh(latest);
+      latest = await this.recoverPendingRefresh(latest, entitlement.revision);
       this.assertUsable(latest);
       if (latest.tokenExpireAt && latest.tokenExpireAt.getTime() > Date.now() + REFRESH_WINDOW_MS) {
+        await this.access.assertActive(userId, entitlement.revision);
         return this.decryptAccessToken(latest);
       }
-      return await this.refresh(latest);
+      return await this.refresh(latest, entitlement.revision);
     } finally {
       await this.releaseRefreshLock(shop.id, lock);
     }
   }
 
-  private async refresh(shop: TokenShop): Promise<string> {
+  private async refresh(shop: TokenShop, entitlementRevision: number): Promise<string> {
     if (!shop.refreshTokenEnc) {
       await this.markExpired(shop);
       throw new UnauthorizedException(REAUTHORIZE_MESSAGE);
@@ -109,6 +116,7 @@ export class ShopTokenService {
 
     let tokenSet: Awaited<ReturnType<PlatformAdapter['refreshToken']>>;
     try {
+      await this.access.assertActive(shop.userId, entitlementRevision);
       const adapter = this.createAdapter(shop.platform);
       tokenSet = await adapter.refreshToken(refreshToken);
     } catch (err) {
@@ -126,9 +134,9 @@ export class ShopTokenService {
       await this.markExpired(shop);
       throw new UnauthorizedException(REAUTHORIZE_MESSAGE);
     }
-
     const pending: PendingTokenRefresh = {
       version: 1,
+      entitlementRevision,
       userId: shop.userId.toString(),
       platform: shop.platform,
       platformShopId: shop.platformShopId,
@@ -154,15 +162,26 @@ export class ShopTokenService {
       throw new ServiceUnavailableException(REFRESH_RECOVERY_MESSAGE);
     }
     if (updated.count === 0) {
-      await this.clearPendingRefresh(shop.id);
-      throw new UnauthorizedException(REAUTHORIZE_MESSAGE);
+      if (!recoveryStored && !(await this.storePendingRefresh(shop, pending))) {
+        await this.raiseCredentialAlert(
+          shop,
+          'token_refresh_recovery_store',
+          new Error('refresh result CAS conflict'),
+          'critical',
+        );
+      }
+      throw new ServiceUnavailableException(REFRESH_RECOVERY_MESSAGE);
     }
     await this.clearPendingRefresh(shop.id);
     await this.alerts.resolve(this.alertKey(shop.id), { status: 'refresh_ok' });
+    await this.access.assertActive(shop.userId, entitlementRevision);
     return tokenSet.accessToken;
   }
 
-  private async recoverPendingRefresh(shop: TokenShop): Promise<TokenShop> {
+  private async recoverPendingRefresh(
+    shop: TokenShop,
+    entitlementRevision: number,
+  ): Promise<TokenShop> {
     let raw: string | null;
     try {
       raw = await this.runtimeState.read<string>(this.refreshRecoveryKey(shop.id));
@@ -189,17 +208,24 @@ export class ShopTokenService {
       shop.refreshTokenEnc === pending.refreshTokenEnc
     ) {
       await this.clearPendingRefresh(shop.id);
+      await this.access.assertActive(shop.userId, entitlementRevision);
       return shop;
     }
     if (
       shop.accessTokenEnc !== pending.previousAccessTokenEnc ||
       shop.refreshTokenEnc !== pending.previousRefreshTokenEnc
     ) {
-      await this.clearPendingRefresh(shop.id);
-      return shop;
+      await this.raiseCredentialAlert(
+        shop,
+        'token_refresh_recovery_conflict',
+        new Error('refresh recovery ciphertext changed'),
+        'critical',
+      );
+      throw new ServiceUnavailableException(REFRESH_RECOVERY_MESSAGE);
     }
 
     let updated: { count: number };
+    await this.access.assertActive(shop.userId, entitlementRevision);
     try {
       updated = await this.persistPendingRefresh(shop, pending);
     } catch (error) {
@@ -207,10 +233,12 @@ export class ShopTokenService {
       throw new ServiceUnavailableException(REFRESH_RECOVERY_MESSAGE);
     }
     if (updated.count === 0) {
+      await this.access.assertActive(shop.userId, entitlementRevision);
       throw new ServiceUnavailableException(REFRESH_RECOVERY_MESSAGE);
     }
     await this.clearPendingRefresh(shop.id);
     await this.alerts.resolve(this.alertKey(shop.id), { status: 'refresh_recovered' });
+    await this.access.assertActive(shop.userId, entitlementRevision);
     return {
       ...shop,
       accessTokenEnc: pending.accessTokenEnc,
@@ -375,7 +403,7 @@ export class ShopTokenService {
       summary:
         failure === 'token_refresh_identity_mismatch'
           ? '店铺授权刷新返回了不同主体'
-          : failure === 'token_refresh_persist' || failure === 'token_refresh_recovery_store'
+          : failure === 'token_refresh_persist' || failure.startsWith('token_refresh_recovery')
             ? '店铺授权刷新结果无法持久化'
             : severity === 'critical'
               ? '店铺授权凭证无法解密'
@@ -397,6 +425,8 @@ function parsePendingRefresh(raw: string): PendingTokenRefresh | null {
     const tokenExpireAt = typeof value.tokenExpireAt === 'string' ? value.tokenExpireAt : '';
     if (
       value.version !== 1 ||
+      !Number.isSafeInteger(value.entitlementRevision) ||
+      Number(value.entitlementRevision) <= 0 ||
       typeof value.userId !== 'string' ||
       typeof value.platform !== 'string' ||
       typeof value.platformShopId !== 'string' ||

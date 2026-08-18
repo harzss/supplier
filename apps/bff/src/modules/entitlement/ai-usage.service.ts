@@ -5,6 +5,7 @@ import type { UserPlan } from '@supplier/shared-types';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
 import { AlertService } from '../observability/alert.service';
+import { EntitlementAccessService } from './entitlement-access.service';
 
 export const AI_USAGE_RESERVATION_MODEL_PREFIX = 'pending/';
 export const AI_USAGE_RESERVATION_STALE_MS = 10 * 60_000;
@@ -42,6 +43,7 @@ export class AiUsageService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly alerts: AlertService,
+    private readonly access: EntitlementAccessService,
   ) {}
 
   async reservePlatform(
@@ -49,11 +51,13 @@ export class AiUsageService {
     plan: UserPlan,
     module: AiModule,
     requestedModel: string,
+    expectedRevision?: number,
   ): Promise<PlatformUsageReservation> {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         return await this.prisma.$transaction(
           async (tx) => {
+            await this.access.assertActive(userId, expectedRevision, tx);
             const used = await tx.aiUsageLog.count({
               where: { userId, viaByok: false, createdAt: { gte: startOfMonth() } },
             });

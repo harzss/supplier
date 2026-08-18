@@ -19,8 +19,20 @@ function context(headers: Record<string, string> = {}) {
 function guard(options: { mode: 'demo' | 'supabase'; publicRoute?: boolean }) {
   const userContext = {
     authMode: options.mode,
-    loadDemo: vi.fn().mockResolvedValue({ userId: 1n, plan: 'free' }),
-    authenticate: vi.fn().mockResolvedValue({ userId: 42n, plan: 'pro' }),
+    loadDemo: vi.fn().mockResolvedValue({
+      userId: 1n,
+      plan: 'free',
+      entitlementSource: 'internal_beta',
+      accessStatus: 'active',
+      entitlementRevision: 1,
+    }),
+    authenticate: vi.fn().mockResolvedValue({
+      userId: 42n,
+      plan: 'free',
+      entitlementSource: 'marketplace',
+      accessStatus: 'suspended',
+      entitlementRevision: 7,
+    }),
   } as unknown as UserContextService;
   const reflector = {
     getAllAndOverride: vi.fn().mockReturnValue(options.publicRoute ?? false),
@@ -58,7 +70,13 @@ describe('CurrentUserGuard', () => {
     });
     await expect(currentGuard.canActivate(ctx)).resolves.toBe(true);
     expect(userContext.authenticate).toHaveBeenCalledWith('signed-token');
-    expect(request.currentUser).toEqual({ userId: 42n, plan: 'pro' });
+    expect(request.currentUser).toEqual({
+      userId: 42n,
+      plan: 'free',
+      entitlementSource: 'marketplace',
+      accessStatus: 'suspended',
+      entitlementRevision: 7,
+    });
   });
 
   it('retains the existing demo identity path outside production', async () => {

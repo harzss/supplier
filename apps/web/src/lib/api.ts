@@ -85,6 +85,7 @@ export interface PlanSummary {
 }
 
 export interface EntitlementView {
+  accessStatus: 'active' | 'suspended';
   plan: string | null;
   planName: string;
   features: string[];

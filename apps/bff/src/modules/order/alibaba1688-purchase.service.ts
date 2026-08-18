@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { CryptoService } from '../../common/crypto.module';
 import { PrismaService } from '../../common/prisma.module';
 import { AfterSaleService } from '../after-sale/after-sale.service';
+import { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import { OAuthConfigService } from '../shop/oauth-config.service';
 import { ShopTokenService } from '../shop/shop-token.service';
@@ -99,6 +100,11 @@ interface PreparedPurchase {
   address: Alibaba1688CreateOrderInput['address'];
 }
 
+interface EntitlementFence {
+  userId: bigint;
+  revision: number;
+}
+
 class PurchaseConsistencyError extends ServiceUnavailableException {}
 
 @Injectable()
@@ -112,6 +118,9 @@ export class Alibaba1688PurchaseService {
     private readonly oauthConfig: OAuthConfigService,
     private readonly shopTokens: ShopTokenService,
     private readonly afterSales: AfterSaleService = NOOP_AFTER_SALE_MATERIALIZER,
+    private readonly entitlementAccess: EntitlementAccessService = new EntitlementAccessService(
+      prisma,
+    ),
   ) {}
 
   async advance(user: CurrentUser, orderId: bigint): Promise<Alibaba1688PurchaseProgress> {
@@ -193,8 +202,11 @@ export class Alibaba1688PurchaseService {
   async auditSettledPurchase(
     userId: bigint,
     purchaseOrderId: bigint,
+    expectedRevision?: number,
   ): Promise<Alibaba1688PurchaseAuditOutcome> {
     this.assertEnabled();
+    const entitlement = await this.entitlementAccess.assertActive(userId, expectedRevision);
+    const entitlementFence = { userId, revision: entitlement.revision };
     const purchase = await this.prisma.purchaseOrder.findFirst({
       where: {
         id: purchaseOrderId,
@@ -204,7 +216,14 @@ export class Alibaba1688PurchaseService {
         status: { in: ['shipped', 'received'] },
         order: {
           status: { in: ['shipped', 'received'] },
-          shop: { userId },
+          shop: {
+            userId,
+            user: {
+              status: 'active',
+              entitlementAccessStatus: 'active',
+              entitlementRevision: entitlement.revision,
+            },
+          },
         },
         buyerShop: {
           userId,
@@ -225,7 +244,8 @@ export class Alibaba1688PurchaseService {
 
     const adapter = new Alibaba1688Adapter(this.oauthConfig.getPlatformConfig('alibaba_1688'));
     const accessToken = await this.shopTokens.getAccessToken(purchase.buyerShopId, userId);
-    await this.syncPurchase(purchase, accessToken, adapter, true);
+    await this.syncPurchase(purchase, accessToken, adapter, true, entitlementFence);
+    await this.entitlementAccess.assertActive(userId, entitlement.revision);
     const current = await this.prisma.purchaseOrder.findUnique({
       where: { id: purchase.id },
       select: { exceptionStatus: true },
@@ -870,16 +890,19 @@ export class Alibaba1688PurchaseService {
     accessToken: string,
     adapter: Alibaba1688Adapter,
     settledOrder = false,
+    entitlementFence?: EntitlementFence,
   ): Promise<void> {
     const claim = settledOrder
-      ? await this.claimSettledPurchase(purchase)
+      ? await this.claimSettledPurchase(purchase, entitlementFence!)
       : await this.claimActivePurchase(purchase);
     if (!claim) return;
 
     let remote: Alibaba1688BuyerOrder;
     let status: ReturnType<typeof mapPurchaseStatus>;
     try {
+      await this.assertEntitlementFence(entitlementFence);
       remote = await adapter.getBuyerOrder(accessToken, purchase.orderId1688!);
+      await this.assertEntitlementFence(entitlementFence);
       if (remote.orderId !== purchase.orderId1688) {
         throw new PurchaseConsistencyError('1688 采购单详情与本地绑定不一致，已停止自动处理');
       }
@@ -899,6 +922,7 @@ export class Alibaba1688PurchaseService {
             claim.syncRevision,
             PURCHASE_EXCEPTION_CODE.snapshotMismatch,
             error.message,
+            entitlementFence!,
           );
         } else {
           await this.flagActivePurchase(
@@ -920,7 +944,7 @@ export class Alibaba1688PurchaseService {
         purchase.shipments.length === 0;
       await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
         tx.purchaseOrder.updateMany({
-          where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder),
+          where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder, entitlementFence),
           data: {
             status: 'failed',
             purchaseCost: settledOrder
@@ -956,6 +980,7 @@ export class Alibaba1688PurchaseService {
         claim.syncRevision,
         PURCHASE_EXCEPTION_CODE.costChanged,
         '抖店订单已发货，但 1688 采购金额后续发生变化；系统保留原成本，请人工核对。',
+        entitlementFence!,
       );
       return;
     }
@@ -967,14 +992,16 @@ export class Alibaba1688PurchaseService {
     if (status !== 'shipped' && status !== 'received') {
       await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
         tx.purchaseOrder.updateMany({
-          where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder),
+          where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder, entitlementFence),
           data: purchaseData,
         }),
       );
       return;
     }
 
+    await this.assertEntitlementFence(entitlementFence);
     const logistics = await adapter.getLogisticsInfos(accessToken, purchase.orderId1688!);
+    await this.assertEntitlementFence(entitlementFence);
     if (logistics.length === 0) {
       if (settledOrder) {
         await this.flagSettledPurchase(
@@ -983,6 +1010,7 @@ export class Alibaba1688PurchaseService {
           claim.syncRevision,
           PURCHASE_EXCEPTION_CODE.logisticsSnapshotMissing,
           '抖店订单已发货，但 1688 不再返回物流快照；系统保留原包裹并停止静默更新，请人工核对。',
+          entitlementFence!,
         );
         return;
       }
@@ -1006,6 +1034,7 @@ export class Alibaba1688PurchaseService {
             claim.syncRevision,
             PURCHASE_EXCEPTION_CODE.logisticsMappingMismatch,
             error.message,
+            entitlementFence!,
           );
         } else {
           await this.flagActivePurchase(
@@ -1027,12 +1056,13 @@ export class Alibaba1688PurchaseService {
         claim.syncRevision,
         PURCHASE_EXCEPTION_CODE.logisticsRoutingChanged,
         '抖店订单已发货，但 1688 运单、承运商或商品包裹映射已变化；系统保留原快照，请人工同步两端物流。',
+        entitlementFence!,
       );
       return;
     }
     await this.withSerializableTransaction(async (tx) => {
       const persisted = await tx.purchaseOrder.updateMany({
-        where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder),
+        where: ownedPurchaseWhere(purchase, claim.syncRevision, settledOrder, entitlementFence),
         data: {
           ...purchaseData,
           everShipped: true,
@@ -1080,6 +1110,7 @@ export class Alibaba1688PurchaseService {
 
   private async claimSettledPurchase(
     purchase: PurchaseOrderGraph,
+    entitlementFence: EntitlementFence,
   ): Promise<{ syncRevision: number; status: PurchaseOrderGraph['status'] } | null> {
     const claimed = await this.mutatePurchaseFacts(purchase.orderId, (tx) =>
       tx.purchaseOrder.updateMany({
@@ -1089,7 +1120,7 @@ export class Alibaba1688PurchaseService {
           everShipped: true,
           exceptionStatus: { in: ['none', 'resolved'] },
           status: { in: ['shipped', 'received'] },
-          order: { status: { in: ['shipped', 'received'] } },
+          order: settledEntitledOrderWhere(entitlementFence),
         },
         data: { syncRevision: { increment: 1 } },
       }),
@@ -1130,6 +1161,7 @@ export class Alibaba1688PurchaseService {
     syncRevision: number,
     code: PurchaseExceptionCode,
     reason: string,
+    entitlementFence: EntitlementFence,
   ): Promise<void> {
     await this.mutatePurchaseFacts(orderId, (tx) =>
       tx.purchaseOrder.updateMany({
@@ -1138,7 +1170,7 @@ export class Alibaba1688PurchaseService {
           syncRevision,
           exceptionStatus: { in: ['none', 'resolved'] },
           status: { in: ['shipped', 'received'] },
-          order: { status: { in: ['shipped', 'received'] } },
+          order: settledEntitledOrderWhere(entitlementFence),
         },
         data: {
           retryEligible: false,
@@ -1153,6 +1185,11 @@ export class Alibaba1688PurchaseService {
         },
       }),
     );
+  }
+
+  private async assertEntitlementFence(entitlementFence?: EntitlementFence): Promise<void> {
+    if (!entitlementFence) return;
+    await this.entitlementAccess.assertActive(entitlementFence.userId, entitlementFence.revision);
   }
 
   private async flagActivePurchase(
@@ -1204,6 +1241,7 @@ function ownedPurchaseWhere(
   purchase: PurchaseOrderGraph,
   syncRevision: number,
   settledOrder: boolean,
+  entitlementFence?: EntitlementFence,
 ): Prisma.PurchaseOrderWhereInput {
   return settledOrder
     ? {
@@ -1211,9 +1249,23 @@ function ownedPurchaseWhere(
         syncRevision,
         exceptionStatus: { in: ['none', 'resolved'] },
         status: { in: ['shipped', 'received'] },
-        order: { status: { in: ['shipped', 'received'] } },
+        order: settledEntitledOrderWhere(entitlementFence!),
       }
     : activeOwnedPurchaseWhere(purchase, syncRevision);
+}
+
+function settledEntitledOrderWhere(entitlementFence: EntitlementFence): Prisma.OrderWhereInput {
+  return {
+    status: { in: ['shipped', 'received'] },
+    shop: {
+      userId: entitlementFence.userId,
+      user: {
+        status: 'active',
+        entitlementAccessStatus: 'active',
+        entitlementRevision: entitlementFence.revision,
+      },
+    },
+  };
 }
 
 function activeOwnedPurchaseWhere(

@@ -5,13 +5,16 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { UserPlan } from '@supplier/shared-types';
+import type { EntitlementAccessStatus, EntitlementSource, UserPlan } from '@supplier/shared-types';
 import { PrismaService } from '../../common/prisma.module';
 import { AuthTokenService } from './auth-token.service';
 
 export interface CurrentUser {
   userId: bigint;
   plan: UserPlan;
+  entitlementSource: EntitlementSource;
+  accessStatus: EntitlementAccessStatus;
+  entitlementRevision: number;
 }
 
 const DEMO_USER_ID = 1n;
@@ -43,10 +46,23 @@ export class UserContextService {
         where: { authSubject: claims.subject },
         create: { authSubject: claims.subject },
         update: {},
-        select: { id: true, plan: true, status: true },
+        select: {
+          id: true,
+          plan: true,
+          status: true,
+          entitlementSource: true,
+          entitlementAccessStatus: true,
+          entitlementRevision: true,
+        },
       });
       if (user.status !== 'active') throw new ForbiddenException('账号已停用');
-      return { userId: user.id, plan: user.plan as UserPlan };
+      return {
+        userId: user.id,
+        plan: user.entitlementAccessStatus === 'active' ? (user.plan as UserPlan) : 'free',
+        entitlementSource: user.entitlementSource,
+        accessStatus: user.entitlementAccessStatus,
+        entitlementRevision: user.entitlementRevision,
+      };
     } catch (error) {
       if (error instanceof ForbiddenException) throw error;
       this.logger.error(`认证用户映射失败：${(error as Error).message}`);
@@ -58,7 +74,7 @@ export class UserContextService {
     const planOverride = this.parsePlan(planHeader);
 
     if (!userIdHeader || !/^\d+$/.test(userIdHeader)) {
-      return { userId: DEMO_USER_ID, plan: planOverride ?? 'free' };
+      return demoUser(DEMO_USER_ID, planOverride ?? 'free');
     }
 
     const userId = BigInt(userIdHeader);
@@ -68,12 +84,12 @@ export class UserContextService {
         select: { id: true, plan: true },
       });
       if (user) {
-        return { userId: user.id, plan: planOverride ?? (user.plan as UserPlan) };
+        return demoUser(user.id, planOverride ?? (user.plan as UserPlan));
       }
     } catch (err) {
       this.logger.warn(`演示用户查询失败，降级为免费套餐：${(err as Error).message}`);
     }
-    return { userId, plan: planOverride ?? 'free' };
+    return demoUser(userId, planOverride ?? 'free');
   }
 
   private parsePlan(value?: string): UserPlan | undefined {
@@ -82,4 +98,14 @@ export class UserContextService {
     }
     return undefined;
   }
+}
+
+function demoUser(userId: bigint, plan: UserPlan): CurrentUser {
+  return {
+    userId,
+    plan,
+    entitlementSource: 'internal_beta',
+    accessStatus: 'active',
+    entitlementRevision: 1,
+  };
 }

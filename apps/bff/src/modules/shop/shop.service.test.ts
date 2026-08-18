@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { CryptoService } from '../../common/crypto.module';
 import type { PrismaService } from '../../common/prisma.module';
 import type { EntitlementService } from '../entitlement/entitlement.service';
+import type { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 import type { AlertService } from '../observability/alert.service';
 import { ShopService } from './shop.service';
 
@@ -47,6 +48,7 @@ function makeService(existing: Record<string, unknown> | null = null, authMode =
   } as unknown as EntitlementService;
   const crypto = new CryptoService({ get: () => 'unit-test-key' } as unknown as ConfigService);
   const alerts = { resolve: vi.fn() } as unknown as AlertService;
+  const access = { assertActive: vi.fn().mockResolvedValue({ revision: 1 }) };
   const config = { get: (key: string) => (key === 'AUTH_MODE' ? authMode : undefined) };
   return {
     service: new ShopService(
@@ -54,11 +56,14 @@ function makeService(existing: Record<string, unknown> | null = null, authMode =
       entitlement,
       crypto,
       alerts,
+      access as unknown as EntitlementAccessService,
       config as unknown as ConfigService,
     ),
     prisma,
     entitlement,
     alerts,
+    access,
+    database,
     captured,
     transaction,
   };
@@ -71,11 +76,16 @@ describe('ShopService.saveAuthorized', () => {
     transaction.mockRejectedValueOnce(conflict);
 
     await expect(
-      service.saveAuthorized(42n, 'douyin', {
-        accessToken: 'plain-access-token',
-        platformShopId: '4463798',
-        shopName: '测试店铺',
-      }),
+      service.saveAuthorized(
+        42n,
+        'douyin',
+        {
+          accessToken: 'plain-access-token',
+          platformShopId: '4463798',
+          shopName: '测试店铺',
+        },
+        1,
+      ),
     ).resolves.toMatchObject({ id: '9', role: 'seller' });
 
     expect(transaction).toHaveBeenCalledTimes(2);
@@ -87,18 +97,55 @@ describe('ShopService.saveAuthorized', () => {
     });
   });
 
-  it('encrypts tokens before creating an authorized shop', async () => {
-    const { service, entitlement, alerts, captured } = makeService();
-
-    const view = await service.saveAuthorized(42n, 'douyin', {
-      accessToken: 'plain-access-token',
-      refreshToken: 'plain-refresh-token',
-      expiresAt: new Date('2026-07-16T02:00:00.000Z'),
-      platformShopId: '4463798',
-      shopName: '测试店铺',
+  it('rechecks entitlement inside a Serializable retry before persisting OAuth tokens', async () => {
+    const conflict = Object.assign(new Error('transaction conflict'), { code: 'P2034' });
+    const state = makeService();
+    state.transaction.mockImplementationOnce(async (callback) => {
+      await callback(state.database);
+      throw conflict;
     });
+    state.access.assertActive
+      .mockResolvedValueOnce({ revision: 1 })
+      .mockRejectedValueOnce(Object.assign(new Error('suspended'), { status: 403 }));
+
+    await expect(
+      state.service.saveAuthorized(
+        42n,
+        'douyin',
+        {
+          accessToken: 'plain-access-token',
+          refreshToken: 'plain-refresh-token',
+          platformShopId: '4463798',
+        },
+        1,
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+
+    expect(state.transaction).toHaveBeenCalledTimes(2);
+    expect(state.access.assertActive).toHaveBeenNthCalledWith(1, 42n, 1, state.database);
+    expect(state.access.assertActive).toHaveBeenNthCalledWith(2, 42n, 1, state.database);
+    expect(state.database.shop.upsert).toHaveBeenCalledTimes(1);
+    expect(state.alerts.resolve).not.toHaveBeenCalled();
+  });
+
+  it('encrypts tokens before creating an authorized shop', async () => {
+    const { service, entitlement, alerts, captured, access, database } = makeService();
+
+    const view = await service.saveAuthorized(
+      42n,
+      'douyin',
+      {
+        accessToken: 'plain-access-token',
+        refreshToken: 'plain-refresh-token',
+        expiresAt: new Date('2026-07-16T02:00:00.000Z'),
+        platformShopId: '4463798',
+        shopName: '测试店铺',
+      },
+      1,
+    );
 
     expect(entitlement.assertWithinQuota).toHaveBeenCalledWith('pro', 'shops.max', 2);
+    expect(access.assertActive).toHaveBeenCalledWith(42n, 1, database);
     expect(captured.create?.accessTokenEnc).not.toBe('plain-access-token');
     expect(captured.create?.refreshTokenEnc).not.toBe('plain-refresh-token');
     const storedValues = Object.values(captured.create ?? {})
@@ -125,12 +172,17 @@ describe('ShopService.saveAuthorized', () => {
       status: 'active',
     });
 
-    await service.saveAuthorized(42n, 'douyin', {
-      accessToken: 'new-access-token',
-      expiresAt: new Date('2026-07-16T02:00:00.000Z'),
-      platformShopId: '4463798',
-      shopName: '测试店铺',
-    });
+    await service.saveAuthorized(
+      42n,
+      'douyin',
+      {
+        accessToken: 'new-access-token',
+        expiresAt: new Date('2026-07-16T02:00:00.000Z'),
+        platformShopId: '4463798',
+        shopName: '测试店铺',
+      },
+      1,
+    );
 
     expect(entitlement.assertWithinQuota).not.toHaveBeenCalled();
   });
@@ -143,13 +195,18 @@ describe('ShopService.saveAuthorized', () => {
       status: 'revoked',
     });
 
-    await service.saveAuthorized(42n, 'douyin', {
-      accessToken: 'new-access-token',
-      refreshToken: 'new-refresh-token',
-      expiresAt: new Date('2026-07-16T02:00:00.000Z'),
-      platformShopId: '4463798',
-      shopName: '测试店铺',
-    });
+    await service.saveAuthorized(
+      42n,
+      'douyin',
+      {
+        accessToken: 'new-access-token',
+        refreshToken: 'new-refresh-token',
+        expiresAt: new Date('2026-07-16T02:00:00.000Z'),
+        platformShopId: '4463798',
+        shopName: '测试店铺',
+      },
+      1,
+    );
 
     expect(entitlement.assertWithinQuota).toHaveBeenCalledWith('pro', 'shops.max', 2);
   });
@@ -167,6 +224,7 @@ describe('ShopService.saveAuthorized', () => {
         platformShopId: 'member-1688',
         shopName: 'buyer-login',
       },
+      1,
       'buyer',
     );
 
@@ -190,6 +248,7 @@ describe('ShopService.saveAuthorized', () => {
           platformShopId: 'member-1688-new',
           shopName: 'new-buyer-login',
         },
+        1,
         'buyer',
       ),
     ).rejects.toMatchObject({
@@ -223,6 +282,7 @@ describe('ShopService.saveAuthorized', () => {
           platformShopId: 'member-1688',
           shopName: 'buyer-login',
         },
+        1,
         'buyer',
       ),
     ).resolves.toMatchObject({ role: 'buyer', status: 'active' });
@@ -257,6 +317,7 @@ describe('ShopService.saveAuthorized', () => {
         platformShopId: '4463798',
         shopName: '测试店铺',
       },
+      1,
       'seller',
     );
 
@@ -269,10 +330,15 @@ describe('ShopService lifecycle', () => {
     const { service, prisma } = makeService(null, 'supabase');
 
     await service.list(42n);
-    await service.saveAuthorized(42n, 'douyin', {
-      accessToken: 'new-access-token',
-      platformShopId: '4463798',
-    });
+    await service.saveAuthorized(
+      42n,
+      'douyin',
+      {
+        accessToken: 'new-access-token',
+        platformShopId: '4463798',
+      },
+      1,
+    );
 
     expect(prisma.shop.findMany).toHaveBeenCalledWith({
       where: {

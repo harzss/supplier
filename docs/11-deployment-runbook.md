@@ -76,7 +76,7 @@ BFF 至少需要：
 - runtime 只持有 Supabase pooler `DATABASE_URL`，显式 `DIRECT_URL=`；migration 使用独立 job/service，不能交给 BFF pre-deploy；
 - Railway Replica Limit 必须允许至少 1 GiB 内存；首次内测将内存上限设为 1 GiB，并在 Workspace Usage 设置 `$10` 提醒与 `$15/月` Compute hard limit；真实平台若要求固定出口 IP，必须先升级到支持 Static Outbound IP 的计划并完成白名单验收。
 
-部署前 Gate 包括上述 revision、1 GiB Replica Limit 和费用 hard limit，以及以下只读检查；任一不满足都不得部署或切流：`EXCEPTION_CENTER_SCAN_ENABLED`、`DOUYIN_ORDER_SYNC_ENABLED`、`INVENTORY_SYNC_ENABLED`、`PRODUCT_BATCH_ENABLED`、`PRODUCT_BATCH_SKU_EDIT_ENABLED`、`SOURCE_IMPORT_ENABLED`、`ALIBABA_1688_PURCHASE_ENABLED`、`ALIBABA_1688_PURCHASE_AUDIT_ENABLED` 必须全部为 `false`；`publish_jobs` 不得存在 `queued` / `running` / `retry_wait`，`product_batch_tasks` 与 `source_import_tasks` 不得存在 `queued` / `running` / `cancelling`，`published_products.inventory_sync_status` 不得存在 `pending` / `syncing` / `retry_wait`。任一队列检查非零都必须先停止切流并安全排空，不能把 `overlapSeconds=0` 当作跨实例互斥锁。
+部署前 Gate 包括上述 revision、1 GiB Replica Limit 和费用 hard limit，以及以下只读检查；任一不满足都不得部署或切流：`EXCEPTION_CENTER_SCAN_ENABLED`、`MARKETPLACE_EVENT_PROCESSING_ENABLED`、`DOUYIN_ORDER_SYNC_ENABLED`、`INVENTORY_SYNC_ENABLED`、`PRODUCT_BATCH_ENABLED`、`PRODUCT_BATCH_SKU_EDIT_ENABLED`、`SOURCE_IMPORT_ENABLED`、`ALIBABA_1688_PURCHASE_ENABLED`、`ALIBABA_1688_PURCHASE_AUDIT_ENABLED` 必须全部为 `false`；`publish_jobs` 不得存在 `queued` / `running` / `retry_wait`，`product_batch_tasks` 与 `source_import_tasks` 不得存在 `queued` / `running` / `cancelling`，`published_products.inventory_sync_status` 不得存在 `pending` / `syncing` / `retry_wait`。任一队列检查非零都必须先停止切流并安全排空，不能把 `overlapSeconds=0` 当作跨实例互斥锁。
 
 切流顺序：先验证 Railway 直连 live/ready、revision、重启、Prisma 与 Sharp；再停止 `com.supplier.staging-local`，防止旧 supervisor 覆写 Gateway Secret；将 Cloudflare Gateway `BFF_ORIGIN` 更新为 Railway HTTPS origin；完成 18 项部署 smoke 和 48～72 小时观察后，才移除 Quick Tunnel。失败时恢复 Gateway 旧上游或保持 503，不同时运行两套有待执行任务的写实例。
 
@@ -130,7 +130,7 @@ docker build --target web -t <registry>/supplier-web:<git-sha> \
 
 每次发布只由一个受控 Job 执行迁移。`DATABASE_URL` 和 `DIRECT_URL` 必须先由 CI 或 Secret Manager 安全导出到 Job 环境，不得把含凭据、query 或 `&` 的完整连接串直接拼入 shell 命令：
 
-当前候选的最新必需 migration 为第 45 条 `20260807150000_add_runtime_state_store`。第 36～43 条的批量任务、价格/库存快照、采集、版本化货源绑定、异常中心、售后工单与三值逻辑约束已经在 2026-08-06 应用到 staging；该 43/43 结果只作为迁移起点。
+当前仓库候选的最新必需 migration 为第 46 条 `20260818034357_add_marketplace_entitlement_foundation`；staging 仍是已验证的 45/45，尚未执行第 46 条。第 36～43 条的批量任务、价格/库存快照、采集、版本化货源绑定、异常中心、售后工单与三值逻辑约束已经在 2026-08-06 应用到 staging；该 43/43 结果只作为历史迁移起点。
 
 2026-08-08 staging 已按以下边界完成 43→45 前向窗口。该清单保留为已验证流程和未来独立生产迁移的最低要求；staging 已是 45/45，不得再次对它执行 43→45 migration：
 
@@ -142,6 +142,8 @@ docker build --target web -t <registry>/supplier-web:<git-sha> \
 6. 迁移前必须确认远端精确为已完成且 checksum 匹配的 43 条前缀，pending 恰为第 44、45 条，无 unfinished / rolled back；先以当前 clean SHA 创建一致性备份并恢复到隔离 PostgreSQL，完成 43→45 演练。
 7. 隔离与真实窗口都要运行 `assert-43-to-44-sku-edits.sql` 和 `assert-44-to-45-runtime-state.sql`，再确认 45/45、`migrate status`、live schema diff、全部 public 表 RLS/ACL 与 default ACL。
 8. staging 已使用专用 `migrate-forward-once` 完成 migration 与断言，并在 `database + runtimeState` readiness 与动态 smoke 全绿后恢复入口。任何后续环境失败时仍须保持停写，只允许前向修复，不并行重跑、不手工修改 `_prisma_migrations`，也不恢复旧 Redis/BFF 写流量。生产数据库必须独立重复备份、恢复、迁移与动态 smoke，不能复用 staging 结果代替。
+
+第 46 条必须使用独立的 45→46 窗口，不能追加到上述历史 43→45 action：先证明远端精确 45 条前缀且仅第 46 条 pending，创建当前 clean SHA 的一致性备份并在隔离 PostgreSQL 运行 `rehearse-forward-marketplace-entitlement`；通过 `assert-45-to-46-marketplace-entitlement.sql`、schema diff、RLS/ACL 和 legacy 订购 1:1 且 `users.plan` 零变化断言后，才可在停写窗口执行一次 `migrate-marketplace-entitlement-once`。失败时保持停写并前向修复。
 
 ```bash
 docker run --rm \
@@ -157,7 +159,7 @@ docker run --rm \
 先以不接生产流量的方式启动新 BFF/Web：
 
 1. BFF `/api/health/live` 返回 200。
-2. BFF `/api/health/ready` 返回 200，最新必需 migration 为第 45 个，且 `checks.database.status` 与 `checks.runtimeState.status` 均为 `up`；响应和运行环境不得依赖 Redis。
+2. BFF `/api/health/ready` 返回 200，最新必需 migration 为第 46 个，且 `checks.database.status` 与 `checks.runtimeState.status` 均为 `up`；响应和运行环境不得依赖 Redis。
 3. Web `/` 返回 200。
 4. BFF `/docs`、`/docs-json`、`/docs-yaml` 与 `/docs/swagger-ui.css` 均返回 404。
 5. 无 token、无效 token、伪造 demo headers 访问受保护 API 均返回 401。

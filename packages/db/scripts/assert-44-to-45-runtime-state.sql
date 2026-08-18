@@ -1,4 +1,5 @@
 -- Forward assertion for the Supabase PostgreSQL runtime-state migration.
+-- Migration 45 must remain the exact prefix; later migrations may follow it.
 BEGIN TRANSACTION READ ONLY;
 
 DO $runtime_state_forward_assertions$
@@ -33,9 +34,9 @@ BEGIN
 
   IF migration_44_position <> 44
     OR migration_45_position <> 45
-    OR applied_migration_count <> 45 THEN
+    OR applied_migration_count < 45 THEN
     RAISE EXCEPTION
-      'expected the exact completed 44-to-45 migration boundary, found old=% new=% count=%',
+      'expected completed migrations 44 and 45 as the exact prefix, found old=% new=% count=%',
       migration_44_position,
       migration_45_position,
       applied_migration_count;

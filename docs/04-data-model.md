@@ -385,6 +385,17 @@ erDiagram
 
 当前使用范围包括 OAuth state/result、加密 Token refresh recovery、订单同步租约、商品平台写入租约、1688 fixed-window limiter 和 AI 精确缓存。readiness 的 `runtimeState` 检查直接探测该表，并与最新 migration 检查共同决定是否接流。过期行由每次写入后的有界清理（最多 100 行）回收；清理失败只告警，不使已经完成的原子操作回滚。2026-08-10，staging 已达到 45/45、pending 0，schema diff、42/42 public 表 RLS/ACL、真实备份恢复 43→45 演练与 runtime-state store/read/consume/lease/renew/release 动态验证全部通过；这证明 staging 数据与协调状态基线可用，不替代真实 Auth、平台 E2E 或生产环境验收。
 
+### 3.12 服务市场订购持久事实
+
+第 46 个 migration `20260818034357_add_marketplace_entitlement_foundation` 是尚未应用到 staging 的候选，新增 `marketplace_account_bindings`、`marketplace_plan_mappings`、`marketplace_event_inbox` 与 `marketplace_subscription_projections`，并为 `users` 增加权益来源、访问状态、revision 和更新时间。
+
+- 回调正文只计算 SHA-256；收件箱不保存 raw body、签名或 Secret。同一稳定事件键和同摘要只增加投递次数，异摘要只记录冲突并触发 critical 告警。
+- 账号绑定必须来自已验证的用户/OAuth 证据，套餐映射必须由运营显式配置；回调不能根据正文创建用户、绑定或猜测内部套餐。
+- 事件以持久租约、`SKIP LOCKED`、有界重试和过期 claim 恢复处理。生命周期使用官方单调 revision；退款、到期、取消和卸载是终态，只有权威 reconciliation 可以恢复。
+- 订购投影、`users.plan / entitlement_access_status / entitlement_revision` 与事件终态在同一 Serializable 短事务提交。暂停后来源仍为 `marketplace`，不能回退内部免费权限；历史业务数据不删除。
+- 旧 `subscriptions` 仅 1:1 回填为 `legacy + unverified` 投影，不伪造外部 ID，不修改现有 `users.plan`。四张新表全部启用 RLS、无客户端 policy，并撤销 `anon`、`authenticated` 和存在时的 `service_role` 表与 sequence 权限。
+- 官方签名字段、canonical string、ACK/重试和权威查询协议尚未取得，因此当前没有公开回调 Controller；事件处理 worker 默认关闭，不能把本地状态机测试当作真实订购验收。
+
 ## 4. 核心表 Schema（历史 MySQL 设计草案）
 
 本节仅保留早期字段和容量规划背景。当前应用使用 PostgreSQL、Prisma snake_case 映射和正式 migration；字段、enum、索引、外键与默认值必须从权威 schema 读取。

@@ -52,7 +52,7 @@ test('the dedicated assertion verifies exact migration order, shape and client i
   assert.match(sql, /^COMMIT;$/m);
   assert.match(sql, /20260807110000_add_published_product_sku_edits/);
   assert.match(sql, /20260807150000_add_runtime_state_store/);
-  assert.match(sql, /applied_migration_count <> 45/);
+  assert.match(sql, /applied_migration_count < 45/);
   assert.match(sql, /runtime_states_mode_check/);
   assert.match(sql, /runtime_states_expires_at_idx/);
   assert.match(sql, /runtime_states must have RLS enabled/);

@@ -157,6 +157,10 @@ jobs:
             psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
             < packages/db/scripts/assert-44-to-45-runtime-state.sql
 
+          docker exec -i supplier-postgres-ci \
+            psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+            < packages/db/scripts/assert-45-to-46-marketplace-entitlement.sql
+
           docker run -d --name supplier-bff-ci --network supplier-ci -p 3101:3001 \
             -e NODE_ENV=production -e AUTH_MODE=supabase \
             -e SUPABASE_URL=https://abcdefghijklmnopqrst.supabase.co \

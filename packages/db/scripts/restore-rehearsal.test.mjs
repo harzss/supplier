@@ -34,6 +34,9 @@ const EXPECTED_FORWARD_ASSERTIONS = Object.freeze([
   'assert-43-to-44-sku-edits.sql',
   'assert-44-to-45-runtime-state.sql',
 ]);
+const EXPECTED_MARKETPLACE_ASSERTIONS = Object.freeze([
+  'assert-45-to-46-marketplace-entitlement.sql',
+]);
 const ARCHIVE_LIST = `
 ; local restore rehearsal fixture
 1; 1259 1 TABLE public _prisma_migrations postgres
@@ -44,6 +47,7 @@ const ARCHIVE_LIST = `
 const PRISMA_MIGRATIONS_PATH = join(dirname(PRISMA_SCHEMA_PATH), 'migrations');
 const EXPECTED_MIGRATION_BASELINE = await readExpectedMigrationBaseline(33);
 const EXPECTED_HISTORICAL_MIGRATION_BASELINE = await readExpectedMigrationBaseline(43);
+const EXPECTED_MARKETPLACE_MIGRATION_BASELINE = await readExpectedMigrationBaseline(45);
 
 async function readExpectedMigrationBaseline(count) {
   const entries = await readdir(PRISMA_MIGRATIONS_PATH, { withFileTypes: true });
@@ -120,6 +124,14 @@ function assertionArgs() {
 function forwardRehearsalArgs() {
   return [
     'rehearse-forward-sku-edits',
+    `--confirm-database=${DATABASE}`,
+    `--confirm-container=${CONTAINER}`,
+  ];
+}
+
+function marketplaceRehearsalArgs() {
+  return [
+    'rehearse-forward-marketplace-entitlement',
     `--confirm-database=${DATABASE}`,
     `--confirm-container=${CONTAINER}`,
   ];
@@ -238,7 +250,7 @@ async function temporaryDirectory(context) {
   return directory;
 }
 
-test('accepts only the four closed restore operations with exact arguments', () => {
+test('accepts only the five closed restore operations with exact arguments', () => {
   assert.deepEqual(
     readRestoreRehearsalOptions([
       'rehearse',
@@ -277,6 +289,11 @@ test('accepts only the four closed restore operations with exact arguments', () 
     confirmedContainer: CONTAINER,
     confirmedDatabase: DATABASE,
   });
+  assert.deepEqual(readRestoreRehearsalOptions(marketplaceRehearsalArgs()), {
+    action: 'rehearse-forward-marketplace-entitlement',
+    confirmedContainer: CONTAINER,
+    confirmedDatabase: DATABASE,
+  });
 
   for (const args of [
     [],
@@ -296,6 +313,7 @@ test('accepts only the four closed restore operations with exact arguments', () 
     [...assertionArgs(), '--file=unsafe.sql'],
     ['post-upgrade-assert', `--confirm-database=${DATABASE}`],
     [...forwardRehearsalArgs(), '--archive=/private/tmp/staging.dump'],
+    [...marketplaceRehearsalArgs(), '--archive=/private/tmp/staging.dump'],
     ['psql', `--confirm-database=${DATABASE}`, `--confirm-container=${CONTAINER}`],
     ['post-upgrade-assert', `--confirm-database=${DATABASE}`, '--confirm-container=unsafe/name'],
   ]) {
@@ -796,11 +814,25 @@ test('applies only migrations 44 and 45 to an exact local migration 43 baseline'
     ],
     migrationBaseline: EXPECTED_HISTORICAL_MIGRATION_BASELINE,
   });
+  const spawnSync = (command, args, options) => {
+    if (command === process.execPath && args[1] === 'migrate' && args[2] === 'deploy') {
+      const schemaPath = args.at(-1);
+      const migrationEntries = readdirSync(join(dirname(schemaPath), 'migrations'), {
+        withFileTypes: true,
+      });
+      assert.equal(migrationEntries.filter((entry) => entry.isDirectory()).length, 45);
+      const schema = readFileSync(schemaPath, 'utf8');
+      assert.match(schema, /model RuntimeState \{/);
+      assert.match(schema, /skuSpecSnapshot/);
+      assert.doesNotMatch(schema, /MarketplaceProvider|entitlementSource/);
+    }
+    return fake.spawnSync(command, args, options);
+  };
 
   const result = await runRestoreRehearsal({
     args: forwardRehearsalArgs(),
     environment: localEnvironment(),
-    spawnSync: fake.spawnSync,
+    spawnSync,
   });
   const operations = fake.calls.filter(({ args }) => args[0] !== '--version');
 
@@ -828,6 +860,69 @@ test('applies only migrations 44 and 45 to an exact local migration 43 baseline'
     'psql:assert',
   ]);
   const prismaCalls = operations.filter(({ command }) => command === process.execPath);
+  const release45SchemaPath = prismaCalls[0].args.at(-1);
+  assert.notEqual(release45SchemaPath, PRISMA_SCHEMA_PATH);
+  assert.match(release45SchemaPath, /supplier-restore-migrations-45-[^/]+\/schema\.prisma$/);
+  assert.deepEqual(
+    prismaCalls.map(({ args }) => args),
+    [
+      [PRISMA_CLI_PATH, 'migrate', 'deploy', '--schema', release45SchemaPath],
+      [PRISMA_CLI_PATH, 'migrate', 'status', '--schema', release45SchemaPath],
+      [
+        PRISMA_CLI_PATH,
+        'migrate',
+        'diff',
+        '--exit-code',
+        '--from-schema-datasource',
+        release45SchemaPath,
+        '--to-schema-datamodel',
+        release45SchemaPath,
+      ],
+    ],
+  );
+  const assertionCall = operations.at(-1);
+  assert.equal(assertionCall.options.env.PGOPTIONS, '-c default_transaction_read_only=on');
+  await assert.rejects(readFile(release45SchemaPath), { code: 'ENOENT' });
+});
+
+test('applies only migration 46 to an exact local migration 45 baseline', async () => {
+  const fake = createFakeSpawn({
+    databaseProbes: [
+      { userObjectCount: 12, prismaMigrationTableExists: true },
+      { userObjectCount: 12, prismaMigrationTableExists: true },
+    ],
+    migrationBaseline: EXPECTED_MARKETPLACE_MIGRATION_BASELINE,
+  });
+
+  const result = await runRestoreRehearsal({
+    args: marketplaceRehearsalArgs(),
+    environment: localEnvironment(),
+    spawnSync: fake.spawnSync,
+  });
+  const operations = fake.calls.filter(({ args }) => args[0] !== '--version');
+
+  assert.deepEqual(result, {
+    action: 'rehearse-forward-marketplace-entitlement',
+    database: DATABASE,
+    completedAssertions: EXPECTED_MARKETPLACE_ASSERTIONS,
+    prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
+  });
+  assert.deepEqual(operations.map(describeOperation), [
+    ...FIRST_DOCKER_CHECKS,
+    'psql:database-check',
+    'psql:migration-baseline',
+    ...DOCKER_CHECKS,
+    'prisma:migrate deploy',
+    ...DOCKER_CHECKS,
+    'prisma:migrate status',
+    ...DOCKER_CHECKS,
+    'prisma:migrate diff',
+    ...DOCKER_CHECKS,
+    'psql:database-check',
+    ...DOCKER_CHECKS,
+    'psql:assert',
+  ]);
+  const prismaCalls = operations.filter(({ command }) => command === process.execPath);
   assert.deepEqual(
     prismaCalls.map(({ args }) => args),
     [
@@ -846,6 +941,7 @@ test('applies only migrations 44 and 45 to an exact local migration 43 baseline'
     ],
   );
   const assertionCall = operations.at(-1);
+  assert.equal(basename(assertionCall.args.at(-1)), EXPECTED_MARKETPLACE_ASSERTIONS[0]);
   assert.equal(assertionCall.options.env.PGOPTIONS, '-c default_transaction_read_only=on');
 });
 
@@ -862,6 +958,26 @@ test('refuses the forward migration unless the local database exactly matches mi
       spawnSync: fake.spawnSync,
     }),
     /exactly match the first 43 repository migrations/,
+  );
+  assert.equal(
+    fake.calls.some((call) => describeOperation(call) === 'prisma:migrate deploy'),
+    false,
+  );
+});
+
+test('refuses migration 46 unless the local database exactly matches migration 45', async () => {
+  const fake = createFakeSpawn({
+    databaseProbes: [{ userObjectCount: 12, prismaMigrationTableExists: true }],
+    migrationBaseline: EXPECTED_MARKETPLACE_MIGRATION_BASELINE.slice(0, -1),
+  });
+
+  await assert.rejects(
+    runRestoreRehearsal({
+      args: marketplaceRehearsalArgs(),
+      environment: localEnvironment(),
+      spawnSync: fake.spawnSync,
+    }),
+    /exactly match the first 45 repository migrations/,
   );
   assert.equal(
     fake.calls.some((call) => describeOperation(call) === 'prisma:migrate deploy'),

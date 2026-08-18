@@ -46,17 +46,31 @@ enum UserStatus {
   disabled
 }
 
+enum EntitlementSource {
+  internal_beta
+  marketplace
+}
+
+enum EntitlementAccessStatus {
+  active
+  suspended
+}
+
 model User {
-  id            BigInt     @id @default(autoincrement())
-  authSubject   String?    @unique @map("auth_subject") @db.Uuid
-  phone         String?    @unique @db.VarChar(20)
-  wechatUnionid String?    @unique @map("wechat_unionid") @db.VarChar(64)
-  nickname      String?    @db.VarChar(64)
-  avatarUrl     String?    @map("avatar_url") @db.VarChar(512)
-  plan          UserPlan   @default(free)
-  status        UserStatus @default(active)
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime   @updatedAt @map("updated_at")
+  id                      BigInt                  @id @default(autoincrement())
+  authSubject             String?                 @unique @map("auth_subject") @db.Uuid
+  phone                   String?                 @unique @db.VarChar(20)
+  wechatUnionid           String?                 @unique @map("wechat_unionid") @db.VarChar(64)
+  nickname                String?                 @db.VarChar(64)
+  avatarUrl               String?                 @map("avatar_url") @db.VarChar(512)
+  plan                    UserPlan                @default(free)
+  status                  UserStatus              @default(active)
+  entitlementSource       EntitlementSource       @default(internal_beta) @map("entitlement_source")
+  entitlementAccessStatus EntitlementAccessStatus @default(active) @map("entitlement_access_status")
+  entitlementRevision     Int                     @default(1) @map("entitlement_revision")
+  entitlementUpdatedAt    DateTime                @default(now()) @map("entitlement_updated_at") @db.Timestamptz(3)
+  createdAt               DateTime                @default(now()) @map("created_at")
+  updatedAt               DateTime                @updatedAt @map("updated_at")
 
   shops                         Shop[]
   publishDraft                  PublishDraft?
@@ -83,8 +97,11 @@ model User {
   closedAfterSaleCases          AfterSaleCase[]                       @relation("AfterSaleCaseClosedBy")
   confirmedAfterSaleLinks       AfterSalePurchaseLink[]               @relation("AfterSalePurchaseLinkConfirmedBy")
   afterSaleCaseEvents           AfterSaleCaseEvent[]                  @relation("AfterSaleCaseEventActor")
+  marketplaceAccountBindings    MarketplaceAccountBinding[]
+  marketplaceProjections        MarketplaceSubscriptionProjection[]
 
   @@index([plan])
+  @@index([entitlementSource, entitlementAccessStatus])
   @@map("users")
 }
 
@@ -1423,20 +1440,210 @@ enum SubscriptionStatus {
 }
 
 model Subscription {
-  id        BigInt             @id @default(autoincrement())
-  userId    BigInt             @map("user_id")
-  plan      SubscriptionPlan
-  startDate DateTime           @map("start_date") @db.Date
-  endDate   DateTime           @map("end_date") @db.Date
-  amountCny Decimal            @map("amount_cny") @db.Decimal(10, 2)
-  status    SubscriptionStatus @default(active)
-  createdAt DateTime           @default(now()) @map("created_at")
+  id                    BigInt                             @id @default(autoincrement())
+  userId                BigInt                             @map("user_id")
+  plan                  SubscriptionPlan
+  startDate             DateTime                           @map("start_date") @db.Date
+  endDate               DateTime                           @map("end_date") @db.Date
+  amountCny             Decimal                            @map("amount_cny") @db.Decimal(10, 2)
+  status                SubscriptionStatus                 @default(active)
+  createdAt             DateTime                           @default(now()) @map("created_at")
+  marketplaceProjection MarketplaceSubscriptionProjection?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([endDate])
   @@map("subscriptions")
+}
+
+enum MarketplaceProvider {
+  alibaba_1688
+}
+
+enum MarketplaceAccountBindingStatus {
+  active
+  revoked
+}
+
+enum MarketplaceProjectionOrigin {
+  legacy
+  marketplace
+}
+
+enum MarketplaceLifecycleState {
+  trialing
+  active
+  cancelling
+  refunded
+  expired
+  cancelled
+  uninstalled
+}
+
+enum MarketplaceProjectionAccessStatus {
+  active
+  suspended
+  unverified
+}
+
+enum MarketplaceEventSource {
+  callback
+  reconciliation
+  manual_repair
+}
+
+enum MarketplaceEventKind {
+  trial_started
+  subscribed
+  renewed
+  cancelling
+  refunded
+  expired
+  cancelled
+  uninstalled
+  reconciled
+}
+
+enum MarketplaceEventStatus {
+  received
+  processing
+  retry_wait
+  applied
+  ignored_stale
+  blocked
+  dead
+}
+
+model MarketplaceAccountBinding {
+  id                 BigInt                          @id @default(autoincrement())
+  provider           MarketplaceProvider
+  integrationKey     String                          @map("integration_key") @db.VarChar(64)
+  externalAccountKey String                          @map("external_account_key") @db.VarChar(255)
+  userId             BigInt                          @map("user_id")
+  status             MarketplaceAccountBindingStatus @default(active)
+  stateRevision      Int                             @default(1) @map("state_revision")
+  evidenceDigest     String                          @map("evidence_digest") @db.Char(64)
+  verifiedAt         DateTime                        @map("verified_at") @db.Timestamptz(3)
+  revokedAt          DateTime?                       @map("revoked_at") @db.Timestamptz(3)
+  createdAt          DateTime                        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime                        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user        User                                @relation(fields: [userId], references: [id], onDelete: Restrict, map: "marketplace_account_binding_user_fkey")
+  projections MarketplaceSubscriptionProjection[]
+  events      MarketplaceEventInbox[]
+
+  @@unique([provider, integrationKey, externalAccountKey], map: "marketplace_account_bindings_external_key")
+  @@index([userId, status])
+  @@map("marketplace_account_bindings")
+}
+
+model MarketplacePlanMapping {
+  id              BigInt              @id @default(autoincrement())
+  provider        MarketplaceProvider
+  integrationKey  String              @map("integration_key") @db.VarChar(64)
+  providerPlanKey String              @map("provider_plan_key") @db.VarChar(255)
+  internalPlan    SubscriptionPlan    @map("internal_plan")
+  enabled         Boolean             @default(false)
+  mappingRevision Int                 @default(1) @map("mapping_revision")
+  evidenceDigest  String              @map("evidence_digest") @db.Char(64)
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  projections MarketplaceSubscriptionProjection[]
+  events      MarketplaceEventInbox[]
+
+  @@unique([provider, integrationKey, providerPlanKey], map: "marketplace_plan_mappings_provider_key")
+  @@index([internalPlan, enabled])
+  @@map("marketplace_plan_mappings")
+}
+
+model MarketplaceSubscriptionProjection {
+  id                      BigInt                            @id @default(autoincrement())
+  projectionKey           String                            @unique(map: "marketplace_projection_key") @map("projection_key") @db.VarChar(320)
+  origin                  MarketplaceProjectionOrigin
+  legacySubscriptionId    BigInt?                           @unique(map: "marketplace_projection_legacy_key") @map("legacy_subscription_id")
+  provider                MarketplaceProvider?
+  integrationKey          String?                           @map("integration_key") @db.VarChar(64)
+  externalSubscriptionKey String?                           @map("external_subscription_key") @db.VarChar(255)
+  accountBindingId        BigInt?                           @map("account_binding_id")
+  planMappingId           BigInt?                           @map("plan_mapping_id")
+  userId                  BigInt                            @map("user_id")
+  internalPlan            SubscriptionPlan                  @map("internal_plan")
+  lifecycleState          MarketplaceLifecycleState         @map("lifecycle_state")
+  accessStatus            MarketplaceProjectionAccessStatus @map("access_status")
+  providerRevision        Decimal?                          @map("provider_revision") @db.Decimal(39, 0)
+  projectionRevision      Int                               @default(1) @map("projection_revision")
+  effectiveStartAt        DateTime?                         @map("effective_start_at") @db.Timestamptz(3)
+  effectiveEndAt          DateTime?                         @map("effective_end_at") @db.Timestamptz(3)
+  amountCny               Decimal?                          @map("amount_cny") @db.Decimal(10, 2)
+  currency                String?                           @db.Char(3)
+  lastEventOccurredAt     DateTime?                         @map("last_event_occurred_at") @db.Timestamptz(3)
+  lastReconciledAt        DateTime?                         @map("last_reconciled_at") @db.Timestamptz(3)
+  supersededAt            DateTime?                         @map("superseded_at") @db.Timestamptz(3)
+  createdAt               DateTime                          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime                          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  legacySubscription Subscription?              @relation(fields: [legacySubscriptionId], references: [id], onDelete: Restrict, map: "marketplace_projection_legacy_fkey")
+  accountBinding     MarketplaceAccountBinding? @relation(fields: [accountBindingId], references: [id], onDelete: Restrict, map: "marketplace_projection_binding_fkey")
+  planMapping        MarketplacePlanMapping?    @relation(fields: [planMappingId], references: [id], onDelete: Restrict, map: "marketplace_projection_mapping_fkey")
+  user               User                       @relation(fields: [userId], references: [id], onDelete: Restrict, map: "marketplace_projection_user_fkey")
+  events             MarketplaceEventInbox[]
+
+  @@index([userId, accessStatus])
+  @@index([accountBindingId])
+  @@index([planMappingId])
+  @@map("marketplace_subscription_projections")
+}
+
+model MarketplaceEventInbox {
+  id                      BigInt                     @id @default(autoincrement())
+  provider                MarketplaceProvider
+  integrationKey          String                     @map("integration_key") @db.VarChar(64)
+  dedupeKey               String                     @map("dedupe_key") @db.VarChar(255)
+  externalEventId         String?                    @map("external_event_id") @db.VarChar(255)
+  payloadDigest           String                     @map("payload_digest") @db.Char(64)
+  verifierVersion         String?                    @map("verifier_version") @db.VarChar(64)
+  source                  MarketplaceEventSource
+  externalEventType       String?                    @map("external_event_type") @db.VarChar(128)
+  normalizedKind          MarketplaceEventKind?      @map("normalized_kind")
+  authoritativeState      MarketplaceLifecycleState? @map("authoritative_state")
+  externalAccountKey      String?                    @map("external_account_key") @db.VarChar(255)
+  externalSubscriptionKey String?                    @map("external_subscription_key") @db.VarChar(255)
+  providerPlanKey         String?                    @map("provider_plan_key") @db.VarChar(255)
+  providerRevision        Decimal?                   @map("provider_revision") @db.Decimal(39, 0)
+  occurredAt              DateTime?                  @map("occurred_at") @db.Timestamptz(3)
+  normalizedPayload       Json?                      @map("normalized_payload") @db.JsonB
+  accountBindingId        BigInt?                    @map("account_binding_id")
+  planMappingId           BigInt?                    @map("plan_mapping_id")
+  projectionId            BigInt?                    @map("projection_id")
+  status                  MarketplaceEventStatus     @default(received)
+  attempts                Int                        @default(0)
+  maxAttempts             Int                        @default(5) @map("max_attempts")
+  nextAttemptAt           DateTime?                  @map("next_attempt_at") @db.Timestamptz(3)
+  lockedAt                DateTime?                  @map("locked_at") @db.Timestamptz(3)
+  lockedBy                String?                    @map("locked_by") @db.VarChar(128)
+  processedAt             DateTime?                  @map("processed_at") @db.Timestamptz(3)
+  lastErrorCode           String?                    @map("last_error_code") @db.VarChar(64)
+  deliveryCount           Int                        @default(1) @map("delivery_count")
+  lastReceivedAt          DateTime                   @default(now()) @map("last_received_at") @db.Timestamptz(3)
+  conflictCount           Int                        @default(0) @map("conflict_count")
+  lastConflictDigest      String?                    @map("last_conflict_digest") @db.Char(64)
+  signatureVerifiedAt     DateTime?                  @map("signature_verified_at") @db.Timestamptz(3)
+  requestId               String?                    @map("request_id") @db.VarChar(64)
+  createdAt               DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime                   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  accountBinding MarketplaceAccountBinding?         @relation(fields: [accountBindingId], references: [id], onDelete: Restrict, map: "marketplace_event_binding_fkey")
+  planMapping    MarketplacePlanMapping?            @relation(fields: [planMappingId], references: [id], onDelete: Restrict, map: "marketplace_event_mapping_fkey")
+  projection     MarketplaceSubscriptionProjection? @relation(fields: [projectionId], references: [id], onDelete: Restrict, map: "marketplace_event_projection_fkey")
+
+  @@unique([provider, integrationKey, dedupeKey], map: "marketplace_event_inbox_dedupe_key")
+  @@index([accountBindingId])
+  @@index([planMappingId])
+  @@index([projectionId])
+  @@index([provider, integrationKey, externalSubscriptionKey, providerRevision(sort: Desc)], map: "marketplace_event_inbox_subscription_revision_idx")
+  @@map("marketplace_event_inbox")
 }
 
 // ----- BYOK：用户自带 LLM 密钥（按用户绑定，密文存储） -----

@@ -51,9 +51,17 @@ const RUNTIME_STATE_FORWARD_ASSERTION_PATH = join(
   'scripts',
   'assert-44-to-45-runtime-state.sql',
 );
+const MARKETPLACE_ENTITLEMENT_FORWARD_ASSERTION_PATH = join(
+  packageDir,
+  'scripts',
+  'assert-45-to-46-marketplace-entitlement.sql',
+);
 const FORWARD_ASSERTION_PATHS = Object.freeze([
   SKU_EDIT_FORWARD_ASSERTION_PATH,
   RUNTIME_STATE_FORWARD_ASSERTION_PATH,
+]);
+const MARKETPLACE_ENTITLEMENT_ASSERTION_PATHS = Object.freeze([
+  MARKETPLACE_ENTITLEMENT_FORWARD_ASSERTION_PATH,
 ]);
 const POST_UPGRADE_ASSERTIONS = Object.freeze([
   join(repositoryRoot, 'infra', 'postgres', 'assert-public-schema-isolation.sql'),
@@ -83,6 +91,9 @@ export const EXPECTED_STAGING_FORWARD_MIGRATIONS = Object.freeze([
   '20260807110000_add_published_product_sku_edits',
   '20260807150000_add_runtime_state_store',
 ]);
+export const EXPECTED_MARKETPLACE_ENTITLEMENT_MIGRATIONS = Object.freeze([
+  '20260818034357_add_marketplace_entitlement_foundation',
+]);
 const VERSION_TIMEOUT_MS = 30_000;
 const BACKUP_TIMEOUT_MS = 300_000;
 const AUDIT_TIMEOUT_MS = 300_000;
@@ -95,11 +106,20 @@ const USAGE =
   'Usage: staging-libpq.mjs backup --output=<absolute.dump> --confirm-project=<STAGING_PROJECT_REF>\n' +
   '   or: staging-libpq.mjs migrate-once --confirm-project=<STAGING_PROJECT_REF>\n' +
   '   or: staging-libpq.mjs migrate-forward-once --confirm-project=<STAGING_PROJECT_REF>\n' +
+  '   or: staging-libpq.mjs migrate-marketplace-entitlement-once --confirm-project=<STAGING_PROJECT_REF>\n' +
   '   or: staging-libpq.mjs post-upgrade-assert --confirm-project=<STAGING_PROJECT_REF>';
 
 export function readStagingLibpqOptions(args) {
   const action = args[0];
-  if (!['backup', 'migrate-once', 'migrate-forward-once', 'post-upgrade-assert'].includes(action)) {
+  if (
+    ![
+      'backup',
+      'migrate-once',
+      'migrate-forward-once',
+      'migrate-marketplace-entitlement-once',
+      'post-upgrade-assert',
+    ].includes(action)
+  ) {
     throw new Error(USAGE);
   }
 
@@ -141,13 +161,17 @@ export function readStagingLibpqConfiguration(args, environment) {
     throw new Error('--confirm-project must exactly match the validated STAGING_PROJECT_REF.');
   }
   if (
-    (options.action === 'migrate-once' || options.action === 'migrate-forward-once') &&
+    ['migrate-once', 'migrate-forward-once', 'migrate-marketplace-entitlement-once'].includes(
+      options.action,
+    ) &&
     datasource.direct.port !== '5432'
   ) {
     throw new Error('migrate-once DIRECT_URL must use the PostgreSQL session port 5432.');
   }
   if (
-    (options.action === 'migrate-once' || options.action === 'migrate-forward-once') &&
+    ['migrate-once', 'migrate-forward-once', 'migrate-marketplace-entitlement-once'].includes(
+      options.action,
+    ) &&
     datasource.database !== 'postgres'
   ) {
     throw new Error('migrate-once must target the postgres database.');
@@ -247,7 +271,24 @@ export async function runStagingLibpq({
 
   if (configuration.action === 'migrate-forward-once') {
     assertStagingMaintenanceRuntime(environment, platform);
-    return runForwardMigration(configuration, spawnSync, prismaDotenvCandidates);
+    return runForwardMigration(
+      configuration,
+      spawnSync,
+      prismaDotenvCandidates,
+      EXPECTED_STAGING_FORWARD_MIGRATIONS,
+      FORWARD_ASSERTION_PATHS,
+    );
+  }
+
+  if (configuration.action === 'migrate-marketplace-entitlement-once') {
+    assertStagingMaintenanceRuntime(environment, platform);
+    return runForwardMigration(
+      configuration,
+      spawnSync,
+      prismaDotenvCandidates,
+      EXPECTED_MARKETPLACE_ENTITLEMENT_MIGRATIONS,
+      MARKETPLACE_ENTITLEMENT_ASSERTION_PATHS,
+    );
   }
 
   assertLibpq17('psql', spawnSync);
@@ -298,7 +339,13 @@ async function runMigration(configuration, spawnSync, prismaDotenvCandidates) {
   };
 }
 
-async function runForwardMigration(configuration, spawnSync, prismaDotenvCandidates) {
+async function runForwardMigration(
+  configuration,
+  spawnSync,
+  prismaDotenvCandidates,
+  expectedMigrations,
+  assertionPaths,
+) {
   await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
   const auditResult = spawnMaintenanceNode(
     spawnSync,
@@ -316,7 +363,7 @@ async function runForwardMigration(configuration, spawnSync, prismaDotenvCandida
     configuration.prismaEnvironment,
     PRISMA_STATUS_TIMEOUT_MS,
   );
-  assertExpectedPendingStatus(beforeStatus, EXPECTED_STAGING_FORWARD_MIGRATIONS);
+  assertExpectedPendingStatus(beforeStatus, expectedMigrations);
 
   await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
   const migrationResult = spawnMaintenanceNode(
@@ -355,19 +402,11 @@ async function runForwardMigration(configuration, spawnSync, prismaDotenvCandida
   assertCommandSucceeded('post-migration prisma migrate diff', diffResult);
 
   const completedAssertions = [];
-  for (const assertionPath of FORWARD_ASSERTION_PATHS) {
+  for (const assertionPath of assertionPaths) {
     await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
     const assertionResult = spawnMaintenanceNode(
       spawnSync,
-      [
-        PRISMA_CLI_PATH,
-        'db',
-        'execute',
-        '--file',
-        assertionPath,
-        '--schema',
-        PRISMA_SCHEMA_PATH,
-      ],
+      [PRISMA_CLI_PATH, 'db', 'execute', '--file', assertionPath, '--schema', PRISMA_SCHEMA_PATH],
       configuration.prismaEnvironment,
       ASSERTION_TIMEOUT_MS,
     );
@@ -378,7 +417,7 @@ async function runForwardMigration(configuration, spawnSync, prismaDotenvCandida
   return {
     action: configuration.action,
     projectRef: configuration.datasource.projectRef,
-    verifiedMigrationCount: EXPECTED_STAGING_FORWARD_MIGRATIONS.length,
+    verifiedMigrationCount: expectedMigrations.length,
     completedAssertions,
     prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
   };
@@ -555,7 +594,11 @@ async function main() {
     );
     return;
   }
-  if (result.action === 'migrate-once' || result.action === 'migrate-forward-once') {
+  if (
+    ['migrate-once', 'migrate-forward-once', 'migrate-marketplace-entitlement-once'].includes(
+      result.action,
+    )
+  ) {
     console.log(
       `Staging migration status verified for confirmed project: projectRef=${result.projectRef} expectedMigrationCount=${result.verifiedMigrationCount}.`,
     );

@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 import { assertSafePrismaDotenvCandidates, PRISMA_DOTENV_CANDIDATES } from './audit-staging.mjs';
 import {
+  EXPECTED_MARKETPLACE_ENTITLEMENT_MIGRATIONS,
   EXPECTED_STAGING_FORWARD_MIGRATIONS,
   EXPECTED_STAGING_PENDING_MIGRATIONS,
   inspectBackupArchiveList,
@@ -53,9 +54,17 @@ const RUNTIME_STATE_FORWARD_ASSERTION_PATH = join(
   'scripts',
   'assert-44-to-45-runtime-state.sql',
 );
+const MARKETPLACE_ENTITLEMENT_FORWARD_ASSERTION_PATH = join(
+  packageDir,
+  'scripts',
+  'assert-45-to-46-marketplace-entitlement.sql',
+);
 const FORWARD_ASSERTION_PATHS = Object.freeze([
   SKU_EDIT_FORWARD_ASSERTION_PATH,
   RUNTIME_STATE_FORWARD_ASSERTION_PATH,
+]);
+const MARKETPLACE_ENTITLEMENT_ASSERTION_PATHS = Object.freeze([
+  MARKETPLACE_ENTITLEMENT_FORWARD_ASSERTION_PATH,
 ]);
 const POST_UPGRADE_ASSERTIONS = Object.freeze([
   join(REPOSITORY_ROOT, 'infra', 'postgres', 'assert-public-schema-isolation.sql'),
@@ -121,6 +130,10 @@ FROM public._prisma_migrations;
 const RESTORED_MIGRATION_COUNT = 33;
 const HISTORICAL_UPGRADE_MIGRATION_COUNT =
   RESTORED_MIGRATION_COUNT + EXPECTED_STAGING_PENDING_MIGRATIONS.length;
+const SKU_RUNTIME_MIGRATION_COUNT =
+  HISTORICAL_UPGRADE_MIGRATION_COUNT + EXPECTED_STAGING_FORWARD_MIGRATIONS.length;
+const CURRENT_MIGRATION_COUNT =
+  SKU_RUNTIME_MIGRATION_COUNT + EXPECTED_MARKETPLACE_ENTITLEMENT_MIGRATIONS.length;
 const ARCHIVE_CHILD_FD = 3;
 const ARCHIVE_CHILD_PATH = `/dev/fd/${ARCHIVE_CHILD_FD}`;
 const ARCHIVE_COPY_BUFFER_BYTES = 64 * 1024;
@@ -135,12 +148,19 @@ const USAGE =
   'Usage: restore-rehearsal.mjs rehearse --archive=<absolute.dump> --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>' +
   '\n   or: restore-rehearsal.mjs restore --archive=<absolute.dump> --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>' +
   '\n   or: restore-rehearsal.mjs rehearse-forward-sku-edits --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>' +
+  '\n   or: restore-rehearsal.mjs rehearse-forward-marketplace-entitlement --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>' +
   '\n   or: restore-rehearsal.mjs post-upgrade-assert --confirm-database=<supplier_restore_*> --confirm-container=<supplier-restore-*-pg17>';
 
 export function readRestoreRehearsalOptions(args) {
   const action = args[0];
   if (
-    !['rehearse', 'restore', 'rehearse-forward-sku-edits', 'post-upgrade-assert'].includes(action)
+    ![
+      'rehearse',
+      'restore',
+      'rehearse-forward-sku-edits',
+      'rehearse-forward-marketplace-entitlement',
+      'post-upgrade-assert',
+    ].includes(action)
   ) {
     throw new Error(USAGE);
   }
@@ -170,7 +190,13 @@ export function readRestoreRehearsalOptions(args) {
   ) {
     throw new Error('--confirm-container must match supplier-restore-*-pg17 exactly.');
   }
-  if (action === 'post-upgrade-assert' || action === 'rehearse-forward-sku-edits') {
+  if (
+    [
+      'post-upgrade-assert',
+      'rehearse-forward-sku-edits',
+      'rehearse-forward-marketplace-entitlement',
+    ].includes(action)
+  ) {
     return { action, confirmedContainer, confirmedDatabase };
   }
 
@@ -292,10 +318,29 @@ export async function runRestoreRehearsal({
   assertConnectedDatabase(
     configuration,
     spawnSync,
-    configuration.action === 'rehearse-forward-sku-edits' ? 'restored' : 'any',
+    ['rehearse-forward-sku-edits', 'rehearse-forward-marketplace-entitlement'].includes(
+      configuration.action,
+    )
+      ? 'restored'
+      : 'any',
   );
   if (configuration.action === 'rehearse-forward-sku-edits') {
-    return runForwardSkuEditRehearsal(
+    const workspace = await prepareSkuRuntimeMigrationWorkspace(readMigrationDirectory);
+    try {
+      return await runForwardSkuEditRehearsal(
+        configuration,
+        spawnSync,
+        dockerTarget,
+        readMigrationDirectory,
+        prismaDotenvCandidates,
+        workspace.schemaPath,
+      );
+    } finally {
+      await nodeRm(workspace.directory, { force: true, recursive: true });
+    }
+  }
+  if (configuration.action === 'rehearse-forward-marketplace-entitlement') {
+    return runMarketplaceEntitlementRehearsal(
       configuration,
       spawnSync,
       dockerTarget,
@@ -696,8 +741,44 @@ async function runForwardSkuEditRehearsal(
   dockerTarget,
   readMigrationDirectory,
   prismaDotenvCandidates,
+  schemaPath,
 ) {
   await assertHistoricalUpgradeBaseline(configuration, spawnSync, readMigrationDirectory);
+  assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
+  await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
+  const deployResult = spawnSync(
+    process.execPath,
+    [PRISMA_CLI_PATH, 'migrate', 'deploy', '--schema', schemaPath],
+    prismaCommandOptions(configuration.prismaEnvironment),
+  );
+  assertCommandSucceeded('prisma migrate deploy', deployResult);
+
+  await runPrismaStatus(configuration, spawnSync, dockerTarget, prismaDotenvCandidates, schemaPath);
+  await runPrismaDiff(configuration, spawnSync, dockerTarget, prismaDotenvCandidates, schemaPath);
+  assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
+  assertConnectedDatabase(configuration, spawnSync, 'restored');
+  const assertionResult = runForwardAssertions(
+    configuration,
+    spawnSync,
+    dockerTarget,
+    FORWARD_ASSERTION_PATHS,
+  );
+  return {
+    action: configuration.action,
+    database: configuration.database,
+    completedAssertions: assertionResult.completedAssertions,
+    prismaChecks: ['migrate deploy', 'migrate status', 'migrate diff'],
+  };
+}
+
+async function runMarketplaceEntitlementRehearsal(
+  configuration,
+  spawnSync,
+  dockerTarget,
+  readMigrationDirectory,
+  prismaDotenvCandidates,
+) {
+  await assertMarketplaceEntitlementBaseline(configuration, spawnSync, readMigrationDirectory);
   assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
   await assertSafePrismaDotenvCandidates({ candidates: prismaDotenvCandidates });
   const deployResult = spawnSync(
@@ -711,7 +792,12 @@ async function runForwardSkuEditRehearsal(
   await runPrismaDiff(configuration, spawnSync, dockerTarget, prismaDotenvCandidates);
   assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
   assertConnectedDatabase(configuration, spawnSync, 'restored');
-  const assertionResult = runSkuEditForwardAssertion(configuration, spawnSync, dockerTarget);
+  const assertionResult = runForwardAssertions(
+    configuration,
+    spawnSync,
+    dockerTarget,
+    MARKETPLACE_ENTITLEMENT_ASSERTION_PATHS,
+  );
   return {
     action: configuration.action,
     database: configuration.database,
@@ -721,21 +807,40 @@ async function runForwardSkuEditRehearsal(
 }
 
 async function prepareHistoricalMigrationWorkspace(readMigrationDirectory) {
+  return prepareMigrationWorkspace(readMigrationDirectory, {
+    migrationCount: HISTORICAL_UPGRADE_MIGRATION_COUNT,
+    prefix: 'supplier-restore-migrations-43-',
+    transformSchema: historicalSchemaBeforeSkuEdits,
+  });
+}
+
+async function prepareSkuRuntimeMigrationWorkspace(readMigrationDirectory) {
+  return prepareMigrationWorkspace(readMigrationDirectory, {
+    migrationCount: SKU_RUNTIME_MIGRATION_COUNT,
+    prefix: 'supplier-restore-migrations-45-',
+    transformSchema: schemaBeforeMarketplaceEntitlement,
+  });
+}
+
+async function prepareMigrationWorkspace(
+  readMigrationDirectory,
+  { migrationCount, prefix, transformSchema },
+) {
   const migrationNames = await readRepositoryMigrationNames(readMigrationDirectory);
-  const directory = await nodeMkdtemp(join(tmpdir(), 'supplier-restore-migrations-43-'));
+  const directory = await nodeMkdtemp(join(tmpdir(), prefix));
   await nodeChmod(directory, 0o700);
   try {
     const migrationsPath = join(directory, 'migrations');
     await nodeMkdir(migrationsPath, { mode: 0o700 });
     const currentSchema = await nodeReadFile(PRISMA_SCHEMA_PATH, 'utf8');
-    const historicalSchema = historicalSchemaBeforeSkuEdits(currentSchema);
+    const historicalSchema = transformSchema(currentSchema);
     const schemaPath = join(directory, 'schema.prisma');
     await nodeWriteFile(schemaPath, historicalSchema, { flag: 'wx', mode: 0o600 });
     await copyRegularFile(
       join(PRISMA_MIGRATIONS_PATH, 'migration_lock.toml'),
       join(migrationsPath, 'migration_lock.toml'),
     );
-    for (const migrationName of migrationNames.slice(0, HISTORICAL_UPGRADE_MIGRATION_COUNT)) {
+    for (const migrationName of migrationNames.slice(0, migrationCount)) {
       const targetDirectory = join(migrationsPath, migrationName);
       await nodeMkdir(targetDirectory, { mode: 0o700 });
       await copyRegularFile(
@@ -751,7 +856,8 @@ async function prepareHistoricalMigrationWorkspace(readMigrationDirectory) {
 }
 
 function historicalSchemaBeforeSkuEdits(currentSchema) {
-  const withoutRuntimeState = currentSchema.replace(/model RuntimeState \{[\s\S]*?\n\}\n\n/, '');
+  const schemaAt45 = schemaBeforeMarketplaceEntitlement(currentSchema);
+  const withoutRuntimeState = schemaAt45.replace(/model RuntimeState \{[\s\S]*?\n\}\n\n/, '');
   const fields =
     '  skuSpecSnapshot            Json?                  @map("sku_spec_snapshot") @db.JsonB\n' +
     '  skuSpecFingerprint         String?                @map("sku_spec_fingerprint") @db.VarChar(64)\n' +
@@ -759,11 +865,40 @@ function historicalSchemaBeforeSkuEdits(currentSchema) {
   const withoutFields = withoutRuntimeState.replace(fields, '');
   const historical = withoutFields.replace('  edit_sku\n', '');
   if (
-    withoutRuntimeState === currentSchema ||
+    withoutRuntimeState === schemaAt45 ||
     withoutFields === withoutRuntimeState ||
     historical === withoutFields
   ) {
     throw new Error('Current Prisma schema does not contain the expected migrations 44 and 45.');
+  }
+  return historical;
+}
+
+function schemaBeforeMarketplaceEntitlement(currentSchema) {
+  let historical = currentSchema;
+  for (const pattern of [
+    /enum EntitlementSource \{[\s\S]*?\n\}\n\n/,
+    /enum EntitlementAccessStatus \{[\s\S]*?\n\}\n\n/,
+    /^  entitlementSource\s+.*\n/m,
+    /^  entitlementAccessStatus\s+.*\n/m,
+    /^  entitlementRevision\s+.*\n/m,
+    /^  entitlementUpdatedAt\s+.*\n/m,
+    /^  marketplaceAccountBindings\s+.*\n/m,
+    /^  marketplaceProjections\s+.*\n/m,
+    /^  @@index\(\[entitlementSource, entitlementAccessStatus\]\)\n/m,
+    /^  marketplaceProjection\s+.*\n/m,
+    /enum MarketplaceProvider \{[\s\S]*?\n\}\n\n\/\/ ----- BYOK/,
+  ]) {
+    const next = historical.replace(pattern, (matched) =>
+      matched.endsWith('// ----- BYOK') ? '// ----- BYOK' : '',
+    );
+    if (next === historical) {
+      throw new Error('Current Prisma schema does not contain the marketplace entitlement shape.');
+    }
+    historical = next;
+  }
+  if (/Marketplace|entitlementSource|entitlementAccessStatus/.test(historical)) {
+    throw new Error('Historical Prisma schema still contains marketplace entitlement fields.');
   }
   return historical;
 }
@@ -829,6 +964,36 @@ async function assertHistoricalUpgradeBaseline(configuration, spawnSync, readMig
   }
 }
 
+async function assertMarketplaceEntitlementBaseline(
+  configuration,
+  spawnSync,
+  readMigrationDirectory,
+) {
+  const migrationNames = await readRepositoryMigrationNames(readMigrationDirectory);
+  const expectedMigrations = await readExpectedMigrationRecords(
+    migrationNames.slice(0, SKU_RUNTIME_MIGRATION_COUNT),
+  );
+  const result = spawnSync(
+    join(LIBPQ_BIN_DIR, 'psql'),
+    [
+      '--no-psqlrc',
+      '--no-password',
+      '--tuples-only',
+      '--no-align',
+      '--command',
+      RESTORED_MIGRATION_BASELINE_PROBE_SQL,
+    ],
+    commandOptions(configuration.readOnlyLibpqEnvironment, INSPECTION_TIMEOUT_MS),
+  );
+  assertCommandSucceeded('psql marketplace entitlement migration baseline check', result);
+  const baseline = parseJsonOutput('Marketplace entitlement migration baseline', result.stdout);
+  if (!sameRestoredMigrations(baseline, expectedMigrations)) {
+    throw new Error(
+      `Marketplace entitlement target must exactly match the first ${SKU_RUNTIME_MIGRATION_COUNT} repository migrations by ordered name, checksum, and completed state.`,
+    );
+  }
+}
+
 async function readExpectedRestoredMigrations(readMigrationDirectory) {
   const migrationNames = await readRepositoryMigrationNames(readMigrationDirectory);
   return readExpectedMigrationRecords(migrationNames.slice(0, RESTORED_MIGRATION_COUNT));
@@ -854,19 +1019,18 @@ async function readRepositoryMigrationNames(readMigrationDirectory) {
   }
   const migrationNames = migrationDirectories.map((entry) => entry.name).sort();
   if (
-    migrationNames.length !==
-      HISTORICAL_UPGRADE_MIGRATION_COUNT + EXPECTED_STAGING_FORWARD_MIGRATIONS.length ||
+    migrationNames.length !== CURRENT_MIGRATION_COUNT ||
     !sameStringArray(
       migrationNames.slice(RESTORED_MIGRATION_COUNT, HISTORICAL_UPGRADE_MIGRATION_COUNT),
       EXPECTED_STAGING_PENDING_MIGRATIONS,
     ) ||
-    !sameStringArray(
-      migrationNames.slice(HISTORICAL_UPGRADE_MIGRATION_COUNT),
-      EXPECTED_STAGING_FORWARD_MIGRATIONS,
-    )
+    !sameStringArray(migrationNames.slice(HISTORICAL_UPGRADE_MIGRATION_COUNT), [
+      ...EXPECTED_STAGING_FORWARD_MIGRATIONS,
+      ...EXPECTED_MARKETPLACE_ENTITLEMENT_MIGRATIONS,
+    ])
   ) {
     throw new Error(
-      'Repository does not contain the exact 33-to-43 and 43-to-45 migration boundaries.',
+      'Repository does not contain the exact 33-to-43, 43-to-45 and 45-to-46 migration boundaries.',
     );
   }
   return migrationNames;
@@ -960,19 +1124,13 @@ async function runPrismaDiff(
   assertCommandSucceeded('prisma migrate diff', result);
 }
 
-function runSkuEditForwardAssertion(configuration, spawnSync, dockerTarget) {
+function runForwardAssertions(configuration, spawnSync, dockerTarget, assertionPaths) {
   const completedAssertions = [];
-  for (const assertionPath of FORWARD_ASSERTION_PATHS) {
+  for (const assertionPath of assertionPaths) {
     assertDockerRestoreTarget(configuration, spawnSync, dockerTarget);
     const result = spawnSync(
       join(LIBPQ_BIN_DIR, 'psql'),
-      [
-        '--no-psqlrc',
-        '--no-password',
-        '--set=ON_ERROR_STOP=1',
-        '--file',
-        assertionPath,
-      ],
+      ['--no-psqlrc', '--no-password', '--set=ON_ERROR_STOP=1', '--file', assertionPath],
       commandOptions(configuration.readOnlyLibpqEnvironment, ASSERTION_TIMEOUT_MS),
     );
     assertCommandSucceeded(`psql ${basename(assertionPath)}`, result);
@@ -1139,7 +1297,11 @@ async function main() {
     );
     return;
   }
-  if (result.action === 'rehearse-forward-sku-edits') {
+  if (
+    ['rehearse-forward-sku-edits', 'rehearse-forward-marketplace-entitlement'].includes(
+      result.action,
+    )
+  ) {
     console.log(
       `Local release forward rehearsal passed: database=${result.database} prismaChecks=${result.prismaChecks.length} assertions=${result.completedAssertions.length}.`,
     );

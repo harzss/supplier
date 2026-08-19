@@ -7,12 +7,14 @@ const configuredSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
 const configuredSupabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
 const configuredSignupEnabled = process.env.NEXT_PUBLIC_SIGNUP_ENABLED?.trim();
 const configuredAuditTestMode = process.env.NEXT_PUBLIC_AUDIT_TEST_MODE?.trim();
+const configuredLegalPagesEnabled = process.env.NEXT_PUBLIC_LEGAL_PAGES_ENABLED?.trim();
 
 export const authMode: WebAuthMode =
   configuredAuthMode === 'supabase' || production ? 'supabase' : 'demo';
 export const isDemoAuthMode = authMode === 'demo';
 export const isSignupEnabled = configuredSignupEnabled === 'true';
 export const isAuditTestMode = configuredAuditTestMode === 'true';
+export const isLegalPagesEnabled = configuredLegalPagesEnabled === 'true';
 
 export function frontendConfigurationError(): string | undefined {
   if (configuredAuthMode && !['demo', 'supabase'].includes(configuredAuthMode)) {
@@ -26,6 +28,9 @@ export function frontendConfigurationError(): string | undefined {
   }
   if (configuredAuditTestMode && !['true', 'false'].includes(configuredAuditTestMode)) {
     return 'NEXT_PUBLIC_AUDIT_TEST_MODE 必须为 true 或 false';
+  }
+  if (configuredLegalPagesEnabled && !['true', 'false'].includes(configuredLegalPagesEnabled)) {
+    return 'NEXT_PUBLIC_LEGAL_PAGES_ENABLED 必须为 true 或 false';
   }
 
   if (authMode === 'supabase') {

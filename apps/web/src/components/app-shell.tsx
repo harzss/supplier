@@ -32,7 +32,7 @@ import {
   SheetTrigger,
 } from '@/components/ui/sheet';
 import { api } from '@/lib/api';
-import { isDemoAuthMode } from '@/lib/environment';
+import { isDemoAuthMode, isLegalPagesEnabled } from '@/lib/environment';
 import { cn } from '@/lib/utils';
 
 const NAV_GROUPS = [
@@ -262,6 +262,25 @@ function SidebarContent({
             <EnvironmentDot state={environmentState} />
           </div>
           <AuthStatus />
+          {isLegalPagesEnabled ? (
+            <nav className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs" aria-label="帮助与法律">
+              <Link href="/help" className="text-muted-foreground hover:text-foreground">
+                帮助中心
+              </Link>
+              <Link href="/privacy" className="text-muted-foreground hover:text-foreground">
+                隐私政策
+              </Link>
+              <Link href="/terms" className="text-muted-foreground hover:text-foreground">
+                用户协议
+              </Link>
+              <Link
+                href="/account-deletion"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                账号注销
+              </Link>
+            </nav>
+          ) : null}
         </div>
       </div>
     </div>

@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
-import { Providers } from './providers';
-import { AppShell } from '@/components/app-shell';
+import { AppRoot } from '@/components/app-root';
 
 export const metadata: Metadata = {
   title: 'Supplier - 更简单的 1688 分销经营工具',
@@ -12,9 +11,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="zh-CN">
       <body>
-        <Providers>
-          <AppShell>{children}</AppShell>
-        </Providers>
+        <AppRoot>{children}</AppRoot>
       </body>
     </html>
   );

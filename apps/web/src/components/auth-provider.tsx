@@ -10,6 +10,7 @@ import {
   useState,
 } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import Link from 'next/link';
 import type { Session } from '@supabase/supabase-js';
 import {
   ArrowRight,
@@ -33,7 +34,7 @@ import {
   savePendingPasswordSetup,
   type PasswordSetupReason,
 } from '../lib/auth-password-setup';
-import { getSupabaseConfiguration } from '../lib/environment';
+import { getSupabaseConfiguration, isLegalPagesEnabled } from '../lib/environment';
 import {
   authMode,
   getSupabaseClient,
@@ -455,6 +456,15 @@ function LoginStudio() {
             </div>
           </div>
         </div>
+
+        {isLegalPagesEnabled ? (
+          <nav className="auth-legal-links" aria-label="帮助与法律信息">
+            <Link href="/help">帮助中心</Link>
+            <Link href="/privacy">隐私政策</Link>
+            <Link href="/terms">用户协议</Link>
+            <Link href="/account-deletion">账号注销</Link>
+          </nav>
+        ) : null}
 
         <ol className="auth-workflow" aria-label="Supplier 经营流程">
           <WorkflowStep icon={Storefront} title="货源管理" description="连接 1688" />

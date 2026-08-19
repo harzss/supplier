@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
-    "cf:build": "pnpm clean && pnpm --filter @supplier/shared-types build && WEB_BUILD_TARGET=static next build",
+    "cf:build": "pnpm clean && pnpm --filter @supplier/shared-types build && WEB_BUILD_TARGET=static next build && node ../../scripts/verify-legal-pages-build.mjs",
     "cf:preview": "pnpm cf:build && wrangler dev",
     "cf:dry-run": "pnpm cf:build && wrangler deploy --dry-run",
     "cf:deploy": "pnpm cf:build && wrangler deploy",

@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import Link from 'next/link';
 import { ApiError, api, getPreviewPlan, setPreviewPlan } from '@/lib/api';
 import { ShopsSection } from '@/components/shops-section';
 import { MediaReadinessSection } from '@/components/media-readiness-section';
+import { isLegalPagesEnabled } from '@/lib/environment';
 import { isDemoAuthMode } from '@/lib/supabase';
 
 const FEATURE_LABELS: Record<string, string> = {
@@ -472,6 +474,42 @@ export default function SettingsPage() {
           </div>
         ) : null}
       </section>
+
+      {isLegalPagesEnabled ? (
+        <section className="mt-6 rounded-xl border border-[var(--line)] bg-[var(--surface)] p-5 sm:p-6">
+          <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
+                Support &amp; trust
+              </p>
+              <h2 className="mt-2 text-lg font-semibold tracking-tight">帮助、政策与账号管理</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--muted)]">
+                当前文件用于邀请制测试和审核准备。正式主体、客服渠道与法律条款确认前，会明确标记为草案。
+              </p>
+            </div>
+            <Link href="/help" className="secondary-button inline-flex justify-center">
+              打开帮助中心
+            </Link>
+          </div>
+          <nav
+            className="mt-5 grid gap-2 border-t border-[var(--line)] pt-5 text-sm sm:grid-cols-3"
+            aria-label="政策与账号管理"
+          >
+            <Link href="/privacy" className="rounded-lg px-3 py-3 hover:bg-[var(--surface-strong)]">
+              隐私政策草案
+            </Link>
+            <Link href="/terms" className="rounded-lg px-3 py-3 hover:bg-[var(--surface-strong)]">
+              用户协议草案
+            </Link>
+            <Link
+              href="/account-deletion"
+              className="rounded-lg px-3 py-3 hover:bg-[var(--surface-strong)]"
+            >
+              账号注销说明
+            </Link>
+          </nav>
+        </section>
+      ) : null}
     </main>
   );
 }

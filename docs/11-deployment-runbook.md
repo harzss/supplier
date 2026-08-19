@@ -2,7 +2,7 @@
 
 > 目标：以不可变镜像发布 BFF、Web 和数据库迁移，先验证再切流；应用可回滚，数据库只允许前向修复。当前 runtime 只依赖托管 Supabase（PostgreSQL / Auth / Storage），不配置 `REDIS_URL`，本机与 staging 不运行 Redis。
 >
-> **当前 staging 边界（2026-08-10，`d30d302`）**：2026-08-08 的 43→45 备份恢复演练、单次 `migrate-forward-once` 与前向断言已通过；`d30d302` 的严格审计确认 Supabase staging 为 **45/45、pending 0、schema diff matched**，42/42 public 表启用 RLS，`anon` / `authenticated` 的表、sequence 与 default privileges 均为 0。当前 BFF 的本机、Quick Tunnel 和外部固定 Gateway readiness 均为 `database + runtimeState`；18/18 部署 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state 原子语义 smoke 通过。旧 Supplier PostgreSQL/Redis 运行容器和运行卷已删除，保留未挂载的历史备份卷。所有真实平台、worker、批量执行与 SKU flag 继续保持 `false`。这些证据不能替代真实 Auth 邮件、真实平台 E2E 或独立生产资源的部署与恢复验收。
+> **当前 staging 边界（2026-08-18，`5cd6b28`）**：45→46 备份恢复演练、单次真实迁移与前向断言已通过；post-audit 确认 Supabase staging 为 **46/46、pending 0、schema diff matched**，46/46 public 表启用 RLS，`anon` / `authenticated` 的表、sequence 与 default privileges 均为 0。本机与固定 Gateway readiness 均返回 `revision=5cd6b28`、`database=up`、`runtimeState=up`，固定 Gateway 部署验证为 18/18；审核模式静态 Web 已发布为 Cloudflare version `488ee083-f2e8-4e08-8bbc-9b77baebb264`。所有真实平台、marketplace、worker、批量执行与 SKU flag 继续保持 `false`。这些证据不能替代真实 Auth 邮件、真实平台 E2E 或独立生产资源的部署与恢复验收，详见 [2026-08-18 staging 证据](./evidence/2026-08-18-marketplace-entitlement-staging.md)。
 
 ## 1. 发布单元
 
@@ -130,9 +130,9 @@ docker build --target web -t <registry>/supplier-web:<git-sha> \
 
 每次发布只由一个受控 Job 执行迁移。`DATABASE_URL` 和 `DIRECT_URL` 必须先由 CI 或 Secret Manager 安全导出到 Job 环境，不得把含凭据、query 或 `&` 的完整连接串直接拼入 shell 命令：
 
-当前仓库候选的最新必需 migration 为第 46 条 `20260818034357_add_marketplace_entitlement_foundation`；staging 仍是已验证的 45/45，尚未执行第 46 条。第 36～43 条的批量任务、价格/库存快照、采集、版本化货源绑定、异常中心、售后工单与三值逻辑约束已经在 2026-08-06 应用到 staging；该 43/43 结果只作为历史迁移起点。
+当前仓库候选的最新必需 migration 为第 46 条 `20260818034357_add_marketplace_entitlement_foundation`；staging 已在 2026-08-18 完成 45→46 隔离恢复演练与单次真实迁移，post-audit 为 46/46、pending 0、schema diff matched、46/46 public 表 RLS 且客户端 ACL/default privileges 为 0。第 36～43 条的批量任务、价格/库存快照、采集、版本化货源绑定、异常中心、售后工单与三值逻辑约束已在 2026-08-06 应用到 staging；该 43/43 结果只作为历史迁移起点。
 
-2026-08-08 staging 已按以下边界完成 43→45 前向窗口。该清单保留为已验证流程和未来独立生产迁移的最低要求；staging 已是 45/45，不得再次对它执行 43→45 migration：
+2026-08-08 staging 已按以下边界完成 43→45 前向窗口。该清单保留为已验证流程和未来独立生产迁移的最低要求；该窗口结束时 staging 为 45/45，不得再次对它执行 43→45 migration：
 
 1. 先从负载均衡摘流，停止旧 BFF、订单/库存/铺货/批量/采集/异常/巡检等全部 worker，并等待所有 in-flight 外部调用和持久任务 ownership drain；维护期间不得保留任何旧运行副本。
 2. 在旧 Redis 尚可只读访问、但旧应用已隔离写流量的窗口，精确计数 `oauth:refresh-result:*`。若非零，必须先通过旧候选的受控恢复路径把加密轮换结果提交到正式店铺 Token 记录并逐项核对为零；不得删除、过期等待或把这些记录当普通缓存丢弃。日志与证据只记录计数和脱敏业务 ID，不输出值。
@@ -143,7 +143,7 @@ docker build --target web -t <registry>/supplier-web:<git-sha> \
 7. 隔离与真实窗口都要运行 `assert-43-to-44-sku-edits.sql` 和 `assert-44-to-45-runtime-state.sql`，再确认 45/45、`migrate status`、live schema diff、全部 public 表 RLS/ACL 与 default ACL。
 8. staging 已使用专用 `migrate-forward-once` 完成 migration 与断言，并在 `database + runtimeState` readiness 与动态 smoke 全绿后恢复入口。任何后续环境失败时仍须保持停写，只允许前向修复，不并行重跑、不手工修改 `_prisma_migrations`，也不恢复旧 Redis/BFF 写流量。生产数据库必须独立重复备份、恢复、迁移与动态 smoke，不能复用 staging 结果代替。
 
-第 46 条必须使用独立的 45→46 窗口，不能追加到上述历史 43→45 action：先证明远端精确 45 条前缀且仅第 46 条 pending，创建当前 clean SHA 的一致性备份并在隔离 PostgreSQL 运行 `rehearse-forward-marketplace-entitlement`；通过 `assert-45-to-46-marketplace-entitlement.sql`、schema diff、RLS/ACL 和 legacy 订购 1:1 且 `users.plan` 零变化断言后，才可在停写窗口执行一次 `migrate-marketplace-entitlement-once`。失败时保持停写并前向修复。
+2026-08-18 staging 使用独立的 45→46 窗口完成第 46 条，未追加到上述历史 43→45 action：先证明远端精确为 45 条前缀且仅第 46 条 pending，创建 `5cd6b28` 的一致性备份并在隔离 PostgreSQL 运行 `rehearse-forward-marketplace-entitlement`；通过 `assert-45-to-46-marketplace-entitlement.sql`、schema diff、RLS/ACL 和 legacy 订购 1:1 且 `users.plan` 零变化断言后，停写窗口才执行一次 `migrate-marketplace-entitlement-once`。该流程保留为未来独立生产迁移的最低要求；失败时保持停写并前向修复。
 
 ```bash
 docker run --rm \
@@ -217,7 +217,7 @@ pnpm deploy:verify
 
 不重新运行旧版 migration，不执行 `prisma migrate reset`，不删除 `_prisma_migrations` 记录。
 
-已经完成的 33→43 staging 窗口不满足上述“旧应用向后兼容”前提。即将执行的 43→45 窗口同样没有可写旧 BFF 回滚：旧候选仍依赖 Redis，不会创建或维护 `runtime_states`，也不理解 `edit_sku`、SKU 快照与 fence；当前候选又必须在第 45 个 migration 存在后才会 ready。迁移失败或新应用验证失败时保持停写并只允许前向修复，不得通过启动 Redis 或切回旧 BFF 恢复写流量。只有另行证明全局只读、任务已 drain 且旧版本有不可变产物与 smoke 后，才可用于紧急只读查看；当前没有这样的资格化证据。
+已经完成的 33→43 与 43→45 staging 窗口均不满足上述“旧应用向后兼容”前提。43→45 窗口当时没有可写旧 BFF 回滚：旧候选依赖 Redis，不会创建或维护 `runtime_states`，也不理解 `edit_sku`、SKU 快照与 fence；该窗口的新候选又必须在第 45 个 migration 存在后才会 ready。迁移失败或新应用验证失败时保持停写并只允许前向修复，不得通过启动 Redis 或切回旧 BFF 恢复写流量。只有另行证明全局只读、任务已 drain 且旧版本有不可变产物与 smoke 后，才可用于紧急只读查看；这些窗口没有这样的资格化证据。
 
 ## 6. 数据库变更失败与前向修复
 
@@ -257,18 +257,20 @@ Prisma migration 按前向历史管理。已应用到任何共享环境的 migra
 - 告警接收端不可用、签名错误和通知渠道失效时的值守与补偿流程；
 - 从快照或 PITR 恢复到隔离环境并核对关键业务数据。
 
-M20 时点的旧候选曾使用标准 Dockerfile 验证本地全新 PostgreSQL 15/Redis 7、当时全部 14 个 migration、BFF/migrate/Web 镜像、非 root uid 1000、12 项部署 smoke 与 SIGTERM exit 0；当时数据库状态最新且 schema diff 为空。以上只保留为历史证据，不能用于当前操作，也不能成为重新启动本机或生产 Redis 的依据。当前仓库有 45 个 migration，生产仍需完成云端镜像仓库、编排平台、真实域名切流、外部告警/监控和真实备份恢复；运行状态由 Supabase PostgreSQL `runtime_states` 承载。
+M20 时点的旧候选曾使用标准 Dockerfile 验证本地全新 PostgreSQL 15/Redis 7、当时全部 14 个 migration、BFF/migrate/Web 镜像、非 root uid 1000、12 项部署 smoke 与 SIGTERM exit 0；当时数据库状态最新且 schema diff 为空。以上只保留为历史证据，不能用于当前操作，也不能成为重新启动本机或生产 Redis 的依据。截至 2026-08-10 的该段补记时仓库有 45 个 migration；生产仍需完成云端镜像仓库、编排平台、真实域名切流、外部告警/监控和真实备份恢复，运行状态由 Supabase PostgreSQL `runtime_states` 承载。
 
 以上是 M20 时点的已验证快照。2026-07-22 只读查询确认当时仓库有 32 个 migration，现 staging Supabase 当时仍有 18 个待应用，范围为 `20260720120000_add_inventory_sync`～`20260722091000_add_order_logistics_repairs`；当时只有 30 条货源、6 条铺货、3 条订单和 3 条采购，没有未完成 migration 记录，待新增的 `published_products(task_id, shop_id)` 唯一索引重复组为 0。该段仅保留历史迁移证据，不能作为当前状态。
 
 2026-08-03 审计快照确认 staging 为 PostgreSQL 17.6、当时仓库 33/33 migration applied、0 unfinished、0 rolled back，远端 checksum 与仓库 migration 全匹配，live schema 与 Prisma datamodel 无差异；最新已应用 migration 为 `20260803173000_secure_supabase_public_schema`，28/28 public 表启用 RLS，anon/authenticated 对表和 sequence 均无权限。当时为 10 条货源、0 条铺货、0 条订单和 0 条采购，恢复键重复组为 0。安全 migration 前的一致性归档已在隔离 PostgreSQL 17 中完成恢复演练，归档 142614 bytes，SHA256 为 `d77d1b618d8ecdc06dbc9bfd6bcb6cbc2828cc6f7316846a17273c8d9e71bcf3`。release-gates 已加入全新库 migration status、live schema diff、Supabase 角色初始化、RLS/ACL 和工作流负向约束断言，并由 2026-08-03 的 [GitHub Actions #30811827585](https://github.com/harzss/supplier/actions/runs/30811827585) 在全新 Runner 上完成首次旧基线验证。随后维护前预检确认 33/43 与十个连续 pending，150265 bytes 的真实数据备份也已在隔离库完成 33→43 演练；这些历史证据现已由 2026-08-06 的实际 staging 维护结果取代。
 
-2026-08-06 停写后创建最终 150239 bytes 一致性备份，SHA256 `c482ea5387c9fb6b5bb70ea1b8704af0ceacbae9161d820435d591d4ba39c30c`。专用事务精确补齐十条 mock `supplierId` 并回读；单一 Linux maintenance image 随后应用第 34～43 个 migration。维护后审计确认当时 43/43、schema diff matched、41/41 public 表 RLS 与客户端 ACL 0，上一候选 Web/BFF/Gateway/readiness 与 18/18 smoke 通过。仓库新增第 44/45 个 migration 后，staging 当前为 43/45；最新真实备份恢复、前向迁移和当前候选 smoke 未完成。真实邀请账号、真实抖店/1688 E2E、生产资源与切流也未由旧维护证明。
+2026-08-06 停写后创建最终 150239 bytes 一致性备份，SHA256 `c482ea5387c9fb6b5bb70ea1b8704af0ceacbae9161d820435d591d4ba39c30c`。专用事务精确补齐十条 mock `supplierId` 并回读；单一 Linux maintenance image 随后应用第 34～43 个 migration。维护后审计确认当时 43/43、schema diff matched、41/41 public 表 RLS 与客户端 ACL 0，上一候选 Web/BFF/Gateway/readiness 与 18/18 smoke 通过。仓库新增第 44/45 个 migration 后，该时点 staging 为 43/45；当时最新真实备份恢复、前向迁移和候选 smoke 未完成。真实邀请账号、真实抖店/1688 E2E、生产资源与切流也未由旧维护证明。
 
-2026-08-08 M87 候选已在代码中移除 Redis 模块和环境变量，新增第 44 个 SKU 编辑与第 45 个 runtime state migration，并提供 43→44、44→45 专用前向断言和 `migrate-forward-once` 路径。当前只能记录为“待执行”：尚无当前 clean SHA 的真实 Supabase 备份/隔离恢复、staging 45/45、当前 SHA CI 或无 Redis 的 Gateway 动态 smoke 证据。
+2026-08-08 M87 候选已在代码中移除 Redis 模块和环境变量，新增第 44 个 SKU 编辑与第 45 个 runtime state migration，并提供 43→44、44→45 专用前向断言和 `migrate-forward-once` 路径。在该时点只能记录为“待执行”：当时尚无该 clean SHA 的真实 Supabase 备份/隔离恢复、staging 45/45、该 SHA CI 或无 Redis 的 Gateway 动态 smoke 证据。
 
-2026-08-08，`6fa58f0` 的固定 maintenance image `sha256:0d325079ce90d449b4f7b90c3837aa9b21f8ef262e4ec268fccb1a2b00131525` 关闭了上一段的 staging 迁移待执行项：迁移前归档完成隔离恢复与 43→45 演练，随后单一执行器完成真实 staging 前向迁移和断言。2026-08-10，`d30d302` 的只读 audit image `sha256:004bee2ef74b4842815f5821fdc7baddc82ba20f80f5c187ff72cb1020879ae5` 再次确认 45/45、pending 0、schema diff matched、42/42 public 表 RLS，`anon` / `authenticated` 表、sequence 与 default privileges 全为 0；它没有重复迁移。当前 BFF 在本机、Quick Tunnel 与外部固定 Gateway 的 `database + runtimeState` readiness 通过；18/18 部署 smoke 通过当前 Quick Tunnel BFF 与当前本地 Web 构建完成，runtime-state 原子语义 smoke 通过。本机旧 Supplier Redis/PostgreSQL 运行容器和运行卷已删除，保留未挂载的历史备份卷。由于本机 `workers.dev` DNS 被污染，固定 Gateway 结果由外部只读探针确认；supervisor 在 BFF/Tunnel 健康而 Gateway 暂不可达时持续等待，不再反复重启健康进程。
+2026-08-08，`6fa58f0` 的固定 maintenance image `sha256:0d325079ce90d449b4f7b90c3837aa9b21f8ef262e4ec268fccb1a2b00131525` 关闭了上一段的 staging 迁移待执行项：迁移前归档完成隔离恢复与 43→45 演练，随后单一执行器完成真实 staging 前向迁移和断言。2026-08-10，`d30d302` 的只读 audit image `sha256:004bee2ef74b4842815f5821fdc7baddc82ba20f80f5c187ff72cb1020879ae5` 再次确认 45/45、pending 0、schema diff matched、42/42 public 表 RLS，`anon` / `authenticated` 表、sequence 与 default privileges 全为 0；它没有重复迁移。该时点 BFF 在本机、Quick Tunnel 与外部固定 Gateway 的 `database + runtimeState` readiness 通过；18/18 部署 smoke 通过当时的 Quick Tunnel BFF 与本地 Web 构建完成，runtime-state 原子语义 smoke 通过。本机旧 Supplier Redis/PostgreSQL 运行容器和运行卷已删除，保留未挂载的历史备份卷。该时点因本机 `workers.dev` DNS 被污染，固定 Gateway 结果由外部只读探针确认；supervisor 在 BFF/Tunnel 健康而 Gateway 暂不可达时持续等待，不再反复重启健康进程。
 
 迁移后备份位于 Git 忽略路径 `tmp/staging-backups/supplier-staging-post-45-d30d302-20260810.dump`，大小 248508 bytes，SHA256 `0a15a148e5f973bd87ec72851728ae16cf063ddea466b92a762fa39b63061ae4`，TOC 校验通过。该 post-45 归档尚未单独恢复，不能作为恢复成功证据；恢复证据来自迁移前归档完成的 43→45 隔离恢复演练。真实 Auth 邮件、抖店/1688 E2E、独立生产资源、外部监控与合规仍未关闭，因此不得宣称生产可用。
+
+2026-08-18，`5cd6b28` 已完成独立 45→46 隔离恢复演练与真实 staging 迁移；post-audit 确认 46/46、pending 0、schema diff matched、46/46 public 表 RLS，客户端表、sequence 与 default privileges 均为 0。本机与固定 Gateway 均返回该 revision 和 `database + runtimeState` ready，18/18 部署 smoke 通过；审核模式静态 Web 发布为 Cloudflare version `488ee083-f2e8-4e08-8bbc-9b77baebb264`。这仍是 staging 证据，不能替代独立生产和真实平台验收。
 
 2026-08-04 M73 候选曾在临时 PostgreSQL 17 全新库一次应用当时全部 38/38 migration，`migrate status` 最新且 live schema → Prisma datamodel 无差异；`mutation_revision`、`state_revision`、两张 `product_batch_*` 表、唯一索引、`sku_price_snapshot`、`price_synced_at` 与 `sku_inventory_snapshot` 均存在，两张批量表和 `published_products` 均启用 RLS，anon/authenticated 对表与 sequence 的直接权限为 0。M78 随后在一次性 PostgreSQL 15 从空库应用当时全部 40/40 migration，并以带两种 SKU 成本的历史订单验证 revision 1 binding、order item 绑定/一件代发和 8.50/14.75 成本快照；新表 RLS 开启、anon/authenticated 无 SELECT，live schema → Prisma datamodel diff 为 `No difference detected`。M79 再从空库应用当时全部 41/41 migration，验证两张异常表 RLS、anon/authenticated 表与 sequence 权限均为 0、schema diff 为空，并用事务构造四类旧采购异常确认回填为售后暂停、可重试取消、物流人工复核和采购人工复核。M80 已在 PostgreSQL 15.18 空库完成 42/42 deploy/status、schema diff、21 CHECK、11 FK、19 索引、负向约束、41/41 public 表 RLS 与角色权限验证。M81 的第 43 个前向修复随后在一次性 PostgreSQL 15 完成 43/43、schema diff、三个 NULL 绕过负向探针、对应合法状态正向探针和 RLS/ACL 断言；全部临时资源均已删除。上述空库与隔离演练是 2026-08-06 实际 staging migration 的前置证据，不能替代未来生产数据库的独立迁移和复核。

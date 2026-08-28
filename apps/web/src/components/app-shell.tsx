@@ -107,7 +107,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         : '数据连接需检查';
 
   useEffect(() => {
-    const desktopQuery = window.matchMedia('(min-width: 1024px)');
+    const desktopQuery = window.matchMedia('(min-width: 1280px)');
     const closeAtDesktop = (event: MediaQueryListEvent) => {
       if (event.matches) setMobileNavOpen(false);
     };
@@ -118,7 +118,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   if (isPrototypeRoute) return children;
 
   return (
-    <div className="min-h-screen bg-muted/30 text-foreground">
+    <div className="supplier-shell min-h-screen text-foreground">
       <a
         href="#main-content"
         className="fixed left-4 top-4 z-[70] -translate-y-24 rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background transition-transform focus:translate-y-0"
@@ -126,7 +126,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         跳到主要内容
       </a>
 
-      <aside className="fixed inset-y-0 left-0 z-40 hidden w-64 border-r bg-background lg:flex lg:flex-col">
+      <aside className="supplier-sidebar fixed inset-y-0 left-0 z-40 hidden w-56 xl:flex xl:flex-col">
         <SidebarContent
           pathname={pathname}
           environmentState={environmentState}
@@ -134,7 +134,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         />
       </aside>
 
-      <header className="sticky top-0 z-40 flex h-16 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/80 lg:hidden">
+      <header className="supplier-mobile-header sticky top-0 z-40 flex h-16 items-center gap-3 px-4 xl:hidden">
         <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
           <SheetTrigger asChild>
             <Button variant="outline" size="icon" className="size-11" aria-label="打开导航">
@@ -149,7 +149,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               if (!focusMainAfterCloseRef.current) return;
               event.preventDefault();
               focusMainAfterCloseRef.current = false;
-              requestAnimationFrame(() => document.getElementById('main-content')?.focus());
+              requestAnimationFrame(() =>
+                document.getElementById('main-content')?.focus({ preventScroll: true }),
+              );
             }}
           >
             <SheetHeader className="sr-only">
@@ -175,8 +177,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         <AuthStatus compact />
       </header>
 
-      <div className="min-w-0 lg:pl-64">
-        <header className="sticky top-0 z-30 hidden h-14 items-center justify-between border-b bg-background/95 px-8 backdrop-blur supports-[backdrop-filter]:bg-background/80 lg:flex">
+      <div className="supplier-workspace min-w-0 xl:pl-56">
+        <header className="supplier-utility-bar sticky top-0 z-30 hidden h-[3.25rem] items-center justify-between px-7 xl:flex">
           <div className="flex items-center gap-2 text-sm">
             <span className="text-muted-foreground">{current.group}</span>
             <span className="text-muted-foreground/50">/</span>
@@ -187,12 +189,10 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <div
           id="main-content"
-          className="app-content min-h-[calc(100dvh-4rem)] outline-none"
+          className="supplier-main min-h-[calc(100dvh-4rem)] scroll-mt-16 outline-none xl:scroll-mt-[3.25rem]"
           tabIndex={-1}
         >
-          <div className="mx-auto w-full max-w-[100rem] px-4 pt-4 sm:px-6 lg:px-8">
-            <ActivationGuide />
-          </div>
+          <ActivationGuide />
           {children}
         </div>
       </div>
@@ -212,16 +212,19 @@ function SidebarContent({
   onNavigate?: () => void;
 }) {
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-16 shrink-0 items-center px-4">
+    <div className="supplier-sidebar-content flex h-full min-h-0 flex-col">
+      <div className="flex h-[3.75rem] shrink-0 items-center px-4">
         <Brand onNavigate={onNavigate} />
       </div>
       <Separator />
 
-      <nav className="min-h-0 flex-1 space-y-6 overflow-y-auto px-3 py-5" aria-label="主要导航">
+      <nav
+        className="supplier-nav min-h-0 flex-1 space-y-5 overflow-y-auto px-3 py-4"
+        aria-label="主要导航"
+      >
         {NAV_GROUPS.map((group) => (
           <div key={group.label}>
-            <p className="mb-2 px-2 text-xs font-medium text-muted-foreground">{group.label}</p>
+            <p className="supplier-nav-label mb-2 px-2">{group.label}</p>
             <div className="space-y-1">
               {group.items.map((item) => {
                 const active = isActive(pathname, item.href);
@@ -233,10 +236,10 @@ function SidebarContent({
                     aria-current={active ? 'page' : undefined}
                     onClick={onNavigate}
                     className={cn(
-                      'flex h-11 items-center gap-3 rounded-md px-3 text-sm font-medium transition-colors lg:h-9',
+                      'supplier-nav-link flex h-11 items-center gap-3 rounded-md px-3 text-sm font-medium transition-colors xl:h-9',
                       active
-                        ? 'bg-primary text-primary-foreground shadow-sm'
-                        : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                        ? 'is-active bg-primary/10 text-primary'
+                        : 'text-muted-foreground hover:bg-black/[0.035] hover:text-foreground',
                     )}
                   >
                     <IconComponent weight={active ? 'fill' : 'regular'} aria-hidden="true" />
@@ -249,9 +252,9 @@ function SidebarContent({
         ))}
       </nav>
 
-      <div className="shrink-0 p-3">
+      <div className="supplier-sidebar-footer shrink-0 p-3">
         <Separator className="mb-3" />
-        <div className="space-y-3 rounded-lg bg-muted/60 p-3">
+        <div className="space-y-3 px-2 pb-1">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <p className="text-xs font-medium">
@@ -291,11 +294,11 @@ function Brand({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <Link
       href="/"
-      className="flex min-h-11 items-center gap-3"
+      className="supplier-brand flex min-h-11 items-center gap-3"
       aria-label="Supplier 首页"
       onClick={onNavigate}
     >
-      <span className="grid size-9 place-items-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+      <span className="supplier-brand-mark grid size-9 place-items-center rounded-lg bg-primary text-primary-foreground">
         <CirclesFour className="size-5" weight="fill" aria-hidden="true" />
       </span>
       <span>
@@ -308,7 +311,10 @@ function Brand({ onNavigate }: { onNavigate?: () => void }) {
 
 function EnvironmentBadge({ state, label }: { state: EnvironmentState; label: string }) {
   return (
-    <Badge variant="outline" className="gap-2 bg-background font-normal text-muted-foreground">
+    <Badge
+      variant="outline"
+      className="supplier-environment-badge gap-2 border-0 bg-transparent p-0 font-normal text-muted-foreground"
+    >
       <EnvironmentDot state={state} />
       {label}
     </Badge>

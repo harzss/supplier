@@ -102,7 +102,7 @@ export function ProductFilters({
       </CardHeader>
 
       <CardContent className="space-y-5 p-4 sm:p-5">
-        <fieldset disabled={isPending} className="space-y-2">
+        <fieldset disabled={isPending} className="min-w-0 space-y-2">
           <legend className="text-xs font-medium text-muted-foreground">类目</legend>
           <div className="flex gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible">
             <FilterButton
@@ -138,7 +138,7 @@ export function ProductFilters({
           </div>
         </fieldset>
 
-        <fieldset disabled={isPending} className="space-y-3">
+        <fieldset disabled={isPending} className="min-w-0 space-y-3">
           <legend className="text-xs font-medium text-muted-foreground">采购价</legend>
           <div className="flex gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible">
             {PRICE_BANDS.map((band) => (

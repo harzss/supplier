@@ -61,6 +61,13 @@ const AuthContext = createContext<AuthContextValue>({
 const PASSWORD_SETUP_STORAGE_ERROR =
   '浏览器本地存储不可用，无法安全确认密码设置状态。请允许本站使用本地存储后，重新打开邀请或找回密码链接。';
 
+const AUTH_FLOW_STEPS = [
+  { icon: Storefront, title: '货源判断', description: '核对成本、库存与风险' },
+  { icon: Package, title: '商品发布', description: '先预览，再人工确认' },
+  { icon: CirclesFour, title: '订单采购', description: '稳定关联，避免重复下单' },
+  { icon: Truck, title: '履约售后', description: '物流与异常持续回读' },
+] as const satisfies ReadonlyArray<{ icon: Icon; title: string; description: string }>;
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [session, setSession] = useState<Session | null>(null);
@@ -259,36 +266,48 @@ function LoginStudio() {
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  const selectMode = (nextMode: 'signin' | 'signup' | 'forgot') => {
+    setMode(nextMode);
+    setError(undefined);
+    setMessage(undefined);
+    requestAnimationFrame(() => headingRef.current?.focus());
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setPending(true);
     setError(undefined);
     setMessage(undefined);
-    const supabase = getSupabaseClient();
-    if (mode === 'forgot') {
-      const result = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: window.location.origin,
-      });
-      setPending(false);
-      if (result.error) {
-        setError(authErrorMessage(result.error, 'forgot'));
+    try {
+      const supabase = getSupabaseClient();
+      if (mode === 'forgot') {
+        const result = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin,
+        });
+        if (result.error) {
+          setError(authErrorMessage(result.error, 'forgot'));
+          return;
+        }
+        setMessage('密码重置邮件已发送，请通过邮件中的安全链接设置新密码。');
         return;
       }
-      setMessage('密码重置邮件已发送，请通过邮件中的安全链接设置新密码。');
-      return;
-    }
-    const result =
-      mode === 'signin'
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
-    setPending(false);
-    if (result.error) {
-      setError(authErrorMessage(result.error, mode));
-      return;
-    }
-    if (mode === 'signup' && !result.data.session) {
-      setMessage('注册成功，请前往邮箱完成验证后登录。');
+      const result =
+        mode === 'signin'
+          ? await supabase.auth.signInWithPassword({ email, password })
+          : await supabase.auth.signUp({ email, password });
+      if (result.error) {
+        setError(authErrorMessage(result.error, mode));
+        return;
+      }
+      if (mode === 'signup' && !result.data.session) {
+        setMessage('注册成功，请前往邮箱完成验证后登录。');
+      }
+    } catch {
+      setError('暂时无法连接登录服务，请稍后重试。');
+    } finally {
+      setPending(false);
     }
   };
 
@@ -306,37 +325,65 @@ function LoginStudio() {
         </div>
 
         <div className="auth-rail-message">
-          <p>从货源到履约</p>
-          <strong>一处完成。</strong>
-          <span>让选品、铺货、订单和异常处理保持在同一条可追溯链路中。</span>
+          <p>Supplier 商家工作台</p>
+          <strong>把分销经营，放进一条清晰的链路。</strong>
+          <span>
+            连接 1688 与销售店铺，把利润试算、发布、采购、物流和售后状态集中在一个工作台。
+          </span>
         </div>
+
+        <section className="auth-rail-preview" aria-label="Supplier 经营链路预览">
+          <header>
+            <span>经营链路</span>
+            <small>从判断到平台回读</small>
+          </header>
+          <ol>
+            {AUTH_FLOW_STEPS.map((step, index) => {
+              const IconComponent = step.icon;
+              return (
+                <li key={step.title}>
+                  <span className="auth-flow-index" aria-hidden="true">
+                    {String(index + 1).padStart(2, '0')}
+                  </span>
+                  <span className="auth-flow-icon" aria-hidden="true">
+                    <IconComponent weight="duotone" />
+                  </span>
+                  <span className="auth-flow-copy">
+                    <strong>{step.title}</strong>
+                    <small>{step.description}</small>
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
 
         <div className="auth-rail-status">
           <ShieldCheck aria-hidden="true" weight="duotone" />
           <span>
             <strong>邀请制内部测试</strong>
-            <small>身份与业务数据隔离</small>
+            <small>身份隔离 · 高风险动作人工确认</small>
           </span>
         </div>
       </aside>
 
       <section className="auth-stage">
         <header className="auth-stage-header">
-          <span>1688 分销经营工作台</span>
+          <span>内部测试访问</span>
           <span className="auth-stage-environment">
-            <LockKey aria-hidden="true" weight="fill" />
-            安全访问
+            <span aria-hidden="true" />
+            安全连接
           </span>
         </header>
 
         <div className="auth-stage-center">
           <div className="auth-panel">
             <div className="auth-panel-heading">
-              <span className="auth-panel-icon" aria-hidden="true">
-                {mode === 'forgot' ? <Key weight="duotone" /> : <LockKey weight="duotone" />}
-              </span>
               <div>
-                <h1>
+                <p className="auth-panel-kicker">
+                  {mode === 'forgot' ? '找回访问权限' : 'Supplier workspace'}
+                </p>
+                <h1 ref={headingRef} tabIndex={-1}>
                   {mode === 'signin'
                     ? '进入 Supplier'
                     : mode === 'signup'
@@ -346,20 +393,28 @@ function LoginStudio() {
                 <p>
                   {mode === 'forgot'
                     ? '输入受邀邮箱，我们会发送安全重置链接。'
-                    : '使用受邀邮箱登录你的内部测试工作区。'}
+                    : '使用受邀邮箱登录内部测试工作区。'}
                 </p>
               </div>
             </div>
 
-            <form className="auth-form" onSubmit={(event) => void submit(event)}>
+            <form
+              className="auth-form"
+              aria-busy={pending}
+              onSubmit={(event) => void submit(event)}
+            >
               <label className="auth-field">
-                <span>登录邮箱</span>
+                <span id="auth-email-label">登录邮箱</span>
                 <span className="auth-input-wrap">
                   <EnvelopeSimple aria-hidden="true" />
                   <input
+                    id="auth-email"
+                    name="email"
                     type="email"
                     autoComplete="email"
                     required
+                    aria-labelledby="auth-email-label"
+                    aria-describedby={error || message ? 'auth-form-message' : undefined}
                     value={email}
                     onChange={(event) => setEmail(event.target.value)}
                   />
@@ -367,14 +422,18 @@ function LoginStudio() {
               </label>
               {mode !== 'forgot' ? (
                 <label className="auth-field">
-                  <span>密码</span>
+                  <span id="auth-password-label">密码</span>
                   <span className="auth-input-wrap">
                     <Key aria-hidden="true" />
                     <input
+                      id="auth-password"
+                      name="password"
                       type="password"
                       autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
                       required
                       minLength={8}
+                      aria-labelledby="auth-password-label"
+                      aria-describedby={error || message ? 'auth-form-message' : undefined}
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}
                     />
@@ -383,13 +442,13 @@ function LoginStudio() {
               ) : null}
 
               {error ? (
-                <p className="auth-message is-error" role="alert">
+                <p id="auth-form-message" className="auth-message is-error" role="alert">
                   <WarningCircle aria-hidden="true" weight="fill" />
                   {error}
                 </p>
               ) : null}
               {message ? (
-                <p className="auth-message is-success" role="status">
+                <p id="auth-form-message" className="auth-message is-success" role="status">
                   <CheckCircle aria-hidden="true" weight="fill" />
                   {message}
                 </p>
@@ -411,14 +470,7 @@ function LoginStudio() {
 
             <div className="auth-panel-footer">
               {mode === 'signin' ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode('forgot');
-                    setError(undefined);
-                    setMessage(undefined);
-                  }}
-                >
+                <button type="button" onClick={() => selectMode('forgot')}>
                   忘记密码
                 </button>
               ) : null}
@@ -426,11 +478,7 @@ function LoginStudio() {
               {isSignupEnabled && mode !== 'forgot' ? (
                 <button
                   type="button"
-                  onClick={() => {
-                    setMode((current) => (current === 'signin' ? 'signup' : 'signin'));
-                    setError(undefined);
-                    setMessage(undefined);
-                  }}
+                  onClick={() => selectMode(mode === 'signin' ? 'signup' : 'signin')}
                 >
                   {mode === 'signin' ? '创建账号' : '返回登录'}
                 </button>
@@ -442,14 +490,7 @@ function LoginStudio() {
               ) : null}
 
               {mode === 'forgot' ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode('signin');
-                    setError(undefined);
-                    setMessage(undefined);
-                  }}
-                >
+                <button type="button" onClick={() => selectMode('signin')}>
                   返回密码登录
                 </button>
               ) : null}
@@ -457,46 +498,19 @@ function LoginStudio() {
           </div>
         </div>
 
-        {isLegalPagesEnabled ? (
-          <nav className="auth-legal-links" aria-label="帮助与法律信息">
-            <Link href="/help">帮助中心</Link>
-            <Link href="/privacy">隐私政策</Link>
-            <Link href="/terms">用户协议</Link>
-            <Link href="/account-deletion">账号注销</Link>
-          </nav>
-        ) : null}
-
-        <ol className="auth-workflow" aria-label="Supplier 经营流程">
-          <WorkflowStep icon={Storefront} title="货源管理" description="连接 1688" />
-          <WorkflowStep icon={Package} title="商品上架" description="发布到店铺" />
-          <WorkflowStep icon={CirclesFour} title="订单处理" description="订单与采购" />
-          <WorkflowStep icon={Truck} title="履约追踪" description="物流与售后" />
-        </ol>
+        <footer className="auth-stage-footer">
+          <span>Supplier · 邀请制内部测试</span>
+          {isLegalPagesEnabled ? (
+            <nav className="auth-legal-links" aria-label="帮助与法律信息">
+              <Link href="/help">帮助中心</Link>
+              <Link href="/privacy">隐私政策</Link>
+              <Link href="/terms">用户协议</Link>
+              <Link href="/account-deletion">账号注销</Link>
+            </nav>
+          ) : null}
+        </footer>
       </section>
     </main>
-  );
-}
-
-function WorkflowStep({
-  icon: IconComponent,
-  title,
-  description,
-}: {
-  icon: Icon;
-  title: string;
-  description: string;
-}) {
-  return (
-    <li>
-      <span className="auth-workflow-icon" aria-hidden="true">
-        <IconComponent weight="duotone" />
-      </span>
-      <span>
-        <strong>{title}</strong>
-        <small>{description}</small>
-      </span>
-      <ArrowRight className="auth-workflow-arrow" aria-hidden="true" />
-    </li>
   );
 }
 

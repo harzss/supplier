@@ -3,6 +3,7 @@ import { BadRequestException, ForbiddenException, Logger } from '@nestjs/common'
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
 import type { AiGatewayService } from '../ai/ai-gateway.service';
+import type { EntitlementAccessService } from '../entitlement/entitlement-access.service';
 import type { EntitlementService } from '../entitlement/entitlement.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import type { ShopTokenService } from '../shop/shop-token.service';
@@ -27,6 +28,14 @@ const USER: CurrentUser = {
   accessStatus: 'active',
   entitlementRevision: 1,
 };
+const STORED_USER = {
+  id: 1n,
+  plan: 'pro',
+  status: 'active',
+  entitlementSource: 'internal_beta',
+  entitlementAccessStatus: 'active',
+  entitlementRevision: 1,
+} as const;
 const CLIENT_REQUEST_ID = '8a4d5b1e-7d9a-4e60-9f81-3ce8f3f5a2d1';
 const SOURCE_OFFER_ID = '554456348334';
 const TASK_CREATED_AT = new Date('2026-08-04T07:00:00.000Z');
@@ -1365,7 +1374,7 @@ describe('PublishService', () => {
       errorMsg: '第一次失败',
       createdAt: new Date(),
       finishedAt: new Date(),
-      user: { id: 1n, plan: 'pro' },
+      user: STORED_USER,
       sourceProduct: {
         id: 2n,
         productId1688: SOURCE_OFFER_ID,
@@ -1416,7 +1425,7 @@ describe('PublishService', () => {
       errorMsg: null,
       createdAt: new Date(),
       finishedAt: null,
-      user: { id: 1n, plan: 'pro' },
+      user: STORED_USER,
       sourceProduct: {
         id: 2n,
         productId1688: SOURCE_OFFER_ID,
@@ -1544,6 +1553,105 @@ describe('PublishService', () => {
     expect(fixture.publishProduct).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['ENTITLEMENT_SUSPENDED', '当前订购权益已暂停'],
+    ['ACCOUNT_DISABLED', '账号已停用'],
+  ] as const)(
+    'stops before publishing when access changes to %s after the recovery lookup',
+    async (code, message) => {
+      const fixture = createFixture({ authMode: 'supabase' });
+      fixture.prisma.publishTask.findUnique.mockResolvedValue(
+        queuedTaskRecord({ aiOptions: { rewriteTitle: false } }),
+      );
+      let accessActive = true;
+      fixture.entitlementAccess.assertActive.mockImplementation(async () => {
+        if (!accessActive) throw new ForbiddenException({ code, message });
+        return { revision: 1 };
+      });
+      fixture.findProductByExternalId.mockImplementationOnce(async () => {
+        accessActive = false;
+        return null;
+      });
+
+      await expect(fixture.service.executeQueued(3n)).rejects.toMatchObject({ status: 403 });
+
+      expect(fixture.findProductByExternalId).toHaveBeenCalledOnce();
+      expect(fixture.publishProduct).not.toHaveBeenCalled();
+      expect(fixture.prisma.publishedProduct.upsert).not.toHaveBeenCalled();
+    },
+  );
+
+  it('persists a known platform success after entitlement suspension while retaining the lease', async () => {
+    const fixture = createFixture({ authMode: 'supabase' });
+    fixture.prisma.publishTask.findUnique.mockResolvedValue(
+      queuedTaskRecord({ aiOptions: { rewriteTitle: false } }),
+    );
+    let accessActive = true;
+    fixture.entitlementAccess.assertActive.mockImplementation(async () => {
+      if (!accessActive) {
+        throw new ForbiddenException({
+          code: 'ENTITLEMENT_SUSPENDED',
+          message: '当前订购权益已暂停',
+        });
+      }
+      return { revision: 1 };
+    });
+    fixture.publishProduct.mockImplementationOnce(async () => {
+      accessActive = false;
+      return { platformProductId: '998877' };
+    });
+    const lease = { assertOwned: vi.fn().mockResolvedValue(undefined) };
+
+    await expect(fixture.service.executeQueued(3n, lease)).resolves.toMatchObject({
+      status: 'success',
+      results: [expect.objectContaining({ platformProductId: '998877' })],
+    });
+
+    expect(fixture.publishProduct).toHaveBeenCalledOnce();
+    expect(fixture.prisma.publishedProduct.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ platformProductId: '998877' }),
+      }),
+    );
+  });
+
+  it('blocks an unknown suspended result until an explicit recovery finds the same product', async () => {
+    const fixture = createFixture({ authMode: 'supabase' });
+    fixture.prisma.publishTask.findUnique.mockResolvedValue(
+      queuedTaskRecord({ aiOptions: { rewriteTitle: false } }),
+    );
+    let accessActive = true;
+    fixture.entitlementAccess.assertActive.mockImplementation(async () => {
+      if (!accessActive) {
+        throw new ForbiddenException({
+          code: 'ENTITLEMENT_SUSPENDED',
+          message: '当前订购权益已暂停',
+        });
+      }
+      return { revision: 1 };
+    });
+    fixture.publishProduct.mockImplementationOnce(async () => {
+      accessActive = false;
+      throw new Error('Douyin publish request timed out');
+    });
+
+    await expect(fixture.service.executeQueued(3n)).rejects.toMatchObject({ status: 403 });
+    expect(fixture.publishProduct).toHaveBeenCalledOnce();
+    expect(fixture.findProductByExternalId).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.publishedProduct.upsert).not.toHaveBeenCalled();
+
+    accessActive = true;
+    fixture.findProductByExternalId.mockResolvedValueOnce({ platformProductId: '998877' });
+
+    await expect(fixture.service.executeQueued(3n)).resolves.toMatchObject({ status: 'success' });
+    expect(fixture.publishProduct).toHaveBeenCalledOnce();
+    expect(fixture.prisma.publishedProduct.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ platformProductId: '998877' }),
+      }),
+    );
+  });
+
   it('does not persist an old attempt after platform publishing returns without ownership', async () => {
     const fixture = createFixture();
     fixture.prisma.publishTask.findUnique.mockResolvedValue(
@@ -1662,7 +1770,7 @@ describe('PublishService', () => {
       errorMsg: null,
       createdAt: new Date(),
       finishedAt: null,
-      user: { id: 1n, plan: 'pro' },
+      user: STORED_USER,
       sourceProduct: {
         id: 2n,
         productId1688: SOURCE_OFFER_ID,
@@ -2468,7 +2576,7 @@ function queuedTaskRecord(overrides: Record<string, unknown> = {}) {
     errorMsg: null,
     createdAt: new Date(),
     finishedAt: null,
-    user: { id: 1n, plan: 'pro' },
+    user: STORED_USER,
     sourceProduct,
     publishedProducts: [],
     ...overrides,
@@ -2652,6 +2760,9 @@ function createFixture(
     getMonthlyPublishCount: vi.fn().mockResolvedValue(0),
     assertWithinQuota: vi.fn(),
   };
+  const entitlementAccess = {
+    assertActive: vi.fn().mockResolvedValue({ revision: USER.entitlementRevision }),
+  };
   const ai = {
     generateTitle: vi.fn().mockResolvedValue({ titles: ['AI 优化夏季纯棉短袖标题'] }),
     generateDetail: vi.fn().mockResolvedValue({
@@ -2750,6 +2861,7 @@ function createFixture(
   const service = new PublishService(
     prisma as unknown as PrismaService,
     entitlement as unknown as EntitlementService,
+    entitlementAccess as unknown as EntitlementAccessService,
     ai as unknown as AiGatewayService,
     shopTokens as unknown as ShopTokenService,
     adapters as unknown as PlatformAdapterFactory,
@@ -2770,6 +2882,7 @@ function createFixture(
     service,
     prisma,
     entitlement,
+    entitlementAccess,
     ai,
     shopTokens,
     adapters,

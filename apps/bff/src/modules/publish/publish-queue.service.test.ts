@@ -40,7 +40,7 @@ describe('PublishQueueService', () => {
         id: 7n,
         status: 'queued',
         attempts: 0,
-        task: { user: { entitlementAccessStatus: 'active' } },
+        task: { user: { status: 'active', entitlementAccessStatus: 'active' } },
       },
       data: expect.objectContaining({
         status: 'running',
@@ -62,7 +62,6 @@ describe('PublishQueueService', () => {
         status: 'running',
         attempts: 1,
         lockedBy: 'worker-1',
-        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: {
         status: 'completed',
@@ -85,7 +84,6 @@ describe('PublishQueueService', () => {
         status: 'running',
         attempts: 1,
         lockedBy: 'worker-1',
-        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: { lockedAt: expect.any(Date) },
     });
@@ -117,7 +115,7 @@ describe('PublishQueueService', () => {
     });
   });
 
-  it('does not claim or recover queue work for a suspended user', async () => {
+  it('does not claim or recover queue work for a suspended or disabled user', async () => {
     const fixture = createFixture();
     fixture.prisma.publishJob.findFirst.mockResolvedValue(null);
 
@@ -126,21 +124,21 @@ describe('PublishQueueService', () => {
     expect(fixture.prisma.publishJob.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          task: { user: { entitlementAccessStatus: 'active' } },
+          task: { user: { status: 'active', entitlementAccessStatus: 'active' } },
         }),
       }),
     );
     expect(fixture.prisma.publishJob.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          task: { user: { entitlementAccessStatus: 'active' } },
+          task: { user: { status: 'active', entitlementAccessStatus: 'active' } },
         }),
       }),
     );
     expect(fixture.prisma.publishTask.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          user: { entitlementAccessStatus: 'active' },
+          user: { status: 'active', entitlementAccessStatus: 'active' },
         }),
       }),
     );
@@ -161,7 +159,6 @@ describe('PublishQueueService', () => {
         status: 'running',
         attempts: 1,
         lockedBy: null,
-        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: expect.objectContaining({ status: 'retry_wait', lastError: 'timeout' }),
     });
@@ -183,7 +180,6 @@ describe('PublishQueueService', () => {
         status: 'running',
         attempts: 3,
         lockedBy: null,
-        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: expect.objectContaining({ status: 'dead', lastError: 'bad' }),
     });
@@ -203,6 +199,56 @@ describe('PublishQueueService', () => {
     expect(fixture.prisma.publishTask.update).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [0, 'failed'],
+    [1, 'partial'],
+  ] as const)(
+    'blocks an access-invalidated job with %s persisted products as %s',
+    async (publishedCount, taskStatus) => {
+      const fixture = createFixture();
+      fixture.prisma.publishJob.updateMany.mockResolvedValue({ count: 1 });
+      fixture.prisma.publishedProduct.count.mockResolvedValue(publishedCount);
+      const running = { ...JOB, status: 'running' as const, attempts: 1, lockedBy: 'worker-1' };
+
+      await expect(
+        fixture.service.blockForAccessChange(running, 'ENTITLEMENT_SUSPENDED: 当前订购权益已暂停'),
+      ).resolves.toBeUndefined();
+
+      expect(fixture.prisma.publishJob.updateMany).toHaveBeenCalledWith({
+        where: { id: 7n, status: 'running', attempts: 1, lockedBy: 'worker-1' },
+        data: {
+          status: 'dead',
+          lockedAt: null,
+          lockedBy: null,
+          lastError: 'ENTITLEMENT_SUSPENDED: 当前订购权益已暂停',
+        },
+      });
+      expect(fixture.prisma.publishTask.update).toHaveBeenCalledWith({
+        where: { id: 3n },
+        data: {
+          status: taskStatus,
+          errorMsg: 'ENTITLEMENT_SUSPENDED: 当前订购权益已暂停',
+          finishedAt: expect.any(Date),
+        },
+      });
+    },
+  );
+
+  it('does not block or rewrite a task after job ownership is lost', async () => {
+    const fixture = createFixture();
+    fixture.prisma.publishJob.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      fixture.service.blockForAccessChange(
+        { ...JOB, status: 'running', attempts: 1, lockedBy: 'worker-1' },
+        'ACCOUNT_DISABLED: 账号已停用',
+      ),
+    ).rejects.toThrow('所有权已变化');
+
+    expect(fixture.prisma.publishedProduct.count).not.toHaveBeenCalled();
+    expect(fixture.prisma.publishTask.update).not.toHaveBeenCalled();
+  });
+
   it('requeues the job and task atomically for a manual retry', async () => {
     const fixture = createFixture();
     fixture.prisma.publishTask.findFirst.mockResolvedValue({ id: 3n, status: 'failed' });
@@ -212,6 +258,14 @@ describe('PublishQueueService', () => {
       queued: true,
     });
     expect(fixture.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function));
+    expect(fixture.prisma.publishTask.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: 3n,
+        userId: 1n,
+        user: { status: 'active', entitlementAccessStatus: 'active' },
+      },
+      select: { id: true, status: true },
+    });
     expect(fixture.prisma.publishJob.upsert).toHaveBeenCalledWith({
       where: { taskId: 3n },
       create: { taskId: 3n, maxAttempts: 3 },
@@ -241,6 +295,9 @@ function createFixture() {
       findFirst: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue({}),
+    },
+    publishedProduct: {
+      count: vi.fn().mockResolvedValue(0),
     },
   };
   prisma.$transaction.mockImplementation(

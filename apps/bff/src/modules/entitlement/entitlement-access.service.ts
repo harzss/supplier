@@ -1,6 +1,7 @@
 import {
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -13,6 +14,11 @@ type EntitlementReader = Pick<Prisma.TransactionClient, 'user'>;
 export interface EntitlementAccessSnapshot {
   revision: number;
 }
+
+export type EntitlementAccessStopCode =
+  | 'ENTITLEMENT_SUSPENDED'
+  | 'ACCOUNT_DISABLED'
+  | 'ENTITLEMENT_REVISION_CHANGED';
 
 @Injectable()
 export class EntitlementAccessService {
@@ -68,6 +74,26 @@ export function entitlementSuspended(): ForbiddenException {
     code: 'ENTITLEMENT_SUSPENDED',
     message: '当前订购权益已暂停，仅可查看权益与审计记录，或清理已保存的授权凭证',
   });
+}
+
+export function entitlementAccessStopCode(error: unknown): EntitlementAccessStopCode | null {
+  if (!(error instanceof HttpException)) return null;
+  const response = error.getResponse();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) return null;
+  const code = (response as { code?: unknown }).code;
+  return code === 'ENTITLEMENT_SUSPENDED' ||
+    code === 'ACCOUNT_DISABLED' ||
+    code === 'ENTITLEMENT_REVISION_CHANGED'
+    ? code
+    : null;
+}
+
+export function entitlementAccessStopMessage(error: unknown): string | null {
+  const code = entitlementAccessStopCode(error);
+  if (!code) return null;
+  const response = (error as HttpException).getResponse() as { message?: unknown };
+  const message = response.message;
+  return `${code}: ${typeof message === 'string' && message ? message : '账号访问状态已变化'}`;
 }
 
 function accountDisabled(): ForbiddenException {

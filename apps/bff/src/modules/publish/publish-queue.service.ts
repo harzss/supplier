@@ -27,7 +27,7 @@ export class PublishQueueService {
         where: {
           status: { in: ['queued', 'retry_wait'] },
           nextRunAt: { lte: now },
-          task: { user: { entitlementAccessStatus: 'active' } },
+          task: { user: { status: 'active', entitlementAccessStatus: 'active' } },
         },
         orderBy: [{ nextRunAt: 'asc' }, { id: 'asc' }],
       });
@@ -37,7 +37,7 @@ export class PublishQueueService {
           id: candidate.id,
           status: candidate.status,
           attempts: candidate.attempts,
-          task: { user: { entitlementAccessStatus: 'active' } },
+          task: { user: { status: 'active', entitlementAccessStatus: 'active' } },
         },
         data: {
           status: 'running',
@@ -61,7 +61,6 @@ export class PublishQueueService {
         status: 'running',
         attempts: job.attempts,
         lockedBy: job.lockedBy,
-        task: { user: { entitlementAccessStatus: 'active' } },
       },
       data: {
         status: 'completed',
@@ -123,6 +122,32 @@ export class PublishQueueService {
     return 'retry_wait';
   }
 
+  async blockForAccessChange(job: PublishJob, error: string): Promise<void> {
+    const message = error.slice(0, 1000);
+    const finishedAt = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.publishJob.updateMany({
+        where: ownedJobWhere(job),
+        data: {
+          status: 'dead',
+          lockedAt: null,
+          lockedBy: null,
+          lastError: message,
+        },
+      });
+      assertOwnedTransition(updated.count);
+      const publishedCount = await tx.publishedProduct.count({ where: { taskId: job.taskId } });
+      await tx.publishTask.update({
+        where: { id: job.taskId },
+        data: {
+          status: publishedCount > 0 ? 'partial' : 'failed',
+          errorMsg: message,
+          finishedAt,
+        },
+      });
+    });
+  }
+
   async manualRetry(
     userId: bigint,
     taskIdValue: string,
@@ -130,7 +155,11 @@ export class PublishQueueService {
     const taskId = parseTaskId(taskIdValue);
     await this.prisma.$transaction(async (tx) => {
       const task = await tx.publishTask.findFirst({
-        where: { id: taskId, userId },
+        where: {
+          id: taskId,
+          userId,
+          user: { status: 'active', entitlementAccessStatus: 'active' },
+        },
         select: { id: true, status: true },
       });
       if (!task) throw new NotFoundException('铺货任务不存在');
@@ -164,7 +193,7 @@ export class PublishQueueService {
       where: {
         status: 'running',
         lockedAt: { lt: new Date(now.getTime() - PUBLISH_JOB_STALE_MS) },
-        task: { user: { entitlementAccessStatus: 'active' } },
+        task: { user: { status: 'active', entitlementAccessStatus: 'active' } },
       },
       data: {
         status: 'retry_wait',
@@ -182,7 +211,7 @@ export class PublishQueueService {
         status: 'pending',
         job: { is: null },
         createdAt: { lt: new Date(now.getTime() - ORPHAN_TASK_GRACE_MS) },
-        user: { entitlementAccessStatus: 'active' },
+        user: { status: 'active', entitlementAccessStatus: 'active' },
       },
       orderBy: { createdAt: 'asc' },
       take: 50,
@@ -204,12 +233,13 @@ function retryDelayMs(attempts: number): number {
 }
 
 function ownedJobWhere(job: PublishJob) {
+  // Access eligibility decides whether another external effect may start. It must not revoke the
+  // current worker's lease before that worker records an effect which has already returned.
   return {
     id: job.id,
     status: 'running' as const,
     attempts: job.attempts,
     lockedBy: job.lockedBy,
-    task: { user: { entitlementAccessStatus: 'active' as const } },
   };
 }
 

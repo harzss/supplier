@@ -1,7 +1,11 @@
 import { ConflictException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
-import { EntitlementAccessService } from './entitlement-access.service';
+import {
+  EntitlementAccessService,
+  entitlementAccessStopCode,
+  entitlementAccessStopMessage,
+} from './entitlement-access.service';
 
 function serviceWith(result: unknown) {
   const findUnique =
@@ -89,4 +93,19 @@ describe('EntitlementAccessService', () => {
       expect(fixture.findUnique).not.toHaveBeenCalled();
     },
   );
+
+  it('identifies only durable access-stop errors for queue terminalization', () => {
+    const suspended = new ForbiddenException({
+      code: 'ENTITLEMENT_SUSPENDED',
+      message: '当前订购权益已暂停',
+    });
+
+    expect(entitlementAccessStopCode(suspended)).toBe('ENTITLEMENT_SUSPENDED');
+    expect(entitlementAccessStopMessage(suspended)).toBe(
+      'ENTITLEMENT_SUSPENDED: 当前订购权益已暂停',
+    );
+    expect(entitlementAccessStopCode(new ServiceUnavailableException('database unavailable'))).toBe(
+      null,
+    );
+  });
 });

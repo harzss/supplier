@@ -1,4 +1,5 @@
 import type { ConfigService } from '@nestjs/config';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 import type { PublishJob } from '@supplier/db';
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../common/prisma.module';
@@ -126,7 +127,7 @@ describe('PublishQueueWorker', () => {
     }
   });
 
-  it('does not call the platform adapter or change state after suspension loses ownership', async () => {
+  it('does not call the platform adapter or change state after the job lease is lost', async () => {
     const queue = {
       claimNext: vi.fn().mockResolvedValue(JOB),
       renew: vi
@@ -157,4 +158,48 @@ describe('PublishQueueWorker', () => {
     expect(queue.complete).not.toHaveBeenCalled();
     expect(queue.fail).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [
+      'ENTITLEMENT_SUSPENDED',
+      new ForbiddenException({ code: 'ENTITLEMENT_SUSPENDED', message: '当前订购权益已暂停' }),
+      'ENTITLEMENT_SUSPENDED: 当前订购权益已暂停',
+    ],
+    [
+      'ACCOUNT_DISABLED',
+      new ForbiddenException({ code: 'ACCOUNT_DISABLED', message: '账号已停用' }),
+      'ACCOUNT_DISABLED: 账号已停用',
+    ],
+    [
+      'ENTITLEMENT_REVISION_CHANGED',
+      new ConflictException({ code: 'ENTITLEMENT_REVISION_CHANGED', message: '权益状态已变化' }),
+      'ENTITLEMENT_REVISION_CHANGED: 权益状态已变化',
+    ],
+  ] as const)(
+    'blocks the job for explicit recovery when access stops with %s',
+    async (_code, error, failure) => {
+      const queue = {
+        claimNext: vi.fn().mockResolvedValue(JOB),
+        renew: vi.fn().mockResolvedValue(undefined),
+        complete: vi.fn(),
+        fail: vi.fn(),
+        blockForAccessChange: vi.fn(),
+      } as unknown as PublishQueueService;
+      const publish = {
+        executeQueued: vi.fn().mockRejectedValue(error),
+      } as unknown as PublishService;
+      const worker = new PublishQueueWorker(
+        { get: vi.fn() } as unknown as ConfigService,
+        queue,
+        publish,
+        { reconnect: vi.fn() } as unknown as PrismaService,
+      );
+
+      await expect(worker.runOnce()).resolves.toBe(true);
+
+      expect(queue.blockForAccessChange).toHaveBeenCalledWith(JOB, failure);
+      expect(queue.fail).not.toHaveBeenCalled();
+      expect(queue.complete).not.toHaveBeenCalled();
+    },
+  );
 });

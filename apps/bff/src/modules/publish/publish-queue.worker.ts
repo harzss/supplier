@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import type { PublishJob } from '@supplier/db';
 import { hostname } from 'node:os';
 import { PrismaService } from '../../common/prisma.module';
+import { entitlementAccessStopMessage } from '../entitlement/entitlement-access.service';
 import {
   PUBLISH_JOB_HEARTBEAT_MS,
   PublishJobLeaseError,
@@ -59,6 +60,19 @@ export class PublishQueueWorker implements OnModuleInit, OnModuleDestroy {
         }
       } catch (err) {
         await heartbeat.stop();
+        const accessFailure = entitlementAccessStopMessage(err);
+        if (accessFailure) {
+          try {
+            await this.queue.blockForAccessChange(job, accessFailure);
+          } catch (transitionError) {
+            if (isPublishJobLeaseError(transitionError) && transitionError.reason === 'lost') {
+              this.logger.warn(`铺货队列任务 ${job.id} 在停权提交前已被接管`);
+              return true;
+            }
+            throw transitionError;
+          }
+          return true;
+        }
         if (isPublishJobLeaseError(err) && err.reason === 'lost') {
           this.logger.warn(`铺货队列任务 ${job.id} 租约已丢失，旧 worker 停止提交`);
           return true;

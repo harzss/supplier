@@ -23,6 +23,10 @@ import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../common/prisma.module';
 import { AiGatewayService } from '../ai/ai-gateway.service';
 import { validateTitleForPlatform } from '../ai/prompts/title.prompt';
+import {
+  EntitlementAccessService,
+  entitlementAccessStopCode,
+} from '../entitlement/entitlement-access.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import type { CurrentUser } from '../entitlement/user-context.service';
 import { ShopTokenService } from '../shop/shop-token.service';
@@ -237,6 +241,7 @@ export class PublishService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly entitlement: EntitlementService,
+    private readonly entitlementAccess: EntitlementAccessService,
     private readonly ai: AiGatewayService,
     private readonly shopTokens: ShopTokenService,
     private readonly adapters: PlatformAdapterFactory,
@@ -303,6 +308,14 @@ export class PublishService {
       await assertPublishExecutionOwned(lease);
       return completedResult(queuedTask);
     }
+    const entitlementRevision = this.demoMode
+      ? queuedTask.user.entitlementRevision
+      : (
+          await this.entitlementAccess.assertActive(
+            queuedTask.userId,
+            queuedTask.user.entitlementRevision,
+          )
+        ).revision;
     assertSourceAvailable(queuedTask.sourceProduct);
     assertPreviewPricingUnchanged(
       queuedTask.pricingStrategy ?? undefined,
@@ -345,8 +358,8 @@ export class PublishService {
           ? queuedTask.user.plan
           : ('free' as const),
       entitlementSource: queuedTask.user.entitlementSource,
-      accessStatus: queuedTask.user.entitlementAccessStatus,
-      entitlementRevision: queuedTask.user.entitlementRevision,
+      accessStatus: 'active',
+      entitlementRevision,
     };
     const categoryIdByPlatform = new Map(
       confirmedMappings.map((mapping) => [mapping.platform, mapping.categoryId]),
@@ -1328,6 +1341,7 @@ export class PublishService {
     for (const shop of shops) {
       await assertPublishExecutionOwned(lease);
       try {
+        await this.assertPublishAccessActive(user);
         const adapter = this.adapters.create(shop);
         const externalProductId = publishExternalId(task.publishExternalIds, shop.id);
         const categoryId = resolveCategoryId(
@@ -1359,6 +1373,7 @@ export class PublishService {
           costPrice,
         };
         const pub = await this.publishWithRecovery(
+          user,
           adapter,
           accessToken,
           publishInput,
@@ -1589,6 +1604,8 @@ export class PublishService {
         success++;
       } catch (err) {
         if (isPublishJobLeaseError(err)) throw err;
+        if (entitlementAccessStopCode(err)) throw err;
+        await this.assertPublishAccessActive(user);
         this.logger.warn(`店铺 ${shop.id} 发布失败：${(err as Error).message}`);
         results.push({
           shopId: shop.id.toString(),
@@ -1675,6 +1692,7 @@ export class PublishService {
   }
 
   private async publishWithRecovery(
+    user: CurrentUser,
     adapter: PlatformAdapter,
     accessToken: string,
     input: PublishProductDto,
@@ -1687,6 +1705,7 @@ export class PublishService {
     }
     if (requireRecovery && adapter.findProductByExternalId) {
       await assertPublishExecutionOwned(lease);
+      await this.assertPublishAccessActive(user);
       const existing = await adapter.findProductByExternalId(accessToken, externalProductId);
       await assertPublishExecutionOwned(lease);
       if (existing) {
@@ -1694,9 +1713,12 @@ export class PublishService {
         return existing;
       }
     }
+    await assertPublishExecutionOwned(lease);
+    await this.assertPublishAccessActive(user);
     try {
-      await assertPublishExecutionOwned(lease);
       const result = await adapter.publishProduct(accessToken, input);
+      // After the mutation starts, preserve its known outcome under the job lease even if access
+      // changes concurrently. The next external mutation is protected by a fresh access check.
       await assertPublishExecutionOwned(lease);
       return result;
     } catch (publishError) {
@@ -1714,6 +1736,7 @@ export class PublishService {
         if (isPublishJobLeaseError(recoveryError)) throw recoveryError;
         this.logger.warn(`平台发布结果恢复查询失败：${safeErrorMessage(recoveryError)}`);
       }
+      await this.assertPublishAccessActive(user);
       throw publishError;
     }
   }
@@ -1736,6 +1759,11 @@ export class PublishService {
     if (strategy && strategy.mode !== 'fixed_markup') {
       this.entitlement.assertFeature(user.plan, 'ai.pricing');
     }
+  }
+
+  private async assertPublishAccessActive(user: CurrentUser): Promise<void> {
+    if (this.demoMode) return;
+    await this.entitlementAccess.assertActive(user.userId, user.entitlementRevision);
   }
 
   async updatePublishedProduct(
